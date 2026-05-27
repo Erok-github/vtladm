@@ -1,0 +1,72 @@
+#!/bin/sh
+# systemd wrapper: read web bind vars from vtl.conf, then exec vtladm serve.
+set -eu
+
+PREFIX="${VTL_PREFIX:-/opt/vtladm}"
+CONF="${VTL_CONF_PATH:-$PREFIX/var/vtl.conf}"
+VTLADM_WEB_HOST="127.0.0.1"
+VTLADM_WEB_PORT="8765"
+VTLADM_WEB_COOKIE_SECURE=""
+_VTLADM="$PREFIX/bin/vtladm"
+
+_vtl_conf_get() {
+  _key="$1"
+  _default="$2"
+  if [ -f "$CONF" ]; then
+    _val=$(grep -E "^[[:space:]]*${_key}[[:space:]]*=" "$CONF" 2>/dev/null | tail -1 \
+      | sed 's/^[^=]*=//;s/^[[:space:]]*//;s/[[:space:]]*$//;s/^"//;s/"$//' | tr -d '\r') || _val=""
+    if [ -n "$_val" ]; then
+      printf '%s' "$_val"
+      return 0
+    fi
+  fi
+  [ -n "$_default" ] && printf '%s' "$_default"
+}
+
+if [ -f "$CONF" ]; then
+  VTLADM_WEB_HOST=$(_vtl_conf_get web_host "127.0.0.1")
+  VTLADM_WEB_PORT=$(_vtl_conf_get web_port "8765")
+  VTLADM_WEB_COOKIE_SECURE=$(_vtl_conf_get web_cookie_secure "")
+fi
+
+VTLADM_WEB_PORT=$(printf '%s' "$VTLADM_WEB_PORT" | tr -cd '0-9')
+[ -n "$VTLADM_WEB_PORT" ] || VTLADM_WEB_PORT=8765
+
+if [ ! -f "$_VTLADM" ]; then
+  echo "vtladm-web-serve: missing: $_VTLADM" >&2
+  exit 1
+fi
+if [ ! -x "$_VTLADM" ]; then
+  echo "vtladm-web-serve: not executable: $_VTLADM (chmod +x or reinstall)" >&2
+  exit 1
+fi
+
+if command -v findmnt >/dev/null 2>&1; then
+  _mnt_opts=$(findmnt -no OPTIONS -T "$_VTLADM" 2>/dev/null) || _mnt_opts=""
+  case "$_mnt_opts" in
+    *noexec*)
+      echo "vtladm-web-serve: $_VTLADM is on a noexec mount ($_mnt_opts); move $PREFIX or remount with exec" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+_elf=$(dd if="$_VTLADM" bs=1 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')
+if [ "$_elf" != "7f454c46" ]; then
+  echo "vtladm-web-serve: $_VTLADM is not a Linux ELF binary (magic=${_elf:-empty})" >&2
+  command -v file >/dev/null 2>&1 && file "$_VTLADM" >&2 || true
+  echo "  Rebuild on this host: cd /root/vtladm/userspace && cargo build --release" >&2
+  exit 1
+fi
+
+export VTL_CONF_PATH="${VTL_CONF_PATH:-$PREFIX/var/vtl.conf}"
+[ -n "$VTLADM_WEB_COOKIE_SECURE" ] && export VTLADM_WEB_COOKIE_SECURE
+cd "$PREFIX/var" 2>/dev/null || cd / || exit 1
+
+if ! "$_VTLADM" --help >/dev/null 2>&1; then
+  echo "vtladm-web-serve: $_VTLADM --help failed (wrong arch or missing dynamic linker?)" >&2
+  command -v ldd >/dev/null 2>&1 && ldd "$_VTLADM" >&2 || true
+  exit 1
+fi
+
+exec "$_VTLADM" serve --host "$VTLADM_WEB_HOST" --port "$VTLADM_WEB_PORT"
