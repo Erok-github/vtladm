@@ -49,7 +49,8 @@ struct vtl_create_req {
 	char name[64];
 	u64 size;
 	u8  density;
-	u8  __pad[7];
+	u8  flags;  /* VTLMETA flags byte (compression, algorithm) */
+	u8  __pad[6];
 };
 
 struct vtl_load_req {
@@ -156,7 +157,7 @@ static long vtl_ioctl_create_tape(void __user *uarg)
 	if (create_req.density == 0)
 		create_req.density = VTL_DEFAULT_DENSITY;
 	return vtl_tape_create(create_req.name, create_req.size,
-			       create_req.density);
+			       create_req.density, create_req.flags);
 }
 
 static long vtl_ioctl_load_tape(void __user *uarg)

@@ -564,14 +564,20 @@ fn meta_image_path(tape_path: &Path) -> PathBuf {
     p
 }
 
+/// VTLMETA flags byte bit definitions
+const VTLMETA_FLAG_COMPRESSED: u8 = 0x01;
+const VTLMETA_FLAG_ALGO_SHIFT: u8 = 1;
+const VTLMETA_ALGO_ZLIB: u8 = 1;
+const VTLMETA_ALGO_LZO: u8 = 2;
+
 /// Write VTLMETA sidecar file (24 bytes, little-endian)
-fn write_vtlmeta(tape_path: &Path, density: u8) -> Result<(), VtlError> {
+fn write_vtlmeta(tape_path: &Path, density: u8, flags: u8) -> Result<(), VtlError> {
     use std::io::Write;
     let meta_path = meta_image_path(tape_path);
     let mut buf = Vec::with_capacity(24);
     buf.write_all(&0x564C544Du32.to_le_bytes())?;  // magic "VTML"
     buf.write_all(&1u16.to_le_bytes())?;            // version
-    buf.write_all(&[density, 0u8])?;                // density + flags
+    buf.write_all(&[density, flags])?;              // density + flags
     buf.write_all(&[0u8; 16])?;                     // reserved
     let mut f = File::create(&meta_path)
         .map_err(VtlError::IoError)?;
@@ -580,21 +586,21 @@ fn write_vtlmeta(tape_path: &Path, density: u8) -> Result<(), VtlError> {
     Ok(())
 }
 
-/// Read VTLMETA sidecar file, returns density code
-fn read_vtlmeta(tape_path: &Path) -> Result<u8, VtlError> {
+/// Read VTLMETA sidecar file, returns (density, flags)
+fn read_vtlmeta(tape_path: &Path) -> Result<(u8, u8), VtlError> {
     use std::io::Read;
     let meta_path = meta_image_path(tape_path);
     let mut f = match File::open(&meta_path) {
         Ok(f) => f,
-        Err(_) => return Ok(DENSITY_DEFAULT),  // missing sidecar -> default
+        Err(_) => return Ok((DENSITY_DEFAULT, 0)),  // missing sidecar -> default
     };
     let mut buf = [0u8; 24];
     f.read_exact(&mut buf)?;
     let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
     if magic != 0x564C544D {
-        return Ok(DENSITY_DEFAULT);  // bad magic -> default
+        return Ok((DENSITY_DEFAULT, 0));  // bad magic -> default
     }
-    Ok(buf[6])  // density at offset 6
+    Ok((buf[6], buf[7]))  // density at offset 6, flags at offset 7
 }
 
 fn table_exists(conn: &Connection, table: &str) -> Result<bool, rusqlite::Error> {
@@ -1223,7 +1229,7 @@ pub(crate) fn create_tapes_batch(
     let r = (|| -> Result<(), VtlError> {
         for (name, size_s, density) in items {
             let size = parse_size(size_s)?;
-            create_tape(name, size, shelf, *density)?;
+            create_tape(name, size, shelf, *density, false, None)?;
         }
         Ok(())
     })();
@@ -1300,7 +1306,7 @@ pub(crate) fn create_auto_named_tapes_batch(
     set_current_library(library);
     let r = (|| -> Result<(), VtlError> {
         for name in &names {
-            create_tape(name, size, shelf, density)?;
+            create_tape(name, size, shelf, density, false, None)?;
         }
         Ok(())
     })();
@@ -1640,6 +1646,10 @@ struct VtlConfig {
     kernel_personality: String,
     /// Patrol strict mode: 0/false = warn only, 1/true = treat spec mismatch as error.
     patrol_strict: bool,
+    /// Enable LTO hardware compression simulation (default true). Stored in VTLMETA sidecar flags.
+    compression: bool,
+    /// Compression algorithm: "lzo" (default) or "zlib". Stored in VTLMETA sidecar flags.
+    compression_algorithm: String,
 }
 
 const DEFAULT_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
@@ -1811,6 +1821,16 @@ fn merge_env_transport_and_log(config: &mut VtlConfig) {
             config.kernel_geometry_mode = m;
         }
     }
+    if let Ok(s) = std::env::var("VTL_COMPRESSION") {
+        let t = s.trim().to_ascii_lowercase();
+        config.compression = matches!(t.as_str(), "1" | "true" | "yes" | "on");
+    }
+    if let Ok(s) = std::env::var("VTL_COMPRESSION_ALGO") {
+        let t = s.trim().to_ascii_lowercase();
+        if matches!(t.as_str(), "zlib" | "lzo") {
+            config.compression_algorithm = t;
+        }
+    }
 }
 
 fn apply_vtl_conf_kv(key: &str, value: &str, config: &mut VtlConfig) {
@@ -1958,6 +1978,20 @@ fn apply_vtl_conf_kv(key: &str, value: &str, config: &mut VtlConfig) {
                 let t = value.trim();
                 if !t.is_empty() {
                     config.kernel_personality = t.to_string();
+                }
+            }
+        }
+        "compression" => {
+            if std::env::var("VTL_COMPRESSION").is_err() {
+                let t = value.trim().to_ascii_lowercase();
+                config.compression = matches!(t.as_str(), "1" | "true" | "yes" | "on");
+            }
+        }
+        "compression_algorithm" => {
+            if std::env::var("VTL_COMPRESSION_ALGO").is_err() {
+                let t = value.trim().to_ascii_lowercase();
+                if matches!(t.as_str(), "zlib" | "lzo") {
+                    config.compression_algorithm = t;
                 }
             }
         }
@@ -2512,6 +2546,8 @@ fn get_config_uncached() -> VtlConfig {
         auto_sync_db_from_kernel: true,
         kernel_personality: "vtl".to_string(),
         patrol_strict: false,
+        compression: true,
+        compression_algorithm: "lzo".to_string(),
     };
 
     if let Ok(env_db) = std::env::var("VTL_DB_PATH") {
@@ -2719,6 +2755,13 @@ web_port=8765
 # Cookie Secure flag: 0 = off (HTTP), 1 = on (HTTPS).
 # Set to 0 if accessing via HTTP, otherwise browser will drop the session cookie.
 web_cookie_secure=0
+
+# ---- LTO Hardware Compression Simulation ----
+
+# Enable LTO hardware compression simulation (on/off, true/false, 1/0)
+compression=true
+# Compression algorithm: lzo (default, faster) or zlib (better ratio)
+compression_algorithm=lzo
 
 # ---- Patrol (formerly /etc/default/vtladm) ----
 
@@ -2956,6 +2999,12 @@ enum Commands {
         density: String,
         #[arg(short, long)]
         tags: Vec<String>,
+        /// 关闭硬件压缩模拟（默认由 vtl.conf 控制：compression=true）
+        #[arg(long)]
+        no_compression: bool,
+        /// 压缩算法: zlib 或 lzo（默认由 vtl.conf compression_algorithm 控制）
+        #[arg(long = "compression-algorithm")]
+        cli_compression_algorithm: Option<String>,
     },
     DeleteTape {
         name: String,
@@ -3034,6 +3083,12 @@ enum Commands {
         density: String,
         #[arg(short, long)]
         tags: Vec<String>,
+        /// 关闭硬件压缩模拟（默认由 vtl.conf 控制）
+        #[arg(long)]
+        no_compression: bool,
+        /// 压缩算法: zlib 或 lzo
+        #[arg(long = "compression-algorithm")]
+        cli_compression_algorithm: Option<String>,
     },
     BatchImport {
         #[arg(short, long)]
@@ -3425,7 +3480,9 @@ pub(crate) fn format_size(bytes: u64) -> String {
     }
 }
 
-fn create_tape(name: &str, size: u64, shelf_name: Option<&str>, density: u8) -> Result<(), VtlError> {
+fn create_tape(name: &str, size: u64, shelf_name: Option<&str>, density: u8,
+               no_compression: bool, compression_algorithm_override: Option<&str>)
+               -> Result<(), VtlError> {
     validate_tape_name(name)?;
     check_quota(size)?;
     validate_tape_capacity(size, density)?;
@@ -3483,7 +3540,21 @@ fn create_tape(name: &str, size: u64, shelf_name: Option<&str>, density: u8) -> 
     let file = File::create(&image_path)?;
     file.set_len(size)?;
     file.sync_all()?;
-    let _ = write_vtlmeta(&image_path, density);
+    let cfg = get_config();
+    let effective_compression = !no_compression && cfg.compression;
+    let effective_algo = compression_algorithm_override
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| cfg.compression_algorithm.clone());
+    let meta_flags = if effective_compression {
+        let algo_code = match effective_algo.as_str() {
+            "zlib" => VTLMETA_ALGO_ZLIB,
+            _ => VTLMETA_ALGO_LZO,
+        };
+        VTLMETA_FLAG_COMPRESSED | (algo_code << VTLMETA_FLAG_ALGO_SHIFT)
+    } else {
+        0u8
+    };
+    let _ = write_vtlmeta(&image_path, density, meta_flags);
 
     let barcode = generate_barcode();
     let tx = conn.transaction()?;
@@ -3635,6 +3706,8 @@ fn batch_create_tapes(
     prefix: &str,
     tags: &[String],
     density: u8,
+    no_compression: bool,
+    compression_algorithm_override: Option<&str>,
 ) -> Result<(), VtlError> {
     log_message(&format!(
         "Batch creating {} tapes with prefix '{}'",
@@ -3643,7 +3716,7 @@ fn batch_create_tapes(
 
     for i in 0..count {
         let name = format!("{}_{:04}", prefix, i);
-        create_tape(&name, size, None, density)?;
+        create_tape(&name, size, None, density, no_compression, compression_algorithm_override)?;
 
         let mut conn = init_db()?;
         let library_id = resolve_library_id(&conn, &current_library_name())?;
@@ -4869,9 +4942,34 @@ fn apply_vtl_conf_set_kv(key: &str, value: &str) -> Result<(), VtlError> {
             update_primary_vtl_conf_kv(key, norm)?;
             println!("vtl.conf: {}={}", key, norm);
         }
+        "compression" => {
+            let t = value.trim().to_ascii_lowercase();
+            if !matches!(t.as_str(), "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off") {
+                return Err(VtlError::InvalidParameter(format!(
+                    "compression: expected true/false"
+                )));
+            }
+            let norm = if matches!(t.as_str(), "true" | "1" | "yes" | "on") {
+                "true"
+            } else {
+                "false"
+            };
+            update_primary_vtl_conf_kv(key, norm)?;
+            println!("vtl.conf: {}={}", key, norm);
+        }
+        "compression_algorithm" => {
+            let t = value.trim().to_ascii_lowercase();
+            if !matches!(t.as_str(), "zlib" | "lzo") {
+                return Err(VtlError::InvalidParameter(format!(
+                    "compression_algorithm: expected zlib or lzo"
+                )));
+            }
+            update_primary_vtl_conf_kv(key, &t)?;
+            println!("vtl.conf: {}={}", key, t);
+        }
         _ => {
             return Err(VtlError::InvalidParameter(format!(
-                "unknown vtl.conf key: {} (supported: robot_sync, auto_sync_db_from_kernel, auto_reconcile_pull)",
+                "unknown vtl.conf key: {} (supported: robot_sync, auto_sync_db_from_kernel, auto_reconcile_pull, compression, compression_algorithm)",
                 key
             )));
         }
@@ -5049,6 +5147,9 @@ fn config_show() -> Result<(), VtlError> {
     println!("  Database path: {}", config.db_path.display());
     println!("  Tape directory: {}", config.tape_dir.display());
     println!("  Log directory: {}", config.log_dir.display());
+    println!("  Compression: {} (algorithm: {})",
+             if config.compression { "on" } else { "off" },
+             config.compression_algorithm);
     println!("  max_drives: {}", max_drives);
     println!("  slots: {}", slots);
     println!("  mailslots: {}", mailslots);
@@ -5245,7 +5346,7 @@ fn import_tape(path: &str, slot: i32) -> Result<(), VtlError> {
         let dst_meta = meta_image_path(&dest_path);
         let _ = fs::copy(&src_meta, &dst_meta);
     }
-    let density = read_vtlmeta(source_path).unwrap_or(DENSITY_DEFAULT);
+    let (density, _flags) = read_vtlmeta(source_path).unwrap_or((DENSITY_DEFAULT, 0));
 
     let metadata = source_path.metadata()?;
     let barcode = generate_barcode();
@@ -5913,6 +6014,8 @@ fn main() -> Result<(), VtlError> {
             shelf,
             density,
             tags,
+            no_compression,
+            cli_compression_algorithm,
         } => {
             let size_bytes = parse_size(size).unwrap_or_else(|e| {
                 log_error("main", &e.to_string());
@@ -5923,7 +6026,8 @@ fn main() -> Result<(), VtlError> {
                 eprintln!("Error: Unknown density '{}', using Default LTO", density);
                 DENSITY_DEFAULT
             });
-            create_tape(name, size_bytes, shelf.as_deref(), density_code)?;
+            create_tape(name, size_bytes, shelf.as_deref(), density_code,
+                        *no_compression, cli_compression_algorithm.as_deref())?;
 
             if !tags.is_empty() {
                 let mut conn = init_db()?;
@@ -6051,6 +6155,8 @@ fn main() -> Result<(), VtlError> {
             prefix,
             density,
             tags,
+            no_compression,
+            cli_compression_algorithm,
         } => {
             let size_bytes = parse_size(size).unwrap_or_else(|e| {
                 log_error("main", &e.to_string());
@@ -6061,7 +6167,8 @@ fn main() -> Result<(), VtlError> {
                 eprintln!("Error: Unknown density '{}', using Default LTO", density);
                 DENSITY_DEFAULT
             });
-            batch_create_tapes(*count, size_bytes, prefix, tags, density_code)?;
+            batch_create_tapes(*count, size_bytes, prefix, tags, density_code,
+                               *no_compression, cli_compression_algorithm.as_deref())?;
         }
         Commands::BatchImport {
             directory,
@@ -6179,6 +6286,8 @@ pub(crate) fn test_baseline_vtl_config() -> VtlConfig {
         auto_sync_db_from_kernel: false,
         kernel_personality: "vtl".to_string(),
         patrol_strict: false,
+        compression: true,
+        compression_algorithm: "lzo".to_string(),
     }
 }
 
@@ -6686,10 +6795,10 @@ mod tests {
         let result = create_named_library("default", 2, 4);
         assert!(result.is_ok());
 
-        let result = create_tape("test_tape_1", 10 * 1024 * 1024, None, 0x40);
+        let result = create_tape("test_tape_1", 10 * 1024 * 1024, None, 0x40, false, None);
         assert!(result.is_ok());
 
-        let result = create_tape("test_tape_2", 20 * 1024 * 1024, None, 0x40);
+        let result = create_tape("test_tape_2", 20 * 1024 * 1024, None, 0x40, false, None);
         assert!(result.is_ok());
 
         let result = list_tapes();
@@ -6740,7 +6849,7 @@ mod tests {
         let dir = prepare_temp_vtl("snapshot_test");
 
         let _ = create_named_library("default", 1, 1);
-        let _ = create_tape("snap_test", 5 * 1024 * 1024, None, 0x40);
+        let _ = create_tape("snap_test", 5 * 1024 * 1024, None, 0x40, false, None);
 
         let result = snapshot_tape("snap_test", "snap_001");
         assert!(result.is_ok());
@@ -6759,7 +6868,7 @@ mod tests {
         let dir = prepare_temp_vtl("export_test");
 
         let _ = create_named_library("default", 1, 1);
-        let _ = create_tape("export_test", 5 * 1024 * 1024, None, 0x40);
+        let _ = create_tape("export_test", 5 * 1024 * 1024, None, 0x40, false, None);
         let p = dir
             .join("tapes")
             .join("default")
@@ -6779,7 +6888,7 @@ mod tests {
         let dir = prepare_temp_vtl("export_checksum_test");
 
         let _ = create_named_library("default", 1, 1);
-        let _ = create_tape("ck_tape", 5 * 1024 * 1024, None, 0x40);
+        let _ = create_tape("ck_tape", 5 * 1024 * 1024, None, 0x40, false, None);
         let p = dir.join("tapes").join("default").join("ck_tape.vtltape");
         let _ = import_tape(p.to_str().unwrap(), 0);
 
@@ -6801,7 +6910,7 @@ mod tests {
         let dir = prepare_temp_vtl("eject_test");
 
         let _ = create_named_library("default", 1, 1);
-        let _ = create_tape("eject_test", 5 * 1024 * 1024, None, 0x40);
+        let _ = create_tape("eject_test", 5 * 1024 * 1024, None, 0x40, false, None);
         let p = dir.join("tapes").join("default").join("eject_test.vtltape");
         let _ = import_tape(p.to_str().unwrap(), 0);
 
@@ -6816,7 +6925,7 @@ mod tests {
         let dir = prepare_temp_vtl("drive_busy_test");
 
         let _ = create_named_library("default", 1, 2);
-        let _ = create_tape("tape1", 5 * 1024 * 1024, None, 0x40);
+        let _ = create_tape("tape1", 5 * 1024 * 1024, None, 0x40, false, None);
         let p = dir.join("tapes").join("default").join("tape1.vtltape");
         let _ = import_tape(p.to_str().unwrap(), 0);
 
@@ -6871,7 +6980,7 @@ mod tests {
         let dir = prepare_temp_vtl("cycle_test");
 
         let _ = create_named_library("default", 2, 4);
-        let _ = create_tape("cycle_tape", 10 * 1024 * 1024, None, 0x40);
+        let _ = create_tape("cycle_tape", 10 * 1024 * 1024, None, 0x40, false, None);
         let p = dir.join("tapes").join("default").join("cycle_tape.vtltape");
         let _ = import_tape(p.to_str().unwrap(), 0);
 
@@ -6893,7 +7002,7 @@ mod tests {
         let _ = create_named_library("default", 2, 8);
 
         for i in 0..4 {
-            let _ = create_tape(&format!("multi_tape_{}", i), 5 * 1024 * 1024, None, 0x40);
+            let _ = create_tape(&format!("multi_tape_{}", i), 5 * 1024 * 1024, None, 0x40, false, None);
             let p = dir
                 .join("tapes")
                 .join("default")
@@ -6949,7 +7058,7 @@ mod tests {
             .map(|i| {
                 thread::spawn(move || {
                     let tape_name = format!("concurrent_tape_{}", i);
-                    let result = create_tape(&tape_name, 5 * 1024 * 1024, None, 0x40);
+                    let result = create_tape(&tape_name, 5 * 1024 * 1024, None, 0x40, false, None);
                     assert!(result.is_ok(), "Failed to create tape {}", i);
                 })
             })
@@ -7002,7 +7111,7 @@ mod tests {
     fn test_delete_tape_removes_tape_tag_links() {
         let dir = prepare_temp_vtl("del_tape_tags");
         let _ = create_named_library("default", 1, 2);
-        let _ = create_tape("tagged_for_delete", 1024 * 1024, None, 0x40);
+        let _ = create_tape("tagged_for_delete", 1024 * 1024, None, 0x40, false, None);
         let _ = tag_add("tagged_for_delete", &["keep_schema".to_string()]);
         let before: i64 = init_db()
             .unwrap()
@@ -7029,7 +7138,7 @@ mod tests {
             5 * 1024 * 1024,
             "batch_test",
             &["backup".to_string(), "important".to_string()],
-            0x40,
+            0x40, false, None,
         );
         assert!(result.is_ok());
 
@@ -7046,8 +7155,8 @@ mod tests {
         let dir = prepare_temp_vtl("batch_import_test");
 
         let _ = create_named_library("default", 2, 10);
-        let _ = create_tape("import_tape_1", 5 * 1024 * 1024, None, 0x40);
-        let _ = create_tape("import_tape_2", 5 * 1024 * 1024, None, 0x40);
+        let _ = create_tape("import_tape_1", 5 * 1024 * 1024, None, 0x40, false, None);
+        let _ = create_tape("import_tape_2", 5 * 1024 * 1024, None, 0x40, false, None);
 
         let import_dir = dir.join("import");
         fs::create_dir_all(&import_dir).unwrap();
@@ -7095,7 +7204,7 @@ mod tests {
         let dir = prepare_temp_vtl("tag_test");
 
         let _ = create_named_library("default", 2, 10);
-        let _ = create_tape("tag_test_tape", 5 * 1024 * 1024, None, 0x40);
+        let _ = create_tape("tag_test_tape", 5 * 1024 * 1024, None, 0x40, false, None);
 
         let result = tag_add("tag_test_tape", &["backup".to_string(), "2024".to_string()]);
         assert!(result.is_ok());
@@ -7120,8 +7229,8 @@ mod tests {
         let dir = prepare_temp_vtl("search_test");
 
         let _ = create_named_library("default", 2, 10);
-        let _ = create_tape("search_test_1", 10 * 1024 * 1024, None, 0x40);
-        let _ = create_tape("search_test_2", 20 * 1024 * 1024, None, 0x40);
+        let _ = create_tape("search_test_1", 10 * 1024 * 1024, None, 0x40, false, None);
+        let _ = create_tape("search_test_2", 20 * 1024 * 1024, None, 0x40, false, None);
 
         let mut conn = init_db().unwrap();
         let library_id = resolve_library_id(&conn, &current_library_name()).unwrap();
@@ -7162,10 +7271,10 @@ mod tests {
         let _ = create_named_library("default", 2, 10);
         let _ = quota_set(Some("10M"), Some(1));
 
-        let result = create_tape("quota_test_1", 5 * 1024 * 1024, None, 0x40);
+        let result = create_tape("quota_test_1", 5 * 1024 * 1024, None, 0x40, false, None);
         assert!(result.is_ok());
 
-        let result = create_tape("quota_test_2", 5 * 1024 * 1024, None, 0x40);
+        let result = create_tape("quota_test_2", 5 * 1024 * 1024, None, 0x40, false, None);
         assert!(result.is_err());
 
         cleanup_temp_vtl(&dir);
@@ -7207,9 +7316,9 @@ mod tests {
         let _ = create_named_library("lib_a", 1, 2).unwrap();
         let _ = create_named_library("lib_b", 1, 2).unwrap();
         set_current_library("lib_a");
-        let _ = create_tape("shared_tape", 1024, None, 0x40).unwrap();
+        let _ = create_tape("shared_tape", 1024, None, 0x40, false, None).unwrap();
         set_current_library("lib_b");
-        let r = create_tape("shared_tape", 1024, None, 0x40);
+        let r = create_tape("shared_tape", 1024, None, 0x40, false, None);
         assert!(matches!(r, Err(VtlError::InvalidParameter(_))));
         cleanup_temp_vtl(&dir);
     }
@@ -7220,7 +7329,7 @@ mod tests {
         let _ = create_named_library("lib_x", 1, 2).unwrap();
         let _ = create_named_library("lib_y", 1, 2).unwrap();
         set_current_library("lib_x");
-        let _ = create_tape("imp_dup", 4096, None, 0x40).unwrap();
+        let _ = create_tape("imp_dup", 4096, None, 0x40, false, None).unwrap();
         let src = dir.join("tapes").join("lib_y").join("imp_dup.vtltape");
         fs::create_dir_all(src.parent().unwrap()).unwrap();
         fs::write(&src, b"x").unwrap();
@@ -7296,7 +7405,7 @@ mod tests {
         set_current_library("default");
         let _ = create_shelf("sA").unwrap();
         let _ = create_shelf("sB").unwrap();
-        let _ = create_tape("tmove", 1024 * 1024, Some("sA"), 0x40).unwrap();
+        let _ = create_tape("tmove", 1024 * 1024, Some("sA"), 0x40, false, None).unwrap();
         let _ =
             migrate_tapes_between_shelves("default", "sA", "sB", &[String::from("tmove")]).unwrap();
         let conn = init_db().unwrap();
@@ -7318,7 +7427,7 @@ mod tests {
         let dir = prepare_temp_vtl("init_tape_clear");
         let _ = create_named_library("default", 1, 2);
         set_current_library("default");
-        let _ = create_tape("ti", 4096, None, 0x40).unwrap();
+        let _ = create_tape("ti", 4096, None, 0x40, false, None).unwrap();
         let conn = init_db().unwrap();
         let lid = resolve_library_id(&conn, "default").unwrap();
         conn.execute(
@@ -7345,7 +7454,7 @@ mod tests {
         let dir = prepare_temp_vtl("init_tape_in_slot");
         let _ = create_named_library("default", 1, 2);
         set_current_library("default");
-        let _ = create_tape("in_slot", 4096, None, 0x40).unwrap();
+        let _ = create_tape("in_slot", 4096, None, 0x40, false, None).unwrap();
         let _ = assign_tape_to_slot("in_slot", 0).unwrap();
         let r = init_tape_in_library("default", "in_slot");
         match r {
@@ -7367,7 +7476,7 @@ mod tests {
         let dir = prepare_temp_vtl("init_tape_in_drive");
         let _ = create_named_library("default", 1, 2);
         set_current_library("default");
-        let _ = create_tape("in_drv", 4096, None, 0x40).unwrap();
+        let _ = create_tape("in_drv", 4096, None, 0x40, false, None).unwrap();
         let _ = assign_tape_to_slot("in_drv", 0).unwrap();
         let _ = load_tape(0, 0).unwrap();
         let r = init_tape_in_library("default", "in_drv");
@@ -7386,7 +7495,7 @@ mod tests {
         let dir = prepare_temp_vtl("init_tape_no_shelf");
         let _ = create_named_library("default", 1, 2);
         set_current_library("default");
-        let _ = create_tape("no_shelf", 4096, None, 0x40).unwrap();
+        let _ = create_tape("no_shelf", 4096, None, 0x40, false, None).unwrap();
         let conn = init_db().unwrap();
         let lid = resolve_library_id(&conn, "default").unwrap();
         conn.execute(
@@ -7432,7 +7541,7 @@ mod tests {
         let _ = create_named_library("default", 1, 2);
         set_current_library("default");
         let _ = create_shelf("sy").unwrap();
-        let _ = create_tape("t_on_shelf", 1024, Some("sy"), 0x40).unwrap();
+        let _ = create_tape("t_on_shelf", 1024, Some("sy"), 0x40, false, None).unwrap();
         let r = delete_shelf_in_library("default", "sy");
         assert!(matches!(r, Err(VtlError::InvalidParameter(_))));
         cleanup_temp_vtl(&dir);
@@ -7501,10 +7610,10 @@ mod tests {
 
         set_current_library("lib_b");
         let _ = create_shelf("archive").unwrap();
-        let _ = create_tape("only_b", 1024 * 1024, Some("archive"), 0x40).unwrap();
+        let _ = create_tape("only_b", 1024 * 1024, Some("archive"), 0x40, false, None).unwrap();
 
         set_current_library("default");
-        let _ = create_tape("only_default", 1024 * 1024, None, 0x40).unwrap();
+        let _ = create_tape("only_default", 1024 * 1024, None, 0x40, false, None).unwrap();
 
         let conn = init_db().unwrap();
         let id_b = resolve_library_id(&conn, "lib_b").unwrap();
@@ -7524,7 +7633,7 @@ mod tests {
     fn test_assign_tape_from_shelf_to_slot() {
         let dir = prepare_temp_vtl("assign_shelf_slot");
         let _ = create_named_library("default", 1, 2);
-        let _ = create_tape("shelf_tape", 2 * 1024 * 1024, None, 0x40).unwrap();
+        let _ = create_tape("shelf_tape", 2 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let _ = assign_tape_to_slot("shelf_tape", 0).unwrap();
         let _ = load_tape(0, 0).unwrap();
         let _ = unload_tape(0).unwrap();
@@ -7536,7 +7645,7 @@ mod tests {
         let dir = prepare_temp_vtl("assign_offline_into_slot");
         let _ = create_named_library("default", 1, 4);
         set_current_library("default");
-        let _ = create_tape("off_in", 2 * 1024 * 1024, None, 0x40).unwrap();
+        let _ = create_tape("off_in", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let _ = create_offline_shelf("rack1").unwrap();
         let _ = move_tapes_to_offline_shelf("default", &[String::from("off_in")], "rack1").unwrap();
         let _ =
@@ -7567,7 +7676,7 @@ mod tests {
     fn test_assign_slot_rejected_when_tape_in_drive() {
         let dir = prepare_temp_vtl("assign_in_drive");
         let _ = create_named_library("default", 1, 2);
-        let _ = create_tape("td", 2 * 1024 * 1024, None, 0x40).unwrap();
+        let _ = create_tape("td", 2 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let _ = assign_tape_to_slot("td", 0).unwrap();
         let _ = load_tape(0, 0).unwrap();
         let r = assign_tape_to_slot("td", 1);
@@ -7580,7 +7689,7 @@ mod tests {
         let dir = prepare_temp_vtl("import_loaded");
         let _ = create_named_library("default", 1, 2);
         set_current_library("default");
-        let _ = create_tape("loaded_import", 2 * 1024 * 1024, None, 0x40).unwrap();
+        let _ = create_tape("loaded_import", 2 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let _ = assign_tape_to_slot("loaded_import", 0).unwrap();
         let _ = load_tape(0, 0).unwrap();
         let src = dir.join("loaded_import.vtltape");
@@ -7594,7 +7703,7 @@ mod tests {
     fn test_assign_slot_rejected_when_already_in_slot() {
         let dir = prepare_temp_vtl("assign_already_slot");
         let _ = create_named_library("default", 1, 3);
-        let _ = create_tape("t1", 1024 * 1024, None, 0x40).unwrap();
+        let _ = create_tape("t1", 1024 * 1024, None, 0x40, false, None).unwrap();
         let _ = assign_tape_to_slot("t1", 0).unwrap();
         let r = assign_tape_to_slot("t1", 1);
         assert!(matches!(r, Err(VtlError::InvalidParameter(_))));
@@ -7605,8 +7714,8 @@ mod tests {
     fn test_assign_slot_rejected_when_target_slot_occupied() {
         let dir = prepare_temp_vtl("assign_slot_busy");
         let _ = create_named_library("default", 1, 3);
-        let _ = create_tape("ta", 1024 * 1024, None, 0x40).unwrap();
-        let _ = create_tape("tb", 1024 * 1024, None, 0x40).unwrap();
+        let _ = create_tape("ta", 1024 * 1024, None, 0x40, false, None).unwrap();
+        let _ = create_tape("tb", 1024 * 1024, None, 0x40, false, None).unwrap();
         let _ = assign_tape_to_slot("ta", 0).unwrap();
         let _ = assign_tape_to_slot("tb", 1).unwrap();
         let r = assign_tape_to_slot("tb", 0);
@@ -7618,7 +7727,7 @@ mod tests {
     fn test_shelf_place_rejected_when_tape_in_drive() {
         let dir = prepare_temp_vtl("shelf_place_drive");
         let _ = create_named_library("default", 1, 2);
-        let _ = create_tape("sp", 2 * 1024 * 1024, None, 0x40).unwrap();
+        let _ = create_tape("sp", 2 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let _ = assign_tape_to_slot("sp", 0).unwrap();
         let _ = load_tape(0, 0).unwrap();
         let r = shelf_place_tape("sp", None);
@@ -7749,7 +7858,7 @@ mod tests {
     fn test_create_tape_unknown_shelf() {
         let dir = prepare_temp_vtl("tape_bad_shelf");
         let _ = create_named_library("default", 1, 2);
-        let r = create_tape("t1", 1024 * 1024, Some("no_such_shelf_xyz"), 0x40);
+        let r = create_tape("t1", 1024 * 1024, Some("no_such_shelf_xyz"), 0x40, false, None);
         assert!(matches!(r, Err(VtlError::ShelfNotFound(_))));
         cleanup_temp_vtl(&dir);
     }
@@ -7793,7 +7902,7 @@ mod tests {
     fn test_shelf_place_unknown_shelf() {
         let dir = prepare_temp_vtl("place_bad_shelf");
         let _ = create_named_library("default", 1, 2);
-        let _ = create_tape("tp", 1024 * 1024, None, 0x40).unwrap();
+        let _ = create_tape("tp", 1024 * 1024, None, 0x40, false, None).unwrap();
         let r = shelf_place_tape("tp", Some("missing_shelf"));
         assert!(matches!(r, Err(VtlError::ShelfNotFound(_))));
         cleanup_temp_vtl(&dir);
@@ -7862,7 +7971,7 @@ mod tests {
     fn test_assign_slot_rejected_after_import_to_slot() {
         let dir = prepare_temp_vtl("assign_after_import");
         let _ = create_named_library("default", 1, 2);
-        let _ = create_tape("imp_slot", 2 * 1024 * 1024, None, 0x40).unwrap();
+        let _ = create_tape("imp_slot", 2 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let p = dir.join("tapes").join("default").join("imp_slot.vtltape");
         let _ = import_tape(p.to_str().unwrap(), 0).unwrap();
         let r = assign_tape_to_slot("imp_slot", 1);
@@ -7901,7 +8010,7 @@ mod tests {
     fn test_inventory_succeeds() {
         let dir = prepare_temp_vtl("inventory_ok");
         let _ = create_named_library("default", 1, 2);
-        let _ = create_tape("inv_t", 1024 * 1024, None, 0x40).unwrap();
+        let _ = create_tape("inv_t", 1024 * 1024, None, 0x40, false, None).unwrap();
         let r = inventory();
         assert!(r.is_ok());
         cleanup_temp_vtl(&dir);

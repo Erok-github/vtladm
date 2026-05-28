@@ -22,7 +22,7 @@ static ssize_t vtl_create_tape_store(struct kobject *kobj, struct kobj_attribute
     if (sscanf(buf, "%63s %llu %x", name, &size, &density) >= 1) {
         if ((u8)density == 0)
             density = VTL_DEFAULT_DENSITY;
-        ret = vtl_tape_create(name, size, (u8)density);
+        ret = vtl_tape_create(name, size, (u8)density, 0);
         if (ret < 0)
             return ret;
     }

@@ -4,6 +4,7 @@
 #include <linux/uaccess.h>
 #include <linux/file.h>
 #include <linux/limits.h>
+#include <linux/vmalloc.h>
 
 static struct vtl_tape *vtl_tapes[VTL_MAX_SLOTS];
 static DEFINE_MUTEX(vtl_tape_lock);
@@ -119,7 +120,7 @@ void vtl_format_meta_path(char *buf, size_t len, const char *tape_path)
         snprintf(buf + plen - 8, len - (plen - 8), ".vtlmeta");
 }
 
-int vtl_meta_write(const char *tape_path, u8 density)
+int vtl_meta_write(const char *tape_path, u8 density, u8 flags)
 {
     struct vtl_meta_header hdr;
     struct file *filp;
@@ -131,6 +132,7 @@ int vtl_meta_write(const char *tape_path, u8 density)
     hdr.magic = cpu_to_le32(VTL_META_MAGIC);
     hdr.version = cpu_to_le16(VTL_META_VERSION);
     hdr.density = density;
+    hdr.flags = flags;
 
     vtl_format_meta_path(meta_path, sizeof(meta_path), tape_path);
 
@@ -154,7 +156,7 @@ int vtl_meta_write(const char *tape_path, u8 density)
     return 0;
 }
 
-int vtl_meta_read(const char *tape_path, u8 *density_out)
+int vtl_meta_read(const char *tape_path, u8 *density_out, u8 *flags_out)
 {
     struct vtl_meta_header hdr;
     struct file *filp;
@@ -187,10 +189,12 @@ int vtl_meta_read(const char *tape_path, u8 *density_out)
     }
 
     *density_out = hdr.density;
+    if (flags_out)
+        *flags_out = hdr.flags;
     return 0;
 }
 
-int vtl_tape_create(const char *name, u64 size, u8 density)
+int vtl_tape_create(const char *name, u64 size, u8 density, u8 flags)
 {
     struct vtl_tape *tape;
     struct file *filp;
@@ -244,10 +248,11 @@ int vtl_tape_create(const char *name, u64 size, u8 density)
     tape->meta.num_snapshots = 0;
     tape->meta.filemarks = NULL;
     tape->meta.density = density;
+    tape->meta.meta_flags = flags;
     kref_init(&tape->ref);
 
     /* Write sidecar metadata file (non-fatal on failure) */
-    vtl_meta_write(path, density);
+    vtl_meta_write(path, density, flags);
 
     mutex_lock(&vtl_tape_lock);
     for (ret = 0; ret < VTL_MAX_SLOTS; ret++) {
@@ -342,10 +347,14 @@ struct vtl_tape *vtl_tape_open_existing(const char *name)
     tape->meta.block_size = VTL_DEFAULT_BLOCK_SIZE;
     {
         u8 d = VTL_DEFAULT_DENSITY;
-        if (vtl_meta_read(path, &d) == 0)
+        u8 f = 0;
+        if (vtl_meta_read(path, &d, &f) == 0) {
             tape->meta.density = d;
-        else
+            tape->meta.meta_flags = f;
+        } else {
             tape->meta.density = VTL_DEFAULT_DENSITY;
+            tape->meta.meta_flags = 0;
+        }
     }
     tape->meta.created = ktime_get_real_seconds();
     tape->meta.accessed = tape->meta.created;
@@ -530,6 +539,17 @@ int vtl_tape_load(struct vtl_drive *drv, struct vtl_tape *tape)
         tape->meta.block_size <= VTL_MAX_BLOCK_SIZE)
         drv->block_size = tape->meta.block_size;
     drv->density = tape->meta.density;
+    if (tape->meta.meta_flags & VTL_META_FLAG_COMPRESSED) {
+        drv->compression_enabled = true;
+        drv->compression_algorithm =
+            (tape->meta.meta_flags & VTL_META_FLAG_ALGO_MASK) >>
+             VTL_META_FLAG_ALGO_SHIFT;
+        if (drv->compression_algorithm == 0)
+            drv->compression_algorithm = VTL_COMP_LZO;
+    } else {
+        drv->compression_enabled = false;
+        drv->compression_algorithm = VTL_COMP_NONE;
+    }
 
     tape->meta.accessed = ktime_get_real_seconds();
     tape->meta.mount_count++;
@@ -597,6 +617,60 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
         return 0;
     }
 
+    /* Try compressed-block read first: peek at 16-byte header */
+    {
+        struct vtl_block_header hdr;
+        loff_t hdr_pos = pos;
+
+        ret = kernel_read(tape->file, &hdr, sizeof(hdr), &hdr_pos);
+        if (ret == sizeof(hdr) &&
+            be32_to_cpu(hdr.magic) == VTL_BLOCK_MAGIC) {
+            u32 comp_sz = be32_to_cpu(hdr.compressed_size);
+            u32 uncomp_sz = be32_to_cpu(hdr.uncompressed_size);
+            u32 block_total = VTL_BLOCK_HEADER_SIZE + comp_sz;
+            u8 *cbuf;
+
+            if (comp_sz > VTL_MAX_BLOCK_SIZE + 1024 ||
+                uncomp_sz > len + VTL_BLOCK_HEADER_SIZE) {
+                mutex_unlock(&tape->lock);
+                mutex_unlock(&drv->lock);
+                return -EIO;
+            }
+
+            cbuf = vmalloc(block_total);
+            if (!cbuf) {
+                mutex_unlock(&tape->lock);
+                mutex_unlock(&drv->lock);
+                return -ENOMEM;
+            }
+
+            /* Re-read the whole block (header + compressed data) */
+            kernel_read(tape->file, cbuf, block_total, &pos);
+
+            ret = vtl_decompress_block(cbuf, block_total,
+                                       buffer, &uncomp_sz);
+            vfree(cbuf);
+            if (ret < 0) {
+                mutex_unlock(&tape->lock);
+                mutex_unlock(&drv->lock);
+                return -EIO;
+            }
+
+            tape->position = pos;
+            *actual = uncomp_sz;
+            drv->at_bot = (pos == 0);
+            drv->at_end = (pos >= tape->meta.capacity);
+            tape->meta.accessed = ktime_get_real_seconds();
+            drv->comp_bytes_read += uncomp_sz;
+
+            mutex_unlock(&tape->lock);
+            mutex_unlock(&drv->lock);
+            return 0;
+        }
+    }
+
+    /* Fallback: raw block read (uncompressed or old-format tape) */
+    pos = tape->position;
     if (pos + len > tape->meta.capacity)
         len = tape->meta.capacity - pos;
 
@@ -625,6 +699,9 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
     ssize_t ret;
     loff_t pos;
     u32 to_write;
+    u8 *comp_buf = NULL;
+    u32 comp_total = 0;
+    bool compressed = false;
 
     mutex_lock(&drv->lock);
     tape = drv->loaded_tape;
@@ -652,28 +729,63 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
     else
         to_write = len;
 
-    ret = kernel_write(tape->file, buffer, to_write, &pos);
-    if (ret < 0) {
-        mutex_unlock(&tape->lock);
-        mutex_unlock(&drv->lock);
-        return -EIO;
+    /* Attempt compression if enabled and data is non-empty */
+    if (drv->compression_enabled &&
+        drv->compression_algorithm != VTL_COMP_NONE && to_write > 0) {
+        unsigned int buf_sz = to_write + to_write / 16 + 64 +
+                              VTL_BLOCK_HEADER_SIZE;
+
+        comp_buf = vmalloc(buf_sz);
+        if (comp_buf) {
+            if (vtl_compress_block(buffer, to_write, comp_buf,
+                                   &comp_total,
+                                   drv->compression_algorithm) == 0 &&
+                comp_total > VTL_BLOCK_HEADER_SIZE) {
+                compressed = true;
+            } else {
+                vfree(comp_buf);
+                comp_buf = NULL;
+            }
+        }
     }
 
-    tape->position = pos;
-    if (actual)
-        *actual = (u32)ret;
+    if (compressed) {
+        ret = kernel_write(tape->file, comp_buf, comp_total, &pos);
+        vfree(comp_buf);
+        if (ret < 0) {
+            mutex_unlock(&tape->lock);
+            mutex_unlock(&drv->lock);
+            return -EIO;
+        }
+        tape->position = pos;
+        if (actual)
+            *actual = to_write;
+        drv->comp_bytes_written += to_write;
+    } else {
+        ret = kernel_write(tape->file, buffer, to_write, &pos);
+        if (ret < 0) {
+            mutex_unlock(&tape->lock);
+            mutex_unlock(&drv->lock);
+            return -EIO;
+        }
+
+        tape->position = pos;
+        if (actual)
+            *actual = (u32)ret;
+        if (ret > 0)
+            tape->meta.log_bytes_written += (u64)ret;
+    }
+
     if (pos > tape->meta.used)
         tape->meta.used = pos;
     drv->at_bot = (pos == 0);
     drv->at_end = (pos >= tape->meta.capacity);
     drv->at_filemark = false;
     tape->meta.accessed = ktime_get_real_seconds();
-    if (ret > 0)
-        tape->meta.log_bytes_written += (u64)ret;
 
     mutex_unlock(&tape->lock);
     mutex_unlock(&drv->lock);
-    return (ret == len) ? 0 : -ENOSPC;
+    return (ret == (ssize_t)(compressed ? comp_total : to_write)) ? 0 : -ENOSPC;
 }
 
 int vtl_tape_space(struct vtl_drive *drv, int code, int count)
@@ -909,6 +1021,17 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 	            t->meta.block_size <= VTL_MAX_BLOCK_SIZE)
 	            dst_drv->block_size = t->meta.block_size;
 	        dst_drv->density = t->meta.density;
+	        if (t->meta.meta_flags & VTL_META_FLAG_COMPRESSED) {
+	            dst_drv->compression_enabled = true;
+	            dst_drv->compression_algorithm =
+	                (t->meta.meta_flags & VTL_META_FLAG_ALGO_MASK) >>
+	                 VTL_META_FLAG_ALGO_SHIFT;
+	            if (dst_drv->compression_algorithm == 0)
+	                dst_drv->compression_algorithm = VTL_COMP_LZO;
+	        } else {
+	            dst_drv->compression_enabled = false;
+	            dst_drv->compression_algorithm = VTL_COMP_NONE;
+	        }
 	        mutex_unlock(&dst_drv->lock);
     } else if (vtl_elem_is_ie(ch, dst)) {
         struct vtl_slot *ms;

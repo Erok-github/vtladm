@@ -103,6 +103,28 @@ static inline void vtl_put_be64(u64 v, u8 *p)
 #define VTL_DENSITY_LTO9     0x52
 #define VTL_DENSITY_LTO10    0x58
 
+/* Compression algorithm identifiers */
+#define VTL_COMP_NONE   0
+#define VTL_COMP_ZLIB   1
+#define VTL_COMP_LZO    2
+
+/* VTLMETA flags byte bit definitions (byte 7 of sidecar) */
+#define VTL_META_FLAG_COMPRESSED  0x01
+#define VTL_META_FLAG_ALGO_MASK   0x06
+#define VTL_META_FLAG_ALGO_SHIFT  1
+
+/* Block header magic "VTLB" and size */
+#define VTL_BLOCK_MAGIC      0x564C5442
+#define VTL_BLOCK_HEADER_SIZE 16
+
+struct vtl_block_header {
+	__be32 magic;
+	__be32 uncompressed_size;
+	__be32 compressed_size;
+	u8     algorithm;
+	u8     reserved[3];
+} __packed;
+
 #define VTL_MIN_TAPE_SIZE (10 * 1024 * 1024)
 #define VTL_MAX_TAPE_SIZE (10ULL * 1024 * 1024 * 1024 * 1024)
 
@@ -153,6 +175,7 @@ struct vtl_tape_metadata {
     u64 log_bytes_written;
     u32 mount_count;
     u8 density;       /* T10 density code from sidecar metadata */
+    u8 meta_flags;    /* flags byte from sidecar (compression, algorithm) */
 };
 
 struct vtl_tape {
@@ -181,6 +204,10 @@ struct vtl_drive {
     bool at_filemark;
     bool at_end;
     bool at_bot;
+    bool compression_enabled;  /* runtime compression on/off (from VTLMETA / MODE SELECT) */
+    u8   compression_algorithm; /* VTL_COMP_ZLIB or VTL_COMP_LZO */
+    u64  comp_bytes_written;   /* uncompressed bytes written (LOG SENSE stats) */
+    u64  comp_bytes_read;      /* uncompressed bytes read    (LOG SENSE stats) */
     struct vtl_sense_data sense;
     struct mutex lock;
     struct work_struct work;
@@ -273,11 +300,16 @@ void vtl_slave_destroy(struct scsi_device *sdev);
 int vtl_slave_configure(struct scsi_device *sdev);
 int vtl_change_queue_depth(struct scsi_device *sdev, int depth);
 
-int vtl_tape_create(const char *name, u64 size, u8 density);
+int vtl_tape_create(const char *name, u64 size, u8 density, u8 flags);
 
 /* Sidecar metadata (VTLMETA) I/O */
-int vtl_meta_write(const char *tape_path, u8 density);
-int vtl_meta_read(const char *tape_path, u8 *density_out);
+int vtl_meta_write(const char *tape_path, u8 density, u8 flags);
+int vtl_meta_read(const char *tape_path, u8 *density_out, u8 *flags_out);
+
+/* Compression engine (compression.c) */
+void vtl_block_header_fill(struct vtl_block_header *hdr, u32 uncomp_sz, u32 comp_sz, u8 algo);
+int vtl_compress_block(const u8 *in, u32 in_len, u8 *out, u32 *out_len, u8 algo);
+int vtl_decompress_block(const u8 *in, u32 in_len, u8 *out, u32 *out_len);
 void vtl_format_meta_path(char *buf, size_t len, const char *tape_path);
 struct vtl_tape *vtl_tape_find_by_name(const char *name);
 struct vtl_tape *vtl_tape_open_existing(const char *name);

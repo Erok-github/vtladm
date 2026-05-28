@@ -634,9 +634,11 @@ static int vtl_mode_page_01(u8 *buf)
     return 12;
 }
 
-static int vtl_mode_page_0f(u8 *buf)
+static int vtl_mode_page_0f(u8 *buf, bool compression_enabled, u8 algorithm)
 {
     buf[0] = 0x0f; buf[1] = 0x0e;  /* Data Compression, 14 bytes */
+    buf[2] = (compression_enabled ? 0x02 : 0x00) | 0x01; /* DCE=1 if on, DCC=1 (capable) */
+    buf[4] = algorithm; /* Data Compression Protocol: 1=zlib, 2=lzo */
     return 16;
 }
 
@@ -665,7 +667,8 @@ static int vtl_mode_page_1c(u8 *buf)
 /*
  * Page 0x3F (all pages) inner writer: appends all supported pages except 0x00.
  */
-static int vtl_mode_page_3f(u8 *buf, u8 density)
+static int vtl_mode_page_3f(u8 *buf, u8 density, bool compression_enabled,
+                            u8 algorithm)
 {
     int off = 0;
 
@@ -676,7 +679,7 @@ static int vtl_mode_page_3f(u8 *buf, u8 density)
     buf[off++] = 0x0f; buf[off++] = 0x10; buf[off++] = 0x1c;
     off += vtl_mode_page_01(buf + off);
     off += vtl_mode_page_0a(buf + off);
-    off += vtl_mode_page_0f(buf + off);
+    off += vtl_mode_page_0f(buf + off, compression_enabled, algorithm);
     off += vtl_mode_page_10(buf + off, density);
     off += vtl_mode_page_1c(buf + off);
     return off;
@@ -743,13 +746,17 @@ static int vtl_handle_mode_sense(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         } else if (page == 0x0a) {
             pg = vtl_mode_page_0a(buffer + hdr);
         } else if (page == 0x0f) {
-            pg = vtl_mode_page_0f(buffer + hdr);
+            bool ce = drv ? drv->compression_enabled : false;
+            u8 algo = drv ? drv->compression_algorithm : VTL_COMP_NONE;
+            pg = vtl_mode_page_0f(buffer + hdr, ce, algo);
         } else if (page == 0x10) {
             pg = vtl_mode_page_10(buffer + hdr, density);
         } else if (page == 0x1c) {
             pg = vtl_mode_page_1c(buffer + hdr);
         } else if (page == 0x3f) {
-            pg = vtl_mode_page_3f(buffer + hdr, density);
+            bool ce = drv ? drv->compression_enabled : false;
+            u8 algo = drv ? drv->compression_algorithm : VTL_COMP_NONE;
+            pg = vtl_mode_page_3f(buffer + hdr, density, ce, algo);
         }
         /* Unknown pages: return just header + block descriptor (pg stays 0). */
 
@@ -838,6 +845,35 @@ static int vtl_handle_mode_select(struct scsi_cmnd *cmd, struct vtl_host *vhost)
 
         pr_info("VTL: MODE SELECT drive %d density=0x%02x block_size=%u\n",
             drv->id, new_density, new_block_size);
+    }
+
+    /* Parse mode page parameters after the block descriptor */
+    {
+        u32 parsed;
+        if (cdb[0] == MODE_SELECT_10)
+            parsed = 8 + bd_len;
+        else
+            parsed = 4 + bd_len;
+
+        while (parsed + 2 <= plen) {
+            u8 pg_code = pbuf[parsed];
+            u8 pg_len = pbuf[parsed + 1];
+
+            if (parsed + 2 + pg_len > plen)
+                break;
+
+            if (pg_code == 0x0f && pg_len >= 1) {
+                /* Data Compression page: byte 2 bit 1 = DCE */
+                bool new_dce = (pbuf[parsed + 2] & 0x02) != 0;
+                pr_info("VTL: MODE SELECT page 0x0F DCE=%d drive %d\n",
+                    new_dce, drv->id);
+                mutex_lock(&drv->lock);
+                drv->compression_enabled = new_dce;
+                mutex_unlock(&drv->lock);
+            }
+
+            parsed += 2 + pg_len;
+        }
     }
 
     vtl_xfer_buf_free(pbuf);
