@@ -797,14 +797,17 @@ static int vtl_handle_mode_select(struct scsi_cmnd *cmd, struct vtl_host *vhost)
     else
         plen = ((unsigned int)cdb[7] << 8) | cdb[8];
 
-    if (plen == 0)
-        return SAM_STAT_GOOD;
-
     if (lun >= 1 && lun <= (unsigned int)ch->num_drives)
         drv = &ch->drives[lun - 1];
 
     if (!drv)
         return SAM_STAT_GOOD;
+
+    if (plen == 0) {
+        vtl_set_sense(&drv->sense, ILLEGAL_REQUEST, 0x1a, 0);
+        vtl_build_sense_buffer(cmd, &drv->sense);
+        return SAM_STAT_CHECK_CONDITION;
+    }
 
     pbuf = vtl_xfer_buf_alloc(plen);
     if (!pbuf) {
@@ -817,16 +820,27 @@ static int vtl_handle_mode_select(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         return SAM_STAT_CHECK_CONDITION;
     }
 
-    if (cdb[0] == MODE_SELECT_10)
-        bd_len = pbuf[6] << 8 | pbuf[7];
-    else
-        bd_len = pbuf[3];
+    if (cdb[0] == MODE_SELECT_10) {
+        if (plen >= 8)
+            bd_len = pbuf[6] << 8 | pbuf[7];
+        else
+            bd_len = 0;
+    } else {
+        if (plen >= 4)
+            bd_len = pbuf[3];
+        else
+            bd_len = 0;
+    }
 
     if (bd_len >= 8) {
         if (cdb[0] == MODE_SELECT_10) {
+            if (plen < 16)
+                goto mode_pages;
             new_density = pbuf[8];
             new_block_size = vtl_get_u24(&pbuf[13]);
         } else {
+            if (plen < 12)
+                goto mode_pages;
             new_density = pbuf[4];
             new_block_size = vtl_get_u24(&pbuf[9]);
         }
@@ -846,6 +860,8 @@ static int vtl_handle_mode_select(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         pr_info("VTL: MODE SELECT drive %d density=0x%02x block_size=%u\n",
             drv->id, new_density, new_block_size);
     }
+
+mode_pages:
 
     /* Parse mode page parameters after the block descriptor */
     {

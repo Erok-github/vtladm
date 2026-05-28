@@ -631,7 +631,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
             u8 *cbuf;
 
             if (comp_sz > VTL_MAX_BLOCK_SIZE + 1024 ||
-                uncomp_sz > len + VTL_BLOCK_HEADER_SIZE) {
+                uncomp_sz > len) {
                 mutex_unlock(&tape->lock);
                 mutex_unlock(&drv->lock);
                 return -EIO;

@@ -162,6 +162,7 @@ static struct scsi_host_template vtl_sht = {
     .cmd_per_lun = 8,
     .can_queue = 32,
     .sg_tablesize = 256,
+    .max_sectors = 4096,
     .this_id = -1,
     .sg_prot_tablesize = 256,
     .emulated = 1,
