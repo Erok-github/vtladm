@@ -32,6 +32,9 @@
 #ifndef INITIALIZE_ELEMENT_STATUS
 #define INITIALIZE_ELEMENT_STATUS 0x07
 #endif
+#ifndef REPORT_DENSITY_SUPPORT
+#define REPORT_DENSITY_SUPPORT 0x44
+#endif
 #ifndef DRIVER_SENSE
 #define DRIVER_SENSE 0x08
 #endif
@@ -307,9 +310,9 @@ static int vtl_handle_inquiry(struct scsi_cmnd *cmd, struct vtl_host *vhost)
     else
         buffer[0] = 0x01; /* Sequential-access */
     buffer[1] = 0x80; /* Removable */
-    buffer[2] = 2;
-    buffer[3] = 2;
-    buffer[4] = 31;
+    buffer[2] = 0x06; /* SPC-4 version (backup apps expect >= SPC-3) */
+    buffer[3] = 0x02; /* Response Data Format = 2 */
+    buffer[4] = 0x1f;
     buffer[5] = 0;
     buffer[6] = 0;
     buffer[7] = 0;
@@ -428,15 +431,20 @@ static unsigned int vtl_changer_mode_sense_fill(u8 *buffer, unsigned int buf_max
     memset(buffer, 0, buf_max);
 
     if (page == 0x00) {
+        /*
+         * Medium-changer supported mode pages (SMC-3): 0x00, 0x1D, 0x1E, 0x1F.
+         * Page 0x01 (Read-Write Error Recovery) is a tape/SSC page and must NOT
+         * appear in a medium changer's supported-pages list.
+         */
         if (off + 6 > buf_max)
             return hdr;
         pg = &buffer[off];
         pg[0] = 0x00;
         pg[1] = 4;
         pg[2] = 0x00;
-        pg[3] = 0x01;
-        pg[4] = 0x1d;
-        pg[5] = 0x1e;
+        pg[3] = 0x1d;
+        pg[4] = 0x1e;
+        pg[5] = 0x1f;
         off += 6;
     } else if (page == 0x1d) {
         /*
@@ -475,13 +483,35 @@ static unsigned int vtl_changer_mode_sense_fill(u8 *buffer, unsigned int buf_max
         pg[6] = 0;
         pg[7] = 0;
         off += 8;
+    } else if (page == 0x1f) {
+        /*
+         * SMC-3 Device Capabilities (page 0x1F), 10-byte parameter list:
+         * tells initiators which element types exist (STOR, DT, IE).
+         */
+        if (off + 12 > buf_max)
+            return hdr;
+        pg = &buffer[off];
+        pg[0] = 0x1f;
+        pg[1] = 10;
+        pg[2] = 0;
+        pg[3] = (ch->num_drives > 0) ? 0x80 : 0;   /* DTDE */
+        pg[4] = 0;
+        pg[5] = 0x00;  /* MTDE = 0 (no robotic picker) */
+        pg[6] = 0;
+        pg[7] = 0;
+        pg[8] = 0;
+        pg[9] = (ch->num_mailslots > 0) ? 0x80 : 0;  /* IEDE */
+        pg[10] = 0;
+        pg[11] = 0;
+        off += 12;
     } else if (page == 0x3f) {
         /*
          * All mode pages: backup apps (Mars/TSM) often use 0x3F instead of
          * separate 0x1D probes; returning header-only broke inventory while mtx
          * still worked (mtx requests page 0x1D explicitly).
+         * Returns pages 0x1D, 0x1E, 0x1F.
          */
-        if (off + 18 > buf_max)
+        if (off + 38 > buf_max)
             return hdr;
         pg = &buffer[off];
         pg[0] = 0x1d;
@@ -506,6 +536,22 @@ static unsigned int vtl_changer_mode_sense_fill(u8 *buffer, unsigned int buf_max
             pg[6] = 0;
             pg[7] = 0;
             off += 8;
+        }
+        if (off + 12 <= buf_max) {
+            pg = &buffer[off];
+            pg[0] = 0x1f;
+            pg[1] = 10;
+            pg[2] = 0;
+            pg[3] = (ch->num_drives > 0) ? 0x80 : 0;
+            pg[4] = 0;
+            pg[5] = 0;
+            pg[6] = 0;
+            pg[7] = 0;
+            pg[8] = 0;
+            pg[9] = (ch->num_mailslots > 0) ? 0x80 : 0;
+            pg[10] = 0;
+            pg[11] = 0;
+            off += 12;
         }
     }
 
@@ -593,6 +639,13 @@ static int vtl_mode_page_10(u8 *buf, u8 density)
     return 16;
 }
 
+static int vtl_mode_page_0a(u8 *buf)
+{
+    buf[0] = 0x0a; buf[1] = 0x0a;  /* Control, 10 bytes */
+    /* RAC=0, SWP=0, everything else reserved; backup apps probe this page */
+    return 12;
+}
+
 static int vtl_mode_page_1c(u8 *buf)
 {
     buf[0] = 0x1c; buf[1] = 0x0a;  /* Informational Exceptions Control, 10 bytes */
@@ -609,10 +662,11 @@ static int vtl_mode_page_3f(u8 *buf, u8 density)
 
     /* Supported pages list */
     buf[off++] = 0x00;
-    buf[off++] = 5;
-    buf[off++] = 0x00; buf[off++] = 0x01; buf[off++] = 0x0f;
-    buf[off++] = 0x10; buf[off++] = 0x1c;
+    buf[off++] = 6;
+    buf[off++] = 0x00; buf[off++] = 0x01; buf[off++] = 0x0a;
+    buf[off++] = 0x0f; buf[off++] = 0x10; buf[off++] = 0x1c;
     off += vtl_mode_page_01(buf + off);
+    off += vtl_mode_page_0a(buf + off);
     off += vtl_mode_page_0f(buf + off);
     off += vtl_mode_page_10(buf + off, density);
     off += vtl_mode_page_1c(buf + off);
@@ -669,14 +723,16 @@ static int vtl_handle_mode_sense(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         pg = 0;
 
         if (page == 0x00) {
-            /* Supported pages list: 0x00, 0x01, 0x0F, 0x10, 0x1C */
-            buffer[hdr]     = 0x00; buffer[hdr + 1] = 5;
+            /* Supported pages: 0x00, 0x01, 0x0A, 0x0F, 0x10, 0x1C */
+            buffer[hdr]     = 0x00; buffer[hdr + 1] = 6;
             buffer[hdr + 2] = 0x00; buffer[hdr + 3] = 0x01;
-            buffer[hdr + 4] = 0x0f; buffer[hdr + 5] = 0x10;
-            buffer[hdr + 6] = 0x1c;
-            pg = 7;
+            buffer[hdr + 4] = 0x0a; buffer[hdr + 5] = 0x0f;
+            buffer[hdr + 6] = 0x10; buffer[hdr + 7] = 0x1c;
+            pg = 8;
         } else if (page == 0x01) {
             pg = vtl_mode_page_01(buffer + hdr);
+        } else if (page == 0x0a) {
+            pg = vtl_mode_page_0a(buffer + hdr);
         } else if (page == 0x0f) {
             pg = vtl_mode_page_0f(buffer + hdr);
         } else if (page == 0x10) {
@@ -1454,6 +1510,121 @@ static int vtl_handle_prevent_allow(struct scsi_cmnd *cmd, struct vtl_drive *drv
 }
 
 /*
+ * SSC-3 REPORT DENSITY SUPPORT (0x44) — backup applications (NetBackup, TSM, Bacula)
+ * probe this during drive discovery to learn supported media types. Without it the
+ * drive may appear to support zero densities, causing inventory/listing to fail.
+ *
+ * Short-form density support data block descriptor (52 bytes each, SSC-5 Table 117):
+ *   bytes  0- 1: primary density code (big-endian)
+ *   bytes  2- 3: secondary density code
+ *   byte   4:    WRTOK(0x80) | DUP(0x40) | DEFAULT(0x20)
+ *   bytes  5- 6: reserved
+ *   bytes  7- 9: bits per mm (0=not reported)
+ *   bytes 10-11: media width in tenths of mm (0=not reported)
+ *   bytes 12-13: tracks (0=not reported)
+ *   bytes 14-19: capacity in MB (0=not reported)
+ *   bytes 20-27: assigning organization (ASCII, space-filled)
+ *   bytes 28-35: density name (ASCII, space-filled)
+ *   bytes 36-43: description (ASCII, space-filled)
+ *   bytes 44-51: reserved
+ */
+#define VTL_DENSITY_DESC_LEN 52U
+#define VTL_NUM_DENSITIES 7
+
+struct vtl_known_density {
+    u16 code;
+    const char *name;
+};
+
+static const struct vtl_known_density vtl_supported_densities[] = {
+    { 0x40, "LTO-4  " },
+    { 0x4A, "LTO-5  " },
+    { 0x4C, "LTO-6  " },
+    { 0x4E, "LTO-7  " },
+    { 0x50, "LTO-8  " },
+    { 0x52, "LTO-9  " },
+    { 0x58, "LTO-10 " },
+};
+
+static int vtl_fill_density_desc(u8 *p, u16 density_code, const char *name,
+                                 bool is_default)
+{
+    memset(p, 0, VTL_DENSITY_DESC_LEN);
+    vtl_put_be16(density_code, &p[0]);
+    /* secondary density = same as primary (read-write compatible) */
+    vtl_put_be16(density_code, &p[2]);
+    p[4] = 0x80; /* WRTOK = writable */
+    if (is_default)
+        p[4] |= 0x20; /* DEFAULT */
+    /* media width: 127 = 12.7mm for LTO */
+    vtl_put_be16(127, &p[10]);
+    /* tracks: 0 = not reported for virtual */
+    memcpy(&p[20], "VTL     ", 8);
+    memcpy(&p[28], name, 8);
+    memcpy(&p[36], "VIRTUAL ", 8);
+    return VTL_DENSITY_DESC_LEN;
+}
+
+static int vtl_handle_report_density_support(struct scsi_cmnd *cmd,
+                                             struct vtl_drive *drv)
+{
+    u8 *cdb = cmd->cmnd;
+    u32 alloc_len;
+    u32 data_len;
+    int i;
+    u8 *buf;
+    int off = 0;
+
+    if (cmd->cmd_len >= 10)
+        alloc_len = vtl_get_be32(&cdb[6]);
+    else
+        alloc_len = (cdb[3] << 16) | (cdb[4] << 8) | cdb[5];
+
+    if (alloc_len == 0)
+        return SAM_STAT_GOOD;
+
+    data_len = VTL_NUM_DENSITIES * VTL_DENSITY_DESC_LEN;
+    /* header: 4 bytes (2-byte length + 2 reserved) */
+    if (data_len > VTL_XFER_BUF_MAX - 4U)
+        data_len = VTL_XFER_BUF_MAX - 4U;
+
+    buf = vtl_xfer_buf_alloc(4U + data_len);
+    if (!buf) {
+        vtl_scsi_staging_oom(cmd, &drv->sense);
+        return SAM_STAT_CHECK_CONDITION;
+    }
+
+    memset(buf, 0, 4U + data_len);
+    /* Available density support length = total descriptor bytes */
+    vtl_put_be16((u16)data_len, &buf[0]);
+    /* bytes 2-3 reserved */
+    off = 4;
+
+    for (i = 0; i < VTL_NUM_DENSITIES; i++) {
+        bool is_default =
+            (drv->density == vtl_supported_densities[i].code);
+        if ((u32)(off + VTL_DENSITY_DESC_LEN) > 4U + data_len)
+            break;
+        off += vtl_fill_density_desc(&buf[off],
+                         vtl_supported_densities[i].code,
+                         vtl_supported_densities[i].name,
+                         is_default);
+    }
+
+    {
+        u32 xfer = min_t(u32, alloc_len, (u32)off);
+
+        if (vtl_scsi_copy_to_sg(cmd, buf, (unsigned int)xfer,
+                    &drv->sense)) {
+            vtl_xfer_buf_free(buf);
+            return SAM_STAT_CHECK_CONDITION;
+        }
+    }
+    vtl_xfer_buf_free(buf);
+    return SAM_STAT_GOOD;
+}
+
+/*
  * REPORT LUNS (SPC): lets scsi mid-layer enumerate 0..num_drives without
  * relying on sequential scan edge cases.
  */
@@ -1588,6 +1759,8 @@ static int vtl_tape_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost,
         return vtl_handle_read_position(cmd, drv);
     case PREVENT_ALLOW_MEDIUM_REMOVAL:
         return vtl_handle_prevent_allow(cmd, drv);
+    case REPORT_DENSITY_SUPPORT:
+        return vtl_handle_report_density_support(cmd, drv);
     default:
         return vtl_cmd_illegal(cmd, &drv->sense);
     }
