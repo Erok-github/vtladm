@@ -6547,11 +6547,18 @@ mod iscsi_validate_tests {
 mod web_html_tests {
     use super::build_web_router;
     use axum::body::{to_bytes, Body};
+    use axum::extract::ConnectInfo;
     use axum::http::{header, Request, StatusCode};
     use axum::Router;
     use std::net::SocketAddr;
     use std::sync::Arc;
     use tower::ServiceExt;
+
+    /// Init auth file and reset to known default password so login tests work.
+    fn init_test_auth(auth: &Arc<crate::web_auth::WebState>) {
+        auth.init_auth_file().unwrap();
+        auth.force_reset_auth_no_pw_change(crate::web_auth::DEFAULT_WEB_PASSWORD).unwrap();
+    }
 
     fn tmp_web_auth_path(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -6567,7 +6574,7 @@ mod web_html_tests {
         let p = tmp_web_auth_path("login");
         let _ = std::fs::remove_file(&p);
         let auth = Arc::new(crate::web_auth::WebState::new(p.clone()));
-        auth.init_auth_file().unwrap();
+        init_test_auth(&auth);
         let app = build_web_router(auth);
         let res = app
             .oneshot(
@@ -6597,7 +6604,7 @@ mod web_html_tests {
         let p = tmp_web_auth_path("root302");
         let _ = std::fs::remove_file(&p);
         let auth = Arc::new(crate::web_auth::WebState::new(p.clone()));
-        auth.init_auth_file().unwrap();
+        init_test_auth(&auth);
         let app = build_web_router(auth);
         let res = app
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
@@ -6730,7 +6737,7 @@ mod web_html_tests {
         // 注入 ConnectInfo 以供 login_rate_key 使用
         login_req
             .extensions_mut()
-            .insert(SocketAddr::from(([127, 0, 0, 1], 0)));
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
         let login = app
             .clone()
             .oneshot(login_req)
@@ -6747,7 +6754,7 @@ mod web_html_tests {
         let p = tmp_web_auth_path("iscsi_cfg401");
         let _ = std::fs::remove_file(&p);
         let auth = Arc::new(crate::web_auth::WebState::new(p.clone()));
-        auth.init_auth_file().unwrap();
+        init_test_auth(&auth);
         let app = build_web_router(auth);
         let res = app
             .oneshot(
@@ -6767,7 +6774,7 @@ mod web_html_tests {
         let p = tmp_web_auth_path("iscsi_cfg200");
         let _ = std::fs::remove_file(&p);
         let auth = Arc::new(crate::web_auth::WebState::new(p.clone()));
-        auth.init_auth_file().unwrap();
+        init_test_auth(&auth);
         let app = build_web_router(auth);
         let (cookie, _csrf, app) = web_login_cookie(app).await;
         let res = app
@@ -6800,7 +6807,7 @@ mod web_html_tests {
         let p = tmp_web_auth_path("changer_load401");
         let _ = std::fs::remove_file(&p);
         let auth = Arc::new(crate::web_auth::WebState::new(p.clone()));
-        auth.init_auth_file().unwrap();
+        init_test_auth(&auth);
         let app = build_web_router(auth);
         let res = app
             .oneshot(
@@ -6822,7 +6829,7 @@ mod web_html_tests {
         let p = tmp_web_auth_path("iscsi_allow401");
         let _ = std::fs::remove_file(&p);
         let auth = Arc::new(crate::web_auth::WebState::new(p.clone()));
-        auth.init_auth_file().unwrap();
+        init_test_auth(&auth);
         let app = build_web_router(auth);
         let res = app
             .oneshot(
@@ -6844,7 +6851,7 @@ mod web_html_tests {
         let p = tmp_web_auth_path("iscsi_allow_sess");
         let _ = std::fs::remove_file(&p);
         let auth = Arc::new(crate::web_auth::WebState::new(p.clone()));
-        auth.init_auth_file().unwrap();
+        init_test_auth(&auth);
         let app = build_web_router(auth);
         let (cookie, csrf, app) = web_login_cookie(app).await;
         let post_allow = |body: &str| {
@@ -6887,7 +6894,7 @@ mod web_html_tests {
         let p = tmp_web_auth_path("csrf403");
         let _ = std::fs::remove_file(&p);
         let auth = Arc::new(crate::web_auth::WebState::new(p.clone()));
-        auth.init_auth_file().unwrap();
+        init_test_auth(&auth);
         let app = build_web_router(auth);
         let (cookie, _csrf, app) = web_login_cookie(app).await;
         let res = app
@@ -6911,7 +6918,7 @@ mod web_html_tests {
         let p = tmp_web_auth_path("iscsi_chk401");
         let _ = std::fs::remove_file(&p);
         let auth = Arc::new(crate::web_auth::WebState::new(p.clone()));
-        auth.init_auth_file().unwrap();
+        init_test_auth(&auth);
         let app = build_web_router(auth);
         let res = app
             .oneshot(
@@ -6933,7 +6940,7 @@ mod web_html_tests {
         let p = tmp_web_auth_path("iscsi_chk_sess");
         let _ = std::fs::remove_file(&p);
         let auth = Arc::new(crate::web_auth::WebState::new(p.clone()));
-        auth.init_auth_file().unwrap();
+        init_test_auth(&auth);
         let app = build_web_router(auth);
         let (cookie, csrf, app) = web_login_cookie(app).await;
         let res = app
@@ -7077,7 +7084,14 @@ mod web_html_tests {
             "login must not embed web_boot (runNav)"
         );
         assert!(h.contains("var(--accent)"));
-        assert!(!h.contains(crate::web_auth::DEFAULT_WEB_PASSWORD));
+        /* The default password must not appear as a form value or JSON field.
+         * The bare string "admin" is benign when it appears as the username
+         * hint ("默认用户 admin") or in file names (web_admin.json). */
+        {
+            let pw = crate::web_auth::DEFAULT_WEB_PASSWORD;
+            assert!(!h.contains(&format!("\"password\":\"{}\"", pw)));
+            assert!(!h.contains(&format!("value=\"{}\"", pw)));
+        }
     }
 
     #[test]

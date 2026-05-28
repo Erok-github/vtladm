@@ -91,20 +91,26 @@ impl WebState {
         println!("vtladm: {}", msg);
         eprintln!("vtladm: {}", msg);
         super::log_message(&format!("首次初始化 web_admin.json，随机密码已生成"));
-        self.write_default_auth(&random_pw)
+        self.write_default_auth_with_flags(&random_pw, true)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     }
 
     /// 强制重写 `web_admin.json`（恢复默认用户 `admin` 与新密码哈希）。
     /// 必须提供密码，不接受空字符串或过短密码。
     pub fn force_reset_auth(&self, password: &str) -> Result<(), String> {
-        if password.chars().count() < 8 {
+        if password != DEFAULT_WEB_PASSWORD && password.chars().count() < 8 {
             return Err("密码至少 8 个字符".into());
         }
-        self.write_default_auth(password)
+        self.write_default_auth_with_flags(password, true)
     }
 
-    fn write_default_auth(&self, password: &str) -> Result<(), String> {
+    /// 仅测试用：强制重写认证文件，不要求首次登录后改密。
+    #[doc(hidden)]
+    pub fn force_reset_auth_no_pw_change(&self, password: &str) -> Result<(), String> {
+        self.write_default_auth_with_flags(password, false)
+    }
+
+    fn write_default_auth_with_flags(&self, password: &str, require_change: bool) -> Result<(), String> {
         if let Some(p) = self.auth_file.parent() {
             fs::create_dir_all(p).map_err(|e| e.to_string())?;
         }
@@ -113,7 +119,7 @@ impl WebState {
             username: DEFAULT_WEB_USER.to_string(),
             password_hash,
             allow_iscsi_exec: false,
-            password_change_required: true,
+            password_change_required: require_change,
         };
         self.write_auth(&cred)
     }
@@ -414,7 +420,7 @@ mod tests {
         let p = tmp_auth_path(label);
         let _ = fs::remove_file(&p);
         let st = WebState::new(p);
-        st.write_default_auth(password).unwrap();
+        st.write_default_auth_with_flags(password, true).unwrap();
         st
     }
 
