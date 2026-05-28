@@ -531,6 +531,94 @@ static unsigned int vtl_changer_mode_sense_fill(u8 *buffer, unsigned int buf_max
     return off;
 }
 
+/*
+ * Write MODE SENSE parameter header + optional block descriptor for tape LUN.
+ * Returns number of header bytes written (hdr + bd).
+ * On return buffer[0..ret-1] contains the header; pages go at buffer[ret].
+ */
+static int vtl_mode_tape_write_header(u8 *buf, bool sense10, bool dbd,
+                                      u8 wp, u8 density, u32 block_len)
+{
+    if (sense10) {
+        buf[2] = 0;
+        buf[3] = wp;
+        if (!dbd) {
+            buf[7] = 8;
+            buf[8] = density;
+            buf[9] = 0; buf[10] = 0; buf[11] = 0;
+            buf[12] = 0;
+            buf[13] = (block_len >> 16) & 0xff;
+            buf[14] = (block_len >> 8) & 0xff;
+            buf[15] = (block_len >> 0) & 0xff;
+            return 16;
+        }
+        buf[7] = 0;
+        return 8;
+    }
+    /* MODE SENSE(6) */
+    buf[2] = wp;
+    if (!dbd) {
+        buf[3] = 8;
+        buf[4] = density;
+        buf[5] = 0; buf[6] = 0; buf[7] = 0;
+        buf[8] = 0;
+        buf[9] = (block_len >> 16) & 0xff;
+        buf[10] = (block_len >> 8) & 0xff;
+        buf[11] = (block_len >> 0) & 0xff;
+        return 12;
+    }
+    buf[3] = 0;
+    return 4;
+}
+
+/* Mode page fillers: write page at buf; return bytes written (incl 2-byte header). */
+static int vtl_mode_page_01(u8 *buf)
+{
+    buf[0] = 0x01; buf[1] = 0x0a;  /* Read-Write Error Recovery, 10 bytes */
+    buf[2] = 0x80;  /* AWRE=1 */
+    return 12;
+}
+
+static int vtl_mode_page_0f(u8 *buf)
+{
+    buf[0] = 0x0f; buf[1] = 0x0e;  /* Data Compression, 14 bytes */
+    return 16;
+}
+
+static int vtl_mode_page_10(u8 *buf, u8 density)
+{
+    buf[0] = 0x10; buf[1] = 0x0e;  /* Device Configuration, 14 bytes */
+    buf[9] = density;
+    buf[14] = 0x02;  /* CAP = supports CAP */
+    return 16;
+}
+
+static int vtl_mode_page_1c(u8 *buf)
+{
+    buf[0] = 0x1c; buf[1] = 0x0a;  /* Informational Exceptions Control, 10 bytes */
+    buf[3] = 0x03;  /* MRIE = report on REQUEST SENSE */
+    return 12;
+}
+
+/*
+ * Page 0x3F (all pages) inner writer: appends all supported pages except 0x00.
+ */
+static int vtl_mode_page_3f(u8 *buf, u8 density)
+{
+    int off = 0;
+
+    /* Supported pages list */
+    buf[off++] = 0x00;
+    buf[off++] = 5;
+    buf[off++] = 0x00; buf[off++] = 0x01; buf[off++] = 0x0f;
+    buf[off++] = 0x10; buf[off++] = 0x1c;
+    off += vtl_mode_page_01(buf + off);
+    off += vtl_mode_page_0f(buf + off);
+    off += vtl_mode_page_10(buf + off, density);
+    off += vtl_mode_page_1c(buf + off);
+    return off;
+}
+
 static int vtl_handle_mode_sense(struct scsi_cmnd *cmd, struct vtl_host *vhost)
 {
     u8 *cdb = cmd->cmnd;
@@ -564,10 +652,10 @@ static int vtl_handle_mode_sense(struct scsi_cmnd *cmd, struct vtl_host *vhost)
     if (lun == 0) {
         page = cdb[2] & 0x3f;
         out_len = vtl_changer_mode_sense_fill(buffer, 255, ch, page,
-					    cdb[0] == MODE_SENSE_10);
+                        cdb[0] == MODE_SENSE_10);
     } else {
-        /* Tape LUN: MODE SENSE with density in block descriptor */
         bool sense10, dbd;
+        int hdr, pg;
 
         density = drv ? drv->density : VTL_DEFAULT_DENSITY;
         block_len = drv ? drv->block_size : VTL_DEFAULT_BLOCK_SIZE;
@@ -576,181 +664,35 @@ static int vtl_handle_mode_sense(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         dbd = (cdb[1] & 0x08) != 0;
         page = cdb[2] & 0x3f;
 
-        if (page == 0x00 && dbd) {
-            /* Supported pages list: no block descriptor */
-            memset(buffer, 0, 255);
-            if (sense10) {
-                buffer[1] = 10;
-                buffer[8] = 0x00; buffer[9] = 2;
-                buffer[10] = 0x00; buffer[11] = 0x10;
-                out_len = 12;
-            } else {
-                buffer[0] = 7;
-                buffer[4] = 0x00; buffer[5] = 2;
-                buffer[6] = 0x00; buffer[7] = 0x10;
-                out_len = 8;
-            }
-        } else if (page == 0x00) {
-            /* Supported pages list WITH block descriptor */
-            memset(buffer, 0, 255);
-            if (sense10) {
-                buffer[1] = 18;
-                buffer[3] = wp;
-                buffer[7] = 8;
-                buffer[8] = density;
-                buffer[9] = 0; buffer[10] = 0; buffer[11] = 0;
-                buffer[12] = 0;
-                buffer[13] = (block_len >> 16) & 0xff;
-                buffer[14] = (block_len >> 8) & 0xff;
-                buffer[15] = (block_len >> 0) & 0xff;
-                buffer[16] = 0x00; buffer[17] = 2;
-                buffer[18] = 0x00; buffer[19] = 0x10;
-                out_len = 20;
-            } else {
-                buffer[0] = 15;
-                buffer[2] = wp;
-                buffer[3] = 8;
-                buffer[4] = density;
-                buffer[5] = 0; buffer[6] = 0; buffer[7] = 0;
-                buffer[8] = 0;
-                buffer[9] = (block_len >> 16) & 0xff;
-                buffer[10] = (block_len >> 8) & 0xff;
-                buffer[11] = (block_len >> 0) & 0xff;
-                buffer[12] = 0x00; buffer[13] = 2;
-                buffer[14] = 0x00; buffer[15] = 0x10;
-                out_len = 16;
-            }
-        } else if (page == 0x10 && dbd) {
-            /* Device Configuration (SSC): no block descriptor */
-            memset(buffer, 0, 255);
-            if (sense10) {
-                buffer[1] = 22;
-                buffer[8] = 0x10; buffer[9] = 14;
-                buffer[18] = 2;
-                out_len = 24;
-            } else {
-                buffer[0] = 19;
-                buffer[4] = 0x10; buffer[5] = 14;
-                buffer[14] = 2;
-                out_len = 20;
-            }
+        hdr = vtl_mode_tape_write_header(buffer, sense10, dbd, wp,
+                          density, block_len);
+        pg = 0;
+
+        if (page == 0x00) {
+            /* Supported pages list: 0x00, 0x01, 0x0F, 0x10, 0x1C */
+            buffer[hdr]     = 0x00; buffer[hdr + 1] = 5;
+            buffer[hdr + 2] = 0x00; buffer[hdr + 3] = 0x01;
+            buffer[hdr + 4] = 0x0f; buffer[hdr + 5] = 0x10;
+            buffer[hdr + 6] = 0x1c;
+            pg = 7;
+        } else if (page == 0x01) {
+            pg = vtl_mode_page_01(buffer + hdr);
+        } else if (page == 0x0f) {
+            pg = vtl_mode_page_0f(buffer + hdr);
         } else if (page == 0x10) {
-            /* Device Configuration (SSC) WITH block descriptor */
-            memset(buffer, 0, 255);
-            if (sense10) {
-                buffer[1] = 30;
-                buffer[3] = wp;
-                buffer[7] = 8;
-                buffer[8] = density;
-                buffer[9] = 0; buffer[10] = 0; buffer[11] = 0;
-                buffer[12] = 0;
-                buffer[13] = (block_len >> 16) & 0xff;
-                buffer[14] = (block_len >> 8) & 0xff;
-                buffer[15] = (block_len >> 0) & 0xff;
-                buffer[16] = 0x10; buffer[17] = 14;
-                buffer[28] = 2;
-                out_len = 32;
-            } else {
-                buffer[0] = 27;
-                buffer[2] = wp;
-                buffer[3] = 8;
-                buffer[4] = density;
-                buffer[5] = 0; buffer[6] = 0; buffer[7] = 0;
-                buffer[8] = 0;
-                buffer[9] = (block_len >> 16) & 0xff;
-                buffer[10] = (block_len >> 8) & 0xff;
-                buffer[11] = (block_len >> 0) & 0xff;
-                buffer[12] = 0x10; buffer[13] = 14;
-                buffer[24] = 2;
-                out_len = 28;
-            }
-        } else if (page == 0x3f && dbd) {
-            /* All pages (0x3F), no block descriptor: page 0x00 + page 0x10 */
-            memset(buffer, 0, 255);
-            if (sense10) {
-                buffer[1] = 26;
-                buffer[8] = 0x00; buffer[9] = 2;
-                buffer[10] = 0x00; buffer[11] = 0x10;
-                buffer[12] = 0x10; buffer[13] = 14;
-                buffer[26] = 2;
-                out_len = 28;
-            } else {
-                buffer[0] = 19;
-                buffer[4] = 0x00; buffer[5] = 2;
-                buffer[6] = 0x00; buffer[7] = 0x10;
-                buffer[8] = 0x10; buffer[9] = 14;
-                buffer[22] = 2;
-                out_len = 24;
-            }
+            pg = vtl_mode_page_10(buffer + hdr, density);
+        } else if (page == 0x1c) {
+            pg = vtl_mode_page_1c(buffer + hdr);
         } else if (page == 0x3f) {
-            /* All pages (0x3F) with block descriptor */
-            memset(buffer, 0, 255);
-            if (sense10) {
-                buffer[1] = 34;
-                buffer[3] = wp;
-                buffer[7] = 8;
-                buffer[8] = density;
-                buffer[9] = 0; buffer[10] = 0; buffer[11] = 0;
-                buffer[12] = 0;
-                buffer[13] = (block_len >> 16) & 0xff;
-                buffer[14] = (block_len >> 8) & 0xff;
-                buffer[15] = (block_len >> 0) & 0xff;
-                buffer[16] = 0x00; buffer[17] = 2;
-                buffer[18] = 0x00; buffer[19] = 0x10;
-                buffer[20] = 0x10; buffer[21] = 14;
-                buffer[34] = 2;
-                out_len = 36;
-            } else {
-                buffer[0] = 27;
-                buffer[2] = wp;
-                buffer[3] = 8;
-                buffer[4] = density;
-                buffer[5] = 0; buffer[6] = 0; buffer[7] = 0;
-                buffer[8] = 0;
-                buffer[9] = (block_len >> 16) & 0xff;
-                buffer[10] = (block_len >> 8) & 0xff;
-                buffer[11] = (block_len >> 0) & 0xff;
-                buffer[12] = 0x00; buffer[13] = 2;
-                buffer[14] = 0x00; buffer[15] = 0x10;
-                buffer[16] = 0x10; buffer[17] = 14;
-                buffer[30] = 2;
-                out_len = 32;
-            }
-        } else if (sense10) {
-            /* MODE SENSE(10): block descriptor with density, no specific page */
-            buffer[0] = 0;
-            buffer[1] = 14;
-            buffer[2] = 0;
-            buffer[3] = wp;
-            buffer[4] = 0;
-            buffer[5] = 0;
-            buffer[6] = 0;
-            buffer[7] = 8;
-            buffer[8] = density;
-            buffer[9] = 0;
-            buffer[10] = 0;
-            buffer[11] = 0;
-            buffer[12] = 0;
-            buffer[13] = (block_len >> 16) & 0xff;
-            buffer[14] = (block_len >> 8) & 0xff;
-            buffer[15] = (block_len >> 0) & 0xff;
-            out_len = 16;
-        } else {
-            /* MODE SENSE(6): block descriptor with density, no specific page */
-            buffer[0] = 11;
-            buffer[1] = 0;
-            buffer[2] = wp;
-            buffer[3] = 8;
-            buffer[4] = density;
-            buffer[5] = 0;
-            buffer[6] = 0;
-            buffer[7] = 0;
-            buffer[8] = 0;
-            buffer[9] = (block_len >> 16) & 0xff;
-            buffer[10] = (block_len >> 8) & 0xff;
-            buffer[11] = (block_len >> 0) & 0xff;
-            out_len = 12;
+            pg = vtl_mode_page_3f(buffer + hdr, density);
         }
+        /* Unknown pages: return just header + block descriptor (pg stays 0). */
+
+        out_len = hdr + pg;
+        if (sense10)
+            vtl_put_be16((u16)(out_len - 2), buffer);
+        else
+            buffer[0] = (u8)(out_len - 1);
     }
 
     alloc_len = min_t(unsigned int, alloc_len, 255U);
@@ -762,6 +704,7 @@ static int vtl_handle_mode_sense(struct scsi_cmnd *cmd, struct vtl_host *vhost)
 
     return SAM_STAT_GOOD;
 }
+
 
 static u32 vtl_get_u24(const u8 *p);
 
@@ -1288,8 +1231,39 @@ static unsigned int vtl_log_sense_alloc_len(struct scsi_cmnd *cmd)
 }
 
 /*
- * Minimal LOG SENSE so initiators probing pages get structured data.
- * Page 0x00: supported pages; 0x11: synthetic volume usage from vtl_tape_metadata.
+ * LOG SENSE helper: write a page header (page_code + 2-byte page_length).
+ * Returns offset after the 4-byte header for writing parameters.
+ */
+static int vtl_log_write_page_hdr(u8 *buf, u8 page, u16 pg_len)
+{
+    buf[0] = page;
+    buf[1] = 0;  /* reserved + SPF=0 */
+    buf[2] = (pg_len >> 8) & 0xff;
+    buf[3] = pg_len & 0xff;
+    return 4;
+}
+
+/*
+ * LOG SENSE helper: write a single log parameter.
+ * Returns number of bytes written (4-byte header + param_len).
+ */
+static int vtl_log_write_param(u8 *buf, u16 param_code, u8 param_len)
+{
+    /* Parameter code (big-endian) */
+    buf[0] = (param_code >> 8) & 0xff;
+    buf[1] = param_code & 0xff;
+    /* DU=0, TSD=0, ETC=0, TMC=0, LP=0, LBIN=1 */
+    buf[2] = 0x02;
+    buf[3] = param_len;
+    return 4 + param_len;
+}
+
+/*
+ * SSC-compliant LOG SENSE for tape drives.
+ * Pages: 0x00 (supported), 0x02 (write errors), 0x03 (read errors),
+ * 0x06 (non-medium), 0x0C (sequential access), 0x2E (tape alert).
+ * Unknown pages return an empty page header (parameter length=0) instead
+ * of ILLEGAL REQUEST so initiators see a clean "no data" response.
  */
 static int vtl_handle_log_sense(struct scsi_cmnd *cmd, struct vtl_drive *drv)
 {
@@ -1301,6 +1275,7 @@ static int vtl_handle_log_sense(struct scsi_cmnd *cmd, struct vtl_drive *drv)
     unsigned int z;
     u64 log_bytes_read = 0;
     u64 log_bytes_written = 0;
+    int off;
 
     if (alloc == 0)
         return SAM_STAT_GOOD;
@@ -1313,17 +1288,59 @@ static int vtl_handle_log_sense(struct scsi_cmnd *cmd, struct vtl_drive *drv)
     }
 
     memset(buf, 0, z);
-    out_len = 0;
+    off = 0;
 
-    if (page == 0x00) {
-        buf[0] = 0x00;
-        buf[1] = 0;
-        buf[2] = 0;
-        buf[3] = 2;
-        buf[4] = 0x00;
-        buf[5] = 0x11;
-        out_len = 6;
-    } else if (page == 0x11) {
+    switch (page) {
+    case 0x00:
+        /* Supported pages: 0x00, 0x02, 0x03, 0x06, 0x0C, 0x2E */
+        off = vtl_log_write_page_hdr(buf, 0x00, 7);
+        buf[off++] = 0x00; buf[off++] = 0x02; buf[off++] = 0x03;
+        buf[off++] = 0x06; buf[off++] = 0x0c; buf[off++] = 0x2e;
+        buf[off++] = 0x11;  /* custom volume-usage page */
+        break;
+
+    case 0x02:
+        /* Write Error Counters: total errors (code 0x0001) + total retries (0x0002) */
+        off = vtl_log_write_page_hdr(buf, 0x02,
+             (4 + 8) + (4 + 8));  /* 2 params * 12 bytes each */
+        off += vtl_log_write_param(buf + off, 0x0001, 8); /* bytes 4-11 = 0 */
+        off += vtl_log_write_param(buf + off, 0x0002, 8);
+        break;
+
+    case 0x03:
+        /* Read Error Counters: total errors + total retries */
+        off = vtl_log_write_page_hdr(buf, 0x03, (4 + 8) + (4 + 8));
+        off += vtl_log_write_param(buf + off, 0x0001, 8);
+        off += vtl_log_write_param(buf + off, 0x0002, 8);
+        break;
+
+    case 0x06:
+        /* Non-Medium Error: count */
+        off = vtl_log_write_page_hdr(buf, 0x06, 4 + 8);
+        off += vtl_log_write_param(buf + off, 0x0000, 8);
+        break;
+
+    case 0x0c:
+        /* Sequential Access Device (8 params of 8 bytes each) */
+        off = vtl_log_write_page_hdr(buf, 0x0c, 8 * (4 + 8));
+        off += vtl_log_write_param(buf + off, 0x0000, 8); /* data bytes written */
+        off += vtl_log_write_param(buf + off, 0x0001, 8); /* data bytes read */
+        off += vtl_log_write_param(buf + off, 0x0002, 8); /* bytes written to tape */
+        off += vtl_log_write_param(buf + off, 0x0003, 8); /* bytes read from tape */
+        off += vtl_log_write_param(buf + off, 0x8000, 8); /* cleaning status */
+        off += vtl_log_write_param(buf + off, 0x8001, 8);
+        off += vtl_log_write_param(buf + off, 0x8002, 8);
+        off += vtl_log_write_param(buf + off, 0x8003, 8);
+        break;
+
+    case 0x2e:
+        /* Tape Alert: 1 parameter, 8 bytes of flags (64 bits, all zero = no alerts) */
+        off = vtl_log_write_page_hdr(buf, 0x2e, 4 + 8);
+        off += vtl_log_write_param(buf + off, 0x0000, 8);
+        break;
+
+    case 0x11:
+        /* Custom volume-usage page (existing behaviour) */
         mutex_lock(&drv->lock);
         if (!drv->loaded_tape) {
             mutex_unlock(&drv->lock);
@@ -1337,20 +1354,19 @@ static int vtl_handle_log_sense(struct scsi_cmnd *cmd, struct vtl_drive *drv)
         log_bytes_written = drv->loaded_tape->meta.log_bytes_written;
         mutex_unlock(&drv->loaded_tape->lock);
         mutex_unlock(&drv->lock);
-        buf[0] = 0x11;
-        buf[1] = 0;
-        buf[2] = 0;
-        buf[3] = 16;
-        vtl_put_be64(log_bytes_read, &buf[4]);
-        vtl_put_be64(log_bytes_written, &buf[12]);
-        out_len = 20;
-    } else {
-        vtl_xfer_buf_free(buf);
-        vtl_set_sense(&drv->sense, ILLEGAL_REQUEST, 0x24, 0);
-        vtl_build_sense_buffer(cmd, &drv->sense);
-        return SAM_STAT_CHECK_CONDITION;
+        off = vtl_log_write_page_hdr(buf, 0x11, 16);
+        vtl_put_be64(log_bytes_read, &buf[off]);
+        vtl_put_be64(log_bytes_written, &buf[off + 8]);
+        off += 16;
+        break;
+
+    default:
+        /* Unknown page: return empty page header (parameter length = 0) */
+        off = vtl_log_write_page_hdr(buf, page, 0);
+        break;
     }
 
+    out_len = (u16)off;
     if (vtl_scsi_copy_to_sg(cmd, buf, min_t(unsigned int, out_len, z), &drv->sense)) {
         vtl_xfer_buf_free(buf);
         return SAM_STAT_CHECK_CONDITION;
@@ -1358,6 +1374,7 @@ static int vtl_handle_log_sense(struct scsi_cmnd *cmd, struct vtl_drive *drv)
     vtl_xfer_buf_free(buf);
     return SAM_STAT_GOOD;
 }
+
 
 /* SSC READ POSITION — long form service action 0x00 or 0x01 */
 static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv)
