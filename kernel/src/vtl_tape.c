@@ -738,7 +738,7 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
     /* Attempt compression if enabled and data is non-empty */
     if (drv->compression_enabled &&
         drv->compression_algorithm != VTL_COMP_NONE && to_write > 0) {
-        unsigned int buf_sz = to_write + to_write / 16 + 64 +
+        unsigned int buf_sz = to_write + to_write / 16 + 64 + 3 +
                               VTL_BLOCK_HEADER_SIZE;
 
         comp_buf = vmalloc(buf_sz);

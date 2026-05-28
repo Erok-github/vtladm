@@ -353,7 +353,15 @@ fn link_tape_root_alias(dest: &Path, src: &Path, root: &Path) -> std::io::Result
     }
 
     match fs::hard_link(&src, dest) {
-        Ok(()) => Ok(Some(true)),
+        Ok(()) => {
+            // Also link the .vtlmeta sidecar if present
+            let src_meta = meta_image_path(&src);
+            let dest_meta = meta_image_path(dest);
+            if src_meta.exists() && !dest_meta.exists() {
+                let _ = fs::hard_link(&src_meta, &dest_meta);
+            }
+            Ok(Some(true))
+        }
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             symlink(&src, dest)?;
             Ok(Some(true))
