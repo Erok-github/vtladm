@@ -820,7 +820,9 @@ static int vtl_handle_mode_select(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         if (new_block_size >= VTL_MIN_BLOCK_SIZE &&
             new_block_size <= VTL_MAX_BLOCK_SIZE)
             drv->block_size = new_block_size;
-        else if (new_block_size != 0)
+        else if (new_block_size == 0)
+            drv->block_size = 0;
+        else
             pr_info("VTL: MODE SELECT block_size %u out of range, ignored\n",
                 new_block_size);
         mutex_unlock(&drv->lock);

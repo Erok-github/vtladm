@@ -324,6 +324,17 @@ struct vtl_tape *vtl_tape_open_existing(const char *name)
     tape->write_protected = false;
     mutex_init(&tape->lock);
     memset(&tape->meta, 0, sizeof(tape->meta));
+    tape->meta.capacity = i_size_read(file_inode(filp));
+    if (tape->meta.capacity < VTL_MIN_TAPE_SIZE) {
+        pr_warn("VTL: tape %s file size %llu below minimum, clamping to %llu\n",
+            name, tape->meta.capacity, (u64)VTL_MIN_TAPE_SIZE);
+        tape->meta.capacity = VTL_MIN_TAPE_SIZE;
+    }
+    if (tape->meta.capacity > VTL_MAX_TAPE_SIZE) {
+        pr_warn("VTL: tape %s file size %llu exceeds maximum, clamping to %llu\n",
+            name, tape->meta.capacity, (u64)VTL_MAX_TAPE_SIZE);
+        tape->meta.capacity = VTL_MAX_TAPE_SIZE;
+    }
     strncpy(tape->meta.serial, name, sizeof(tape->meta.serial) - 1);
     tape->meta.serial[sizeof(tape->meta.serial) - 1] = '\0';
     strncpy(tape->meta.barcode, name, min_t(size_t, 8, strlen(name)));
@@ -848,7 +859,6 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
             goto out;
         }
         t = ms->tape;
-            vtl_tape_put(ms->tape);
         ms->tape = NULL;
         ms->occupied = false;
         vtl_tape_put(t);
