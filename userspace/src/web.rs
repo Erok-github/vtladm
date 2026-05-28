@@ -5209,6 +5209,8 @@ document.getElementById('btauto').onclick=async()=>{
   if(!size){document.getElementById('te').textContent='请填写容量';return;}
   const shv=document.getElementById('tshelf').value;
   const density=document.getElementById('tdensity').value;
+  const szErr=checkCapacityForDensity(size,density);
+  if(szErr){document.getElementById('te').textContent=szErr;return;}
   const lib=document.getElementById('tlib').value;
   const btn=document.getElementById('btauto');
   btn.disabled=true;btn.textContent='创建中（'+cnt+' 条）…';
@@ -5220,6 +5222,44 @@ document.getElementById('btauto').onclick=async()=>{
   showToast('已创建 '+ns.length+' 条 '+span);
   await loadTapeMaintainTable();
 };
+// --- Density capacity hints & validation ---
+const DENSITY_LIMITS={
+  '0x40':{min:100*1024*1024,max:1*1024*1024*1024*1024,minH:'100 MB',maxH:'1 TB'},
+  '0x4A':{min:1*1024*1024*1024,max:3*1024*1024*1024*1024,minH:'1 GB',maxH:'3 TB'},
+  '0x4C':{min:1*1024*1024*1024,max:6*1024*1024*1024*1024,minH:'1 GB',maxH:'6 TB'},
+  '0x4E':{min:1*1024*1024*1024,max:15*1024*1024*1024*1024,minH:'1 GB',maxH:'15 TB'},
+  '0x50':{min:1*1024*1024*1024,max:30*1024*1024*1024*1024,minH:'1 GB',maxH:'30 TB'},
+  '0x52':{min:1*1024*1024*1024,max:45*1024*1024*1024*1024,minH:'1 GB',maxH:'45 TB'},
+  '0x58':{min:1*1024*1024*1024,max:90*1024*1024*1024*1024,minH:'1 GB',maxH:'90 TB'},
+};
+function parseSizeHuman(s){
+  s=String(s).trim().toUpperCase();
+  let num='',unit='';
+  for(const c of s){if((c>='0'&&c<='9')||c==='.')num+=c;else unit+=c;}
+  const n=parseFloat(num);
+  if(isNaN(n)||n<0)return null;
+  const m={ '':1,'B':1,'K':1024,'KB':1024,'M':1048576,'MB':1048576,'G':1073741824,'GB':1073741824,'T':1099511627776,'TB':1099511627776 };
+  const mult=m[unit];
+  if(mult===undefined)return null;
+  return Math.round(n*mult);
+}
+function updateCapacityHint(){
+  const d=document.getElementById('tdensity').value;
+  const lim=DENSITY_LIMITS[d]||DENSITY_LIMITS['0x40'];
+  const el=document.getElementById('tsize');
+  el.placeholder=lim.minH+' - '+lim.maxH+' ('+d+')';
+  el.title='容量范围：'+lim.minH+' 到 '+lim.maxH;
+}
+function checkCapacityForDensity(sizeStr,densityCode){
+  const bytes=parseSizeHuman(sizeStr);
+  if(bytes===null)return '无法解析容量值：'+sizeStr;
+  const lim=DENSITY_LIMITS[densityCode]||DENSITY_LIMITS['0x40'];
+  if(bytes<lim.min)return '容量 '+fmtBytes(bytes)+' 小于 '+densityCode+' 最小 '+lim.minH;
+  if(bytes>lim.max)return '容量 '+fmtBytes(bytes)+' 超过 '+densityCode+' 最大 '+lim.maxH;
+  return null;
+}
+document.getElementById('tdensity').addEventListener('change',updateCapacityHint);
+updateCapacityHint();
 document.getElementById('mst').onclick=()=>{document.querySelectorAll('.cm').forEach(x=>{x.checked=true;});};
 document.getElementById('mclr').onclick=()=>{document.querySelectorAll('.cm').forEach(x=>{x.checked=false;});};
 document.getElementById('bmig').onclick=async()=>{
