@@ -36,6 +36,41 @@
 #define vtl_scsi_done(cmd) ((cmd)->scsi_done(cmd))
 #endif
 
+/*
+ * Big-endian helpers — avoid <linux/unaligned.h>: some vendor kernel-devel
+ * packages (e.g. certain Kylin trees) omit that header while still on 4.19.
+ */
+static inline u32 vtl_get_be32(const u8 *p)
+{
+    return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
+}
+
+static inline void vtl_put_be32(u32 v, u8 *p)
+{
+    p[0] = (u8)(v >> 24);
+    p[1] = (u8)(v >> 16);
+    p[2] = (u8)(v >> 8);
+    p[3] = (u8)v;
+}
+
+static inline void vtl_put_be16(u16 v, u8 *p)
+{
+    p[0] = (u8)(v >> 8);
+    p[1] = (u8)v;
+}
+
+static inline void vtl_put_be64(u64 v, u8 *p)
+{
+    p[0] = (u8)(v >> 56);
+    p[1] = (u8)(v >> 48);
+    p[2] = (u8)(v >> 40);
+    p[3] = (u8)(v >> 32);
+    p[4] = (u8)(v >> 24);
+    p[5] = (u8)(v >> 16);
+    p[6] = (u8)(v >> 8);
+    p[7] = (u8)v;
+}
+
 #define VTL_VERSION "1.0.0"
 #define VTL_NAME "vtl"
 
@@ -58,6 +93,15 @@
 #define VTL_MIN_BLOCK_SIZE 512
 #define VTL_MAX_BLOCK_SIZE (1024 * 1024)
 #define VTL_DEFAULT_BLOCK_SIZE 32768
+#define VTL_DEFAULT_DENSITY 0x40 /* Default LTO (Ultrium) */
+
+/* T10 SCSI density codes for sequential-access devices (SSC-5) */
+#define VTL_DENSITY_LTO5     0x4A
+#define VTL_DENSITY_LTO6     0x4C
+#define VTL_DENSITY_LTO7     0x4E
+#define VTL_DENSITY_LTO8     0x50
+#define VTL_DENSITY_LTO9     0x52
+#define VTL_DENSITY_LTO10    0x58
 
 #define VTL_MIN_TAPE_SIZE (10 * 1024 * 1024)
 #define VTL_MAX_TAPE_SIZE (10ULL * 1024 * 1024 * 1024 * 1024)
@@ -76,6 +120,13 @@
 #define VTL_SMC_ELEM_ST 0x02 /* storage */
 #define VTL_SMC_ELEM_IE 0x03 /* import/export */
 #define VTL_SMC_ELEM_DT 0x04 /* data transfer (tape drives) */
+
+/* PVolTag format selection for READ ELEMENT STATUS */
+#define VTL_CDB_PV_BIT       0x10 /* Primary Volume Tag bit in CDB byte 1 */
+#define VTL_PVOLTAG_AUTO     0  /* Heuristic: mtx detection + Mars/Veritas workaround */
+#define VTL_PVOLTAG_STANDARD 1  /* SMC-3 standard: 4-byte PVolTag header at bytes 12-15 */
+#define VTL_PVOLTAG_MTX      2  /* mtx-compatible: barcode directly at byte 12 */
+extern int vtl_pvoltag_format;
 
 struct vtl_sense_data {
     u8 key;
@@ -103,6 +154,7 @@ struct vtl_tape_metadata {
     u64 log_bytes_read;
     u64 log_bytes_written;
     u32 mount_count;
+    u8 density;       /* T10 density code from sidecar metadata */
 };
 
 struct vtl_tape {
@@ -184,7 +236,12 @@ void vtl_slave_destroy(struct scsi_device *sdev);
 int vtl_slave_configure(struct scsi_device *sdev);
 int vtl_change_queue_depth(struct scsi_device *sdev, int depth);
 
-int vtl_tape_create(const char *name, u64 size);
+int vtl_tape_create(const char *name, u64 size, u8 density);
+
+/* Sidecar metadata (VTLMETA) I/O */
+int vtl_meta_write(const char *tape_path, u8 density);
+int vtl_meta_read(const char *tape_path, u8 *density_out);
+void vtl_format_meta_path(char *buf, size_t len, const char *tape_path);
 struct vtl_tape *vtl_tape_find_by_name(const char *name);
 struct vtl_tape *vtl_tape_open_existing(const char *name);
 void vtl_tape_set_barcode(struct vtl_tape *tape, const char *barcode);
@@ -211,8 +268,8 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst);
 int vtl_changer_remove_medium(struct vtl_changer *ch, int elem);
 int vtl_changer_exchange_medium(struct vtl_changer *ch, int src1, int src2, int dst);
 int vtl_changer_read_element_status(struct vtl_changer *ch, u8 *buffer, u32 len,
-				    bool voltag, u8 elem_type, int start_elem,
-				    int num_elems);
+				    bool voltag, bool voltag_std, u8 elem_type,
+				    int start_elem, int num_elems);
 int vtl_changer_collect_inventory(struct vtl_changer *ch, int *num_drives,
 				  int *num_slots, int *num_mailslots,
 				  int *count, int *truncated, int elements[],

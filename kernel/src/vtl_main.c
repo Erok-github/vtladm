@@ -982,6 +982,7 @@ static struct vtl_changer *vtl_changer_alloc(int id, int num_drives, int num_slo
         snprintf(drv->name, sizeof(drv->name), "vtl-drive-%d", i);
         drv->source_slot = -1;
         drv->block_size = VTL_DEFAULT_BLOCK_SIZE;
+        drv->density = VTL_DEFAULT_DENSITY;
         drv->at_bot = true;
         mutex_init(&drv->lock);
     }
@@ -1458,3 +1459,24 @@ char *vtl_tape_dir = "/opt/vtladm/var/tapes";
 module_param_named(tape_dir, vtl_tape_dir, charp, 0644);
 MODULE_PARM_DESC(tape_dir,
     "Directory for tape image files (<dir>/<name>.vtltape); align with vtladm tape_dir");
+
+/* PVolTag format for READ ELEMENT STATUS barcode layout */
+int vtl_pvoltag_format = VTL_PVOLTAG_AUTO;
+
+static int vtl_pvoltag_set(const char *val, const struct kernel_param *kp)
+{
+    int v, ret;
+
+    ret = kstrtoint(val, 0, &v);
+    if (ret < 0 || v < 0 || v > 2)
+        return -EINVAL;
+    return param_set_int(val, kp);
+}
+
+static const struct kernel_param_ops vtl_pvoltag_ops = {
+    .set = vtl_pvoltag_set,
+    .get = param_get_int,
+};
+module_param_cb(pvoltag_format, &vtl_pvoltag_ops, &vtl_pvoltag_format, 0644);
+MODULE_PARM_DESC(pvoltag_format,
+    "PVolTag barcode format: 0=auto (heuristic, default), 1=standard SMC-3, 2=mtx");

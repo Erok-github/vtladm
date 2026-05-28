@@ -17,6 +17,7 @@ _vtl_conf_get() {
     fi
   fi
   [ -n "$_default" ] && printf '%s' "$_default"
+  return 0
 }
 
 # Env vars take precedence for runtime overrides

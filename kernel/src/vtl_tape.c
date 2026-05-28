@@ -91,7 +91,106 @@ static void vtl_generate_barcode(char *buf, int len)
     snprintf(buf, len, "VTL%06llX", val);
 }
 
-int vtl_tape_create(const char *name, u64 size)
+/* Sidecar metadata file format (24 bytes, little-endian):
+ *   u32: magic 0x564C544D ("VTML")
+ *   u16: version 1
+ *   u8:  density code
+ *   u8:  flags (reserved)
+ *   u8[16]: reserved
+ */
+#define VTL_META_MAGIC   0x564C544D
+#define VTL_META_VERSION 1
+
+struct vtl_meta_header {
+    __le32 magic;
+    __le16 version;
+    u8     density;
+    u8     flags;
+    u8     reserved[16];
+} __packed;
+
+void vtl_format_meta_path(char *buf, size_t len, const char *tape_path)
+{
+    size_t plen;
+
+    strlcpy(buf, tape_path, len);
+    plen = strnlen(buf, len);
+    if (plen > 8 && !strcmp(buf + plen - 8, ".vtltape"))
+        snprintf(buf + plen - 8, len - (plen - 8), ".vtlmeta");
+}
+
+int vtl_meta_write(const char *tape_path, u8 density)
+{
+    struct vtl_meta_header hdr;
+    struct file *filp;
+    char meta_path[256];
+    loff_t pos = 0;
+    ssize_t written;
+
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.magic = cpu_to_le32(VTL_META_MAGIC);
+    hdr.version = cpu_to_le16(VTL_META_VERSION);
+    hdr.density = density;
+
+    vtl_format_meta_path(meta_path, sizeof(meta_path), tape_path);
+
+    filp = filp_open(meta_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (IS_ERR(filp)) {
+        pr_warn("VTL: Cannot create meta file %s: %ld\n", meta_path,
+            PTR_ERR(filp));
+        return PTR_ERR(filp);
+    }
+
+    written = kernel_write(filp, &hdr, sizeof(hdr), &pos);
+    if (written != sizeof(hdr)) {
+        pr_warn("VTL: Short write on meta file %s: %zd/%zu\n", meta_path,
+            written, sizeof(hdr));
+        filp_close(filp, NULL);
+        return -EIO;
+    }
+
+    vfs_fsync(filp, 0);
+    filp_close(filp, NULL);
+    return 0;
+}
+
+int vtl_meta_read(const char *tape_path, u8 *density_out)
+{
+    struct vtl_meta_header hdr;
+    struct file *filp;
+    char meta_path[256];
+    loff_t pos = 0;
+    ssize_t n;
+
+    vtl_format_meta_path(meta_path, sizeof(meta_path), tape_path);
+
+    filp = filp_open(meta_path, O_RDONLY, 0);
+    if (IS_ERR(filp))
+        return PTR_ERR(filp);
+
+    n = kernel_read(filp, &hdr, sizeof(hdr), &pos);
+    filp_close(filp, NULL);
+
+    if (n < 0)
+        return (int)n;
+    if ((size_t)n < sizeof(hdr))
+        return -EIO;
+
+    if (le32_to_cpu(hdr.magic) != VTL_META_MAGIC) {
+        pr_warn("VTL: Bad meta magic in %s\n", meta_path);
+        return -EINVAL;
+    }
+    if (le16_to_cpu(hdr.version) != VTL_META_VERSION) {
+        pr_warn("VTL: Unsupported meta version %u in %s\n",
+            le16_to_cpu(hdr.version), meta_path);
+        return -EINVAL;
+    }
+
+    *density_out = hdr.density;
+    return 0;
+}
+
+int vtl_tape_create(const char *name, u64 size, u8 density)
 {
     struct vtl_tape *tape;
     struct file *filp;
@@ -144,7 +243,11 @@ int vtl_tape_create(const char *name, u64 size)
     tape->meta.accessed = tape->meta.created;
     tape->meta.num_snapshots = 0;
     tape->meta.filemarks = NULL;
+    tape->meta.density = density;
     kref_init(&tape->ref);
+
+    /* Write sidecar metadata file (non-fatal on failure) */
+    vtl_meta_write(path, density);
 
     mutex_lock(&vtl_tape_lock);
     for (ret = 0; ret < VTL_MAX_SLOTS; ret++) {
@@ -226,6 +329,13 @@ struct vtl_tape *vtl_tape_open_existing(const char *name)
     strncpy(tape->meta.barcode, name, min_t(size_t, 8, strlen(name)));
     tape->meta.barcode[sizeof(tape->meta.barcode) - 1] = '\0';
     tape->meta.block_size = VTL_DEFAULT_BLOCK_SIZE;
+    {
+        u8 d = VTL_DEFAULT_DENSITY;
+        if (vtl_meta_read(path, &d) == 0)
+            tape->meta.density = d;
+        else
+            tape->meta.density = VTL_DEFAULT_DENSITY;
+    }
     tape->meta.created = ktime_get_real_seconds();
     tape->meta.accessed = tape->meta.created;
     kref_init(&tape->ref);
@@ -263,6 +373,9 @@ int vtl_changer_slot_place(struct vtl_changer *ch, int slot, struct vtl_tape *ta
     if (dst_slot->occupied && dst_slot->tape != tape) {
         mutex_unlock(&ch->lock);
         return -EBUSY;
+    }
+    if (!dst_slot->occupied) {
+        kref_get(&tape->ref);
     }
     dst_slot->tape = tape;
     dst_slot->occupied = true;
@@ -327,6 +440,14 @@ void vtl_changer_clear_media(struct vtl_changer *ch)
     if (!ch)
         return;
 
+    /* Clamp to static array sizes as defense-in-depth against corruption. */
+    if (ch->num_drives > VTL_MAX_DRIVES)
+        ch->num_drives = VTL_MAX_DRIVES;
+    if (ch->num_slots > VTL_MAX_SLOTS)
+        ch->num_slots = VTL_MAX_SLOTS;
+    if (ch->num_mailslots > VTL_MAX_MAILSLOTS)
+        ch->num_mailslots = VTL_MAX_MAILSLOTS;
+
     /* Do not take ch->lock while holding drv->lock (move_medium takes ch->lock first). */
     for (i = 0; i < ch->num_drives; i++) {
         struct vtl_drive *d = &ch->drives[i];
@@ -339,16 +460,21 @@ void vtl_changer_clear_media(struct vtl_changer *ch)
             d->loaded_tape = NULL;
             t->loaded = false;
             mutex_unlock(&t->lock);
+            vtl_tape_put(t);
         }
         mutex_unlock(&d->lock);
     }
 
     mutex_lock(&ch->lock);
     for (i = 0; i < ch->num_slots; i++) {
+            if (ch->slots[i].occupied && ch->slots[i].tape)
+                vtl_tape_put(ch->slots[i].tape);
         ch->slots[i].tape = NULL;
         ch->slots[i].occupied = false;
     }
     for (i = 0; i < ch->num_mailslots; i++) {
+            if (ch->mailslots[i].occupied && ch->mailslots[i].tape)
+                vtl_tape_put(ch->mailslots[i].tape);
         ch->mailslots[i].tape = NULL;
         ch->mailslots[i].occupied = false;
     }
@@ -383,11 +509,16 @@ int vtl_tape_load(struct vtl_drive *drv, struct vtl_tape *tape)
     }
 
     drv->loaded_tape = tape;
+    kref_get(&tape->ref);
     tape->loaded = true;
     tape->position = 0;
     drv->at_bot = true;
     drv->at_end = false;
     drv->at_filemark = false;
+    if (tape->meta.block_size >= VTL_MIN_BLOCK_SIZE &&
+        tape->meta.block_size <= VTL_MAX_BLOCK_SIZE)
+        drv->block_size = tape->meta.block_size;
+    drv->density = tape->meta.density;
 
     tape->meta.accessed = ktime_get_real_seconds();
     tape->meta.mount_count++;
@@ -415,6 +546,7 @@ int vtl_tape_unload(struct vtl_drive *drv)
 
     drv->loaded_tape = NULL;
     tape->loaded = false;
+    vtl_tape_put(tape);
 
     mutex_unlock(&tape->lock);
     mutex_unlock(&drv->lock);
@@ -679,6 +811,7 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
         t = src_slot->tape;
         src_slot->tape = NULL;
         src_slot->occupied = false;
+        vtl_tape_put(t);
 	    } else if (src < VTL_ELEM_IE_BASE) {
 	        struct vtl_drive *src_drv;
 	        int di = src - VTL_ELEM_DRIVE_BASE;
@@ -702,6 +835,7 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 	        src_drv->at_filemark = false;
 	        src_drv->at_end = false;
 	        src_drv->at_bot = true;
+            vtl_tape_put(t);
 	        mutex_unlock(&src_drv->lock);
     } else if (src >= VTL_ELEM_IE_BASE &&
 	       src < VTL_ELEM_IE_BASE + ch->num_mailslots) {
@@ -714,8 +848,10 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
             goto out;
         }
         t = ms->tape;
+            vtl_tape_put(ms->tape);
         ms->tape = NULL;
         ms->occupied = false;
+        vtl_tape_put(t);
     } else {
         ret = -EINVAL;
         goto out;
@@ -735,6 +871,7 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
         }
         dst_slot->tape = t;
         dst_slot->occupied = true;
+        kref_get(&t->ref);
     } else if (dst < VTL_ELEM_IE_BASE) {
         struct vtl_drive *dst_drv;
         int di = dst - VTL_ELEM_DRIVE_BASE;
@@ -751,11 +888,16 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 	            goto rollback;
 	        }
 	        dst_drv->loaded_tape = t;
-        dst_drv->source_slot = src;
+	        kref_get(&t->ref);
+        dst_drv->source_slot = (src < 1000) ? src : saved_source_slot;
 	        t->loaded = true;
 	        dst_drv->at_filemark = false;
 	        dst_drv->at_end = false;
 	        dst_drv->at_bot = true;
+	        if (t->meta.block_size >= VTL_MIN_BLOCK_SIZE &&
+	            t->meta.block_size <= VTL_MAX_BLOCK_SIZE)
+	            dst_drv->block_size = t->meta.block_size;
+	        dst_drv->density = t->meta.density;
 	        mutex_unlock(&dst_drv->lock);
     } else if (dst >= VTL_ELEM_IE_BASE &&
 	       dst < VTL_ELEM_IE_BASE + ch->num_mailslots) {
@@ -770,6 +912,7 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
         ms->tape = t;
         ms->occupied = true;
         t->loaded = false;
+        kref_get(&t->ref);
     } else {
         ret = -EINVAL;
         goto rollback;
@@ -782,6 +925,7 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 rollback:
     if (src < 1000 && src >= 0 && src < ch->num_slots) {
         ch->slots[src].tape = t;
+        kref_get(&t->ref);
         ch->slots[src].occupied = (t != NULL);
     } else if (src >= VTL_ELEM_DRIVE_BASE && src < VTL_ELEM_IE_BASE) {
         int di = src - VTL_ELEM_DRIVE_BASE;
@@ -789,6 +933,7 @@ rollback:
 	        if (di >= 0 && di < ch->num_drives && t) {
 	            mutex_lock(&ch->drives[di].lock);
 	            ch->drives[di].loaded_tape = t;
+	            kref_get(&t->ref);
             ch->drives[di].source_slot = saved_source_slot;
 	            t->loaded = true;
 	            ch->drives[di].at_filemark = false;
@@ -802,6 +947,7 @@ rollback:
 
         if (mi >= 0 && mi < ch->num_mailslots && t) {
             ch->mailslots[mi].tape = t;
+            kref_get(&t->ref);
             ch->mailslots[mi].occupied = true;
             t->loaded = false;
         }
@@ -835,10 +981,12 @@ int vtl_changer_remove_medium(struct vtl_changer *ch, int elem)
             ret = -ENODEV;
             goto out;
         }
+            vtl_tape_put(s->tape);
         s->tape = NULL;
         s->occupied = false;
     } else if (elem < VTL_ELEM_IE_BASE) {
         struct vtl_drive *d;
+        struct vtl_tape *t;
         int di = elem - VTL_ELEM_DRIVE_BASE;
 
         if (di < 0 || di >= ch->num_drives) {
@@ -852,12 +1000,14 @@ int vtl_changer_remove_medium(struct vtl_changer *ch, int elem)
 	            ret = -ENODEV;
 	            goto out;
 	        }
+	        t = d->loaded_tape;
 	        d->loaded_tape->loaded = false;
 	        d->loaded_tape = NULL;
 	        d->at_filemark = false;
 	        d->at_end = false;
 	        d->at_bot = true;
 	        mutex_unlock(&d->lock);
+	        vtl_tape_put(t);
     } else if (elem >= VTL_ELEM_IE_BASE &&
 	       elem < VTL_ELEM_IE_BASE + ch->num_mailslots) {
         struct vtl_slot *ms;
@@ -868,6 +1018,7 @@ int vtl_changer_remove_medium(struct vtl_changer *ch, int elem)
             ret = -ENODEV;
             goto out;
         }
+            vtl_tape_put(ms->tape);
         ms->tape = NULL;
         ms->occupied = false;
     } else {
@@ -899,8 +1050,8 @@ int vtl_changer_exchange_medium(struct vtl_changer *ch, int src1, int src2, int 
 #define VTL_RES_DESC_VOLTAG 52U
 
 static u32 vtl_elem_status_desc(u8 *p, u32 buf_left, u8 elem_type, int addr,
-				bool full, const char *barcode, bool voltag,
-				int source_slot)
+                bool full, const char *barcode, bool voltag,
+                bool voltag_std, int source_slot)
 {
     u32 dlen = voltag ? VTL_RES_DESC_VOLTAG : VTL_RES_DESC_SHORT;
     size_t tag_len;
@@ -915,25 +1066,26 @@ static u32 vtl_elem_status_desc(u8 *p, u32 buf_left, u8 elem_type, int addr,
     p[2] = full ? 0x01 : 0x00;
     p[3] = (elem_type & 0x07) << 5;
 
-    /* Data Transfer element: bytes 10-11 = Source Storage Element Address
-     * (SMC-3 §6.4.3.3 Table — mtx TransportElementDescriptor puts
-     *  SourceStorageElementAddress at offset 10, after SValid/Invert at byte 9) */
+    /* Data Transfer element: bytes 10-11 = Source Storage Element Address */
     if (elem_type == VTL_SMC_ELEM_DT && full && source_slot >= 0) {
-        p[9] |= 0x40;  /* SValid: source address valid (SMC-3 byte 9 bit 6) */
+        p[9] |= 0x40;
         p[10] = (source_slot >> 8) & 0xff;
         p[11] = source_slot & 0xff;
     }
 
     if (voltag && full && barcode && barcode[0]) {
-        /* PVolTag field at bytes 12-51 (40 bytes).
-         * mtx and other common initiators read PrimaryVolumeTag starting at
-         * byte 12 without a parameter-length prefix.  Place the volume
-         * identifier (up to 36 chars, space-padded) directly at byte 12 so
-         * copy_barcode() in mtxl.c sees printable characters at offset 0. */
         tag_len = strnlen(barcode, 36U);
-        /* left-align, space-pad the 36-byte field */
-        memset(&p[12], ' ', 36);
-        memcpy(&p[12], barcode, tag_len);
+        if (voltag_std) {
+            /* SMC-3 standard: 4-byte PVolTag header (reserved+length=36),
+             * then 36-byte volume identifier at bytes 16-51. */
+            vtl_put_be32(36, &p[12]);
+            memset(&p[16], ' ', 36);
+            memcpy(&p[16], barcode, tag_len);
+        } else {
+            /* mtx-compatible: barcode directly at byte 12, 36 chars. */
+            memset(&p[12], ' ', 36);
+            memcpy(&p[12], barcode, tag_len);
+        }
     }
     return dlen;
 }
@@ -952,26 +1104,12 @@ static bool vtl_elem_in_range(int addr, int start, int num)
     return addr >= start && addr < start + num;
 }
 
-static void vtl_put_be16(u16 v, u8 *p)
-{
-    p[0] = (v >> 8) & 0xff;
-    p[1] = v & 0xff;
-}
-
-static void vtl_put_be32(u32 v, u8 *p)
-{
-    p[0] = (v >> 24) & 0xff;
-    p[1] = (v >> 16) & 0xff;
-    p[2] = (v >> 8) & 0xff;
-    p[3] = v & 0xff;
-}
-
 /*
  * Append one SMC-3 Element Status Page (8-byte page header + descriptors).
  * Returns bytes written, or 0 if buffer too small.
  */
 static u32 vtl_append_elem_status_page(struct vtl_changer *ch, u8 *p, u32 left,
-				       u8 smc_type, bool voltag,
+				       u8 smc_type, bool voltag, bool voltag_std,
 				       int start_elem, int num_elems,
 				       u8 cdb_type_filter)
 {
@@ -1005,7 +1143,7 @@ static u32 vtl_append_elem_status_page(struct vtl_changer *ch, u8 *p, u32 left,
 					     smc_type, i,
 					     slot->occupied && slot->tape != NULL,
 					     slot->tape ? slot->tape->meta.barcode : NULL,
-					     voltag, -1);
+					     voltag, voltag_std, -1);
             if (!n)
                 break;
             desc_bytes += n;
@@ -1033,7 +1171,7 @@ static u32 vtl_append_elem_status_page(struct vtl_changer *ch, u8 *p, u32 left,
 						     smc_type, addr,
 						     tape != NULL,
 						     tape ? barcode : NULL,
-						     voltag, drv_source_slot);
+						     voltag, voltag_std, drv_source_slot);
             if (!n)
                 break;
             desc_bytes += n;
@@ -1053,7 +1191,7 @@ static u32 vtl_append_elem_status_page(struct vtl_changer *ch, u8 *p, u32 left,
 					     smc_type, addr,
 					     ms->occupied && ms->tape != NULL,
 					     ms->tape ? ms->tape->meta.barcode : NULL,
-					     voltag, -1);
+					     voltag, voltag_std, -1);
             if (!n)
                 break;
             desc_bytes += n;
@@ -1130,8 +1268,8 @@ static void vtl_res_write_data_header(u8 *buffer, u32 pages_len, u16 first_addr,
 }
 
 int vtl_changer_read_element_status(struct vtl_changer *ch, u8 *buffer, u32 len,
-				    bool voltag, u8 elem_type, int start_elem,
-				    int num_elems)
+				    bool voltag, bool voltag_std, u8 elem_type,
+				    int start_elem, int num_elems)
 {
     u8 *p;
     u32 pages_len = 0;
@@ -1145,18 +1283,18 @@ int vtl_changer_read_element_status(struct vtl_changer *ch, u8 *buffer, u32 len,
 
     p = buffer + 8;
 
-    n = vtl_append_elem_status_page(ch, p, len - 8, VTL_SMC_ELEM_ST, voltag,
+    n = vtl_append_elem_status_page(ch, p, len - 8, VTL_SMC_ELEM_ST, voltag, voltag_std,
 				    start_elem, num_elems, elem_type);
     pages_len += n;
     p += n;
 
     n = vtl_append_elem_status_page(ch, p, len - 8 - pages_len, VTL_SMC_ELEM_DT,
-				    voltag, start_elem, num_elems, elem_type);
+				    voltag, voltag_std, start_elem, num_elems, elem_type);
     pages_len += n;
     p += n;
 
     n = vtl_append_elem_status_page(ch, p, len - 8 - pages_len, VTL_SMC_ELEM_IE,
-				    voltag, start_elem, num_elems, elem_type);
+				    voltag, voltag_std, start_elem, num_elems, elem_type);
     pages_len += n;
 
     mutex_unlock(&ch->lock);

@@ -1312,6 +1312,7 @@ struct ManageTapeCreate {
     name: String,
     size: String,
     shelf: Option<String>,
+    density: Option<String>,
 }
 
 async fn api_manage_tape_create(
@@ -1326,10 +1327,15 @@ async fn api_manage_tape_create(
     let name = body.name.clone();
     let size_s = body.size.clone();
     let shelf = body.shelf.clone();
+    let density = body.density.clone();
     let res = tokio::task::spawn_blocking(move || {
         let size = super::parse_size(&size_s).map_err(|e| e.to_string())?;
+        let density_code = density.as_deref()
+            .and_then(super::parse_density)
+            .unwrap_or(super::DENSITY_DEFAULT);
         let _guard = LibraryGuard::new(&lib);
-        super::create_tape(&name, size, shelf.as_deref()).map_err(|e| e.to_string())
+        super::create_tape(&name, size, shelf.as_deref(), density_code)
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())
@@ -1933,6 +1939,7 @@ async fn api_manage_assign_batch(
 struct TapeBatchItem {
     name: String,
     size: String,
+    density: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1952,9 +1959,15 @@ async fn api_manage_tape_create_batch(
     }
     let lib = body.library.clone();
     let shelf = body.shelf.clone();
-    let items: Vec<(String, String)> = body.items.into_iter().map(|x| (x.name, x.size)).collect();
+    let items: Vec<(String, String, u8)> = body.items.into_iter().map(|x| {
+        let d = x.density.as_deref()
+            .and_then(super::parse_density)
+            .unwrap_or(super::DENSITY_DEFAULT);
+        (x.name, x.size, d)
+    }).collect();
     let res = tokio::task::spawn_blocking(move || {
-        super::create_tapes_batch(&lib, shelf.as_deref(), &items).map_err(|e| e.to_string())
+        super::create_tapes_batch(&lib, shelf.as_deref(), &items)
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())
@@ -1972,6 +1985,7 @@ struct ManageTapeCreateAutoBatch {
     shelf: Option<String>,
     count: u32,
     size: String,
+    density: Option<String>,
 }
 
 async fn api_manage_tape_create_auto_batch(
@@ -1986,9 +2000,13 @@ async fn api_manage_tape_create_auto_batch(
     let shelf = body.shelf.clone();
     let count = body.count as usize;
     let size_s = body.size.clone();
+    let density = body.density.clone();
     let res = tokio::task::spawn_blocking(move || {
         let size = super::parse_size(&size_s).map_err(|e| e.to_string())?;
-        super::create_auto_named_tapes_batch(&lib, shelf.as_deref(), count, size)
+        let density_code = density.as_deref()
+            .and_then(super::parse_density)
+            .unwrap_or(super::DENSITY_DEFAULT);
+        super::create_auto_named_tapes_batch(&lib, shelf.as_deref(), count, size, density_code)
             .map_err(|e| e.to_string())
     })
     .await
@@ -4979,6 +4997,15 @@ input,select{max-width:36rem;}
 <label>货架</label><select id="tshelf"><option value="">默认货架</option></select>
 <label>数量（1–10000）</label><input type="number" id="tcnt" min="1" max="10000" value="10"/>
 <label>容量（如 500M、2G）</label><input id="tsize" placeholder="500M"/>
+<label>密度格式</label><select id="tdensity">
+<option value="0x40">Default LTO</option>
+<option value="0x4A">LTO-5</option>
+<option value="0x4C">LTO-6</option>
+<option value="0x4E">LTO-7</option>
+<option value="0x50">LTO-8</option>
+<option value="0x52">LTO-9</option>
+<option value="0x58">LTO-10</option>
+</select>
 <button type="button" id="btauto">创建磁带</button><p class="err" id="te"></p>
 </section>
 </div>
@@ -5151,10 +5178,11 @@ document.getElementById('btauto').onclick=async()=>{
   const size=document.getElementById('tsize').value.trim();
   if(!size){document.getElementById('te').textContent='请填写容量';return;}
   const shv=document.getElementById('tshelf').value;
+  const density=document.getElementById('tdensity').value;
   const lib=document.getElementById('tlib').value;
   const btn=document.getElementById('btauto');
   btn.disabled=true;btn.textContent='创建中（'+cnt+' 条）…';
-  const {r,j}=await jpost('/api/manage/tape/create-auto-batch',{library:lib,shelf:shv?shv:null,count:cnt,size:size});
+  const {r,j}=await jpost('/api/manage/tape/create-auto-batch',{library:lib,shelf:shv?shv:null,count:cnt,size:size,density:density||null});
   btn.disabled=false;btn.textContent='创建磁带';
   if(!r.ok){document.getElementById('te').textContent=j.error||r.status;return;}
   const ns=j.names||[];

@@ -13,13 +13,16 @@ static ssize_t vtl_create_tape_store(struct kobject *kobj, struct kobj_attribute
 {
     char name[64];
     u64 size = 100 * 1024 * 1024;
+    unsigned int density = VTL_DEFAULT_DENSITY;
     int ret;
 
     if (vtl_module_is_unloading())
         return -ENODEV;
 
-    if (sscanf(buf, "%63s %llu", name, &size) >= 1) {
-        ret = vtl_tape_create(name, size);
+    if (sscanf(buf, "%63s %llu %x", name, &size, &density) >= 1) {
+        if ((u8)density == 0)
+            density = VTL_DEFAULT_DENSITY;
+        ret = vtl_tape_create(name, size, (u8)density);
         if (ret < 0)
             return ret;
     }

@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 pub const DEFAULT_WEB_USER: &str = "admin";
+#[allow(dead_code)]
 pub const DEFAULT_WEB_PASSWORD: &str = "admin";
 /// Cookie `Max-Age` 与会话有效期（秒）
 pub const SESSION_SECS: u64 = 86400;

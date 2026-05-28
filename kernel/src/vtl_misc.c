@@ -48,6 +48,8 @@ struct vtl_set_instances_ioctl {
 struct vtl_create_req {
 	char name[64];
 	u64 size;
+	u8  density;
+	u8  __pad[7];
 };
 
 struct vtl_load_req {
@@ -151,7 +153,10 @@ static long vtl_ioctl_create_tape(void __user *uarg)
 	if (copy_from_user(&create_req, uarg, sizeof(create_req)))
 		return -EFAULT;
 	create_req.name[sizeof(create_req.name) - 1] = '\0';
-	return vtl_tape_create(create_req.name, create_req.size);
+	if (create_req.density == 0)
+		create_req.density = VTL_DEFAULT_DENSITY;
+	return vtl_tape_create(create_req.name, create_req.size,
+			       create_req.density);
 }
 
 static long vtl_ioctl_load_tape(void __user *uarg)

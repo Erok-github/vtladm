@@ -3,41 +3,6 @@
 #include <linux/mm.h>
 #include <linux/vmalloc.h>
 
-/*
- * Big-endian helpers — avoid <linux/unaligned.h>: some vendor kernel-devel
- * packages (e.g. certain Kylin trees) omit that header while still on 4.19.
- */
-static inline u32 vtl_get_be32(const u8 *p)
-{
-    return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
-}
-
-static inline void vtl_put_be32(u32 v, u8 *p)
-{
-    p[0] = (u8)(v >> 24);
-    p[1] = (u8)(v >> 16);
-    p[2] = (u8)(v >> 8);
-    p[3] = (u8)v;
-}
-
-static inline void vtl_put_be16(u16 v, u8 *p)
-{
-    p[0] = (u8)(v >> 8);
-    p[1] = (u8)v;
-}
-
-static inline void vtl_put_be64(u64 v, u8 *p)
-{
-    p[0] = (u8)(v >> 56);
-    p[1] = (u8)(v >> 48);
-    p[2] = (u8)(v >> 40);
-    p[3] = (u8)(v >> 32);
-    p[4] = (u8)(v >> 24);
-    p[5] = (u8)(v >> 16);
-    p[6] = (u8)(v >> 8);
-    p[7] = (u8)v;
-}
-
 /* SCSI opcodes (avoid header drift across 4.18–6.x) */
 #ifndef LOG_SENSE
 #define LOG_SENSE 0x4d
@@ -384,11 +349,11 @@ static int vtl_handle_test_unit_ready(struct scsi_cmnd *cmd, struct vtl_host *vh
         return vtl_cmd_lun_not_supported(cmd, ch);
 
     drv = &ch->drives[lun - 1];
-    /*
-     * Empty drive: return GOOD so backup inventory (Mars/TSM) can enumerate
-     * the library + drives. Medium-not-present (0x3a) is reported on READ/
-     * LOAD, not on TUR — mtx/changer inventory only needs the drive element.
-     */
+    if (!drv->loaded_tape) {
+        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0);
+        vtl_build_sense_buffer(cmd, &drv->sense);
+        return SAM_STAT_CHECK_CONDITION;
+    }
     return SAM_STAT_GOOD;
 }
 
@@ -576,6 +541,7 @@ static int vtl_handle_mode_sense(struct scsi_cmnd *cmd, struct vtl_host *vhost)
     struct vtl_drive *drv = NULL;
     u32 block_len;
     u8 wp;
+    u8 density;
     unsigned int out_len;
     u8 page;
 
@@ -599,46 +565,192 @@ static int vtl_handle_mode_sense(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         page = cdb[2] & 0x3f;
         out_len = vtl_changer_mode_sense_fill(buffer, 255, ch, page,
 					    cdb[0] == MODE_SENSE_10);
-    } else if (cdb[0] == MODE_SENSE) {
-        /* MODE SENSE(6): SSC block descriptor so st/mt see non-zero block size */
-        block_len = drv ? drv->block_size : VTL_DEFAULT_BLOCK_SIZE;
-        wp = (drv && vtl_drive_write_protected(drv)) ? 0x80 : 0;
-
-        buffer[0] = 11;
-        buffer[1] = 0;
-        buffer[2] = wp;
-        buffer[3] = 8;
-        buffer[4] = 0;
-        buffer[5] = 0;
-        buffer[6] = 0;
-        buffer[7] = 0;
-        buffer[8] = 0;
-        buffer[9] = (block_len >> 16) & 0xff;
-        buffer[10] = (block_len >> 8) & 0xff;
-        buffer[11] = (block_len >> 0) & 0xff;
-        out_len = 12;
     } else {
-        /* MODE SENSE(10): 8-byte mode param header + 8-byte block descriptor */
+        /* Tape LUN: MODE SENSE with density in block descriptor */
+        bool sense10, dbd;
+
+        density = drv ? drv->density : VTL_DEFAULT_DENSITY;
         block_len = drv ? drv->block_size : VTL_DEFAULT_BLOCK_SIZE;
         wp = (drv && vtl_drive_write_protected(drv)) ? 0x80 : 0;
+        sense10 = (cdb[0] == MODE_SENSE_10);
+        dbd = (cdb[1] & 0x08) != 0;
+        page = cdb[2] & 0x3f;
 
-        buffer[0] = 0;
-        buffer[1] = 14;
-        buffer[2] = 0;
-        buffer[3] = wp;
-        buffer[4] = 0;
-        buffer[5] = 0;
-        buffer[6] = 8;
-        buffer[7] = 0;
-        buffer[8] = 0;
-        buffer[9] = 0;
-        buffer[10] = 0;
-        buffer[11] = 0;
-        buffer[12] = 0;
-        buffer[13] = (block_len >> 16) & 0xff;
-        buffer[14] = (block_len >> 8) & 0xff;
-        buffer[15] = (block_len >> 0) & 0xff;
-        out_len = 16;
+        if (page == 0x00 && dbd) {
+            /* Supported pages list: no block descriptor */
+            memset(buffer, 0, 255);
+            if (sense10) {
+                buffer[1] = 10;
+                buffer[8] = 0x00; buffer[9] = 2;
+                buffer[10] = 0x00; buffer[11] = 0x10;
+                out_len = 12;
+            } else {
+                buffer[0] = 7;
+                buffer[4] = 0x00; buffer[5] = 2;
+                buffer[6] = 0x00; buffer[7] = 0x10;
+                out_len = 8;
+            }
+        } else if (page == 0x00) {
+            /* Supported pages list WITH block descriptor */
+            memset(buffer, 0, 255);
+            if (sense10) {
+                buffer[1] = 18;
+                buffer[3] = wp;
+                buffer[7] = 8;
+                buffer[8] = density;
+                buffer[9] = 0; buffer[10] = 0; buffer[11] = 0;
+                buffer[12] = 0;
+                buffer[13] = (block_len >> 16) & 0xff;
+                buffer[14] = (block_len >> 8) & 0xff;
+                buffer[15] = (block_len >> 0) & 0xff;
+                buffer[16] = 0x00; buffer[17] = 2;
+                buffer[18] = 0x00; buffer[19] = 0x10;
+                out_len = 20;
+            } else {
+                buffer[0] = 15;
+                buffer[2] = wp;
+                buffer[3] = 8;
+                buffer[4] = density;
+                buffer[5] = 0; buffer[6] = 0; buffer[7] = 0;
+                buffer[8] = 0;
+                buffer[9] = (block_len >> 16) & 0xff;
+                buffer[10] = (block_len >> 8) & 0xff;
+                buffer[11] = (block_len >> 0) & 0xff;
+                buffer[12] = 0x00; buffer[13] = 2;
+                buffer[14] = 0x00; buffer[15] = 0x10;
+                out_len = 16;
+            }
+        } else if (page == 0x10 && dbd) {
+            /* Device Configuration (SSC): no block descriptor */
+            memset(buffer, 0, 255);
+            if (sense10) {
+                buffer[1] = 22;
+                buffer[8] = 0x10; buffer[9] = 14;
+                buffer[18] = 2;
+                out_len = 24;
+            } else {
+                buffer[0] = 19;
+                buffer[4] = 0x10; buffer[5] = 14;
+                buffer[14] = 2;
+                out_len = 20;
+            }
+        } else if (page == 0x10) {
+            /* Device Configuration (SSC) WITH block descriptor */
+            memset(buffer, 0, 255);
+            if (sense10) {
+                buffer[1] = 30;
+                buffer[3] = wp;
+                buffer[7] = 8;
+                buffer[8] = density;
+                buffer[9] = 0; buffer[10] = 0; buffer[11] = 0;
+                buffer[12] = 0;
+                buffer[13] = (block_len >> 16) & 0xff;
+                buffer[14] = (block_len >> 8) & 0xff;
+                buffer[15] = (block_len >> 0) & 0xff;
+                buffer[16] = 0x10; buffer[17] = 14;
+                buffer[28] = 2;
+                out_len = 32;
+            } else {
+                buffer[0] = 27;
+                buffer[2] = wp;
+                buffer[3] = 8;
+                buffer[4] = density;
+                buffer[5] = 0; buffer[6] = 0; buffer[7] = 0;
+                buffer[8] = 0;
+                buffer[9] = (block_len >> 16) & 0xff;
+                buffer[10] = (block_len >> 8) & 0xff;
+                buffer[11] = (block_len >> 0) & 0xff;
+                buffer[12] = 0x10; buffer[13] = 14;
+                buffer[24] = 2;
+                out_len = 28;
+            }
+        } else if (page == 0x3f && dbd) {
+            /* All pages (0x3F), no block descriptor: page 0x00 + page 0x10 */
+            memset(buffer, 0, 255);
+            if (sense10) {
+                buffer[1] = 26;
+                buffer[8] = 0x00; buffer[9] = 2;
+                buffer[10] = 0x00; buffer[11] = 0x10;
+                buffer[12] = 0x10; buffer[13] = 14;
+                buffer[26] = 2;
+                out_len = 28;
+            } else {
+                buffer[0] = 19;
+                buffer[4] = 0x00; buffer[5] = 2;
+                buffer[6] = 0x00; buffer[7] = 0x10;
+                buffer[8] = 0x10; buffer[9] = 14;
+                buffer[22] = 2;
+                out_len = 24;
+            }
+        } else if (page == 0x3f) {
+            /* All pages (0x3F) with block descriptor */
+            memset(buffer, 0, 255);
+            if (sense10) {
+                buffer[1] = 34;
+                buffer[3] = wp;
+                buffer[7] = 8;
+                buffer[8] = density;
+                buffer[9] = 0; buffer[10] = 0; buffer[11] = 0;
+                buffer[12] = 0;
+                buffer[13] = (block_len >> 16) & 0xff;
+                buffer[14] = (block_len >> 8) & 0xff;
+                buffer[15] = (block_len >> 0) & 0xff;
+                buffer[16] = 0x00; buffer[17] = 2;
+                buffer[18] = 0x00; buffer[19] = 0x10;
+                buffer[20] = 0x10; buffer[21] = 14;
+                buffer[34] = 2;
+                out_len = 36;
+            } else {
+                buffer[0] = 27;
+                buffer[2] = wp;
+                buffer[3] = 8;
+                buffer[4] = density;
+                buffer[5] = 0; buffer[6] = 0; buffer[7] = 0;
+                buffer[8] = 0;
+                buffer[9] = (block_len >> 16) & 0xff;
+                buffer[10] = (block_len >> 8) & 0xff;
+                buffer[11] = (block_len >> 0) & 0xff;
+                buffer[12] = 0x00; buffer[13] = 2;
+                buffer[14] = 0x00; buffer[15] = 0x10;
+                buffer[16] = 0x10; buffer[17] = 14;
+                buffer[30] = 2;
+                out_len = 32;
+            }
+        } else if (sense10) {
+            /* MODE SENSE(10): block descriptor with density, no specific page */
+            buffer[0] = 0;
+            buffer[1] = 14;
+            buffer[2] = 0;
+            buffer[3] = wp;
+            buffer[4] = 0;
+            buffer[5] = 0;
+            buffer[6] = 0;
+            buffer[7] = 8;
+            buffer[8] = density;
+            buffer[9] = 0;
+            buffer[10] = 0;
+            buffer[11] = 0;
+            buffer[12] = 0;
+            buffer[13] = (block_len >> 16) & 0xff;
+            buffer[14] = (block_len >> 8) & 0xff;
+            buffer[15] = (block_len >> 0) & 0xff;
+            out_len = 16;
+        } else {
+            /* MODE SENSE(6): block descriptor with density, no specific page */
+            buffer[0] = 11;
+            buffer[1] = 0;
+            buffer[2] = wp;
+            buffer[3] = 8;
+            buffer[4] = density;
+            buffer[5] = 0;
+            buffer[6] = 0;
+            buffer[7] = 0;
+            buffer[8] = 0;
+            buffer[9] = (block_len >> 16) & 0xff;
+            buffer[10] = (block_len >> 8) & 0xff;
+            buffer[11] = (block_len >> 0) & 0xff;
+            out_len = 12;
+        }
     }
 
     alloc_len = min_t(unsigned int, alloc_len, 255U);
@@ -651,12 +763,76 @@ static int vtl_handle_mode_sense(struct scsi_cmnd *cmd, struct vtl_host *vhost)
     return SAM_STAT_GOOD;
 }
 
+static u32 vtl_get_u24(const u8 *p);
+
 static int vtl_handle_mode_select(struct scsi_cmnd *cmd, struct vtl_host *vhost)
 {
+    u8 *cdb = cmd->cmnd;
+    u8 *pbuf;
+    unsigned int plen;
+    unsigned int lun = cmd->device->lun;
+    struct vtl_changer *ch = vhost->changer;
+    struct vtl_drive *drv = NULL;
+    u8 bd_len;
+    u8 new_density;
+    u32 new_block_size;
+
+    if (cdb[0] == MODE_SELECT)
+        plen = cdb[4];
+    else
+        plen = ((unsigned int)cdb[7] << 8) | cdb[8];
+
+    if (plen == 0)
+        return SAM_STAT_GOOD;
+
+    if (lun >= 1 && lun <= (unsigned int)ch->num_drives)
+        drv = &ch->drives[lun - 1];
+
+    if (!drv)
+        return SAM_STAT_GOOD;
+
+    pbuf = vtl_xfer_buf_alloc(plen);
+    if (!pbuf) {
+        vtl_scsi_staging_oom(cmd, &drv->sense);
+        return SAM_STAT_CHECK_CONDITION;
+    }
+
+    if (vtl_scsi_copy_from_sg(cmd, pbuf, plen, &drv->sense)) {
+        vtl_xfer_buf_free(pbuf);
+        return SAM_STAT_CHECK_CONDITION;
+    }
+
+    if (cdb[0] == MODE_SELECT_10)
+        bd_len = pbuf[6] << 8 | pbuf[7];
+    else
+        bd_len = pbuf[3];
+
+    if (bd_len >= 8) {
+        if (cdb[0] == MODE_SELECT_10) {
+            new_density = pbuf[8];
+            new_block_size = vtl_get_u24(&pbuf[13]);
+        } else {
+            new_density = pbuf[4];
+            new_block_size = vtl_get_u24(&pbuf[9]);
+        }
+
+        mutex_lock(&drv->lock);
+        drv->density = new_density;
+        if (new_block_size >= VTL_MIN_BLOCK_SIZE &&
+            new_block_size <= VTL_MAX_BLOCK_SIZE)
+            drv->block_size = new_block_size;
+        else if (new_block_size != 0)
+            pr_info("VTL: MODE SELECT block_size %u out of range, ignored\n",
+                new_block_size);
+        mutex_unlock(&drv->lock);
+
+        pr_info("VTL: MODE SELECT drive %d density=0x%02x block_size=%u\n",
+            drv->id, new_density, new_block_size);
+    }
+
+    vtl_xfer_buf_free(pbuf);
     return SAM_STAT_GOOD;
 }
-
-static u32 vtl_get_u24(const u8 *p);
 
 static void vtl_parse_rw_blocks(const u8 *cdb, u8 op, u32 *blocks, u32 *block_len,
                                 struct vtl_drive *drv)
@@ -891,7 +1067,8 @@ static int vtl_handle_write_filemarks(struct scsi_cmnd *cmd, struct vtl_drive *d
     return SAM_STAT_GOOD;
 }
 
-static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv)
+static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv,
+                   struct vtl_changer *ch, unsigned int drive_idx)
 {
     u8 *cdb = cmd->cmnd;
     u8 load;
@@ -905,8 +1082,25 @@ static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv)
             return SAM_STAT_CHECK_CONDITION;
         }
     } else {
-        if (vtl_drive_has_tape(drv))
+        bool has_tape;
+        int src_slot;
+
+        mutex_lock(&drv->lock);
+        has_tape = drv->loaded_tape != NULL;
+        src_slot = drv->source_slot;
+        mutex_unlock(&drv->lock);
+
+        if (has_tape) {
+            if (src_slot >= 0 && src_slot < ch->num_slots) {
+                int ret;
+
+                ret = vtl_changer_unload_drive_to_slot(ch, drive_idx,
+                                       src_slot);
+                if (ret == 0)
+                    return SAM_STAT_GOOD;
+            }
             vtl_tape_unload(drv);
+        }
     }
 
     return SAM_STAT_GOOD;
@@ -971,6 +1165,43 @@ static void vtl_res_element_range(const struct scsi_cmnd *cmd, int *start, int *
         *num = 0;
 }
 
+/*
+ * Detect PVolTag output format for READ ELEMENT STATUS.
+ * Consults the pvoltag_format module parameter and CDB characteristics
+ * to decide whether to include Primary Volume Tag data (voltag) and whether
+ * to use the SMC-3 standard 4-byte PVolTag header (voltag_std).
+ * AUTO heuristic: PV bit set → mtx format; no PV + alloc>=32 → standard.
+ */
+static void vtl_detect_pvoltag(const struct scsi_cmnd *cmd,
+                               unsigned int req_len,
+                               bool *voltag, bool *voltag_std)
+{
+    const u8 *cdb = cmd->cmnd;
+    bool pv_bit = (cdb[1] & VTL_CDB_PV_BIT) != 0;
+
+    switch (vtl_pvoltag_format) {
+    case VTL_PVOLTAG_STANDARD:
+        *voltag = pv_bit;
+        *voltag_std = true;
+        return;
+    case VTL_PVOLTAG_MTX:
+        *voltag = pv_bit;
+        *voltag_std = false;
+        return;
+    default:
+        break;
+    }
+
+    /* VTL_PVOLTAG_AUTO: PV bit → mtx format (barcode at byte 12).
+     * No PV + alloc-len >= 32 → standard SMC-3 header (Mars/Veritas workaround). */
+    *voltag = pv_bit;
+    *voltag_std = false;
+    if (!pv_bit && req_len >= 32U) {
+        *voltag = true;
+        *voltag_std = true;
+    }
+}
+
 static int vtl_handle_read_element_status(struct scsi_cmnd *cmd, struct vtl_host *vhost)
 {
     u8 *cdb = cmd->cmnd;
@@ -988,18 +1219,15 @@ static int vtl_handle_read_element_status(struct scsi_cmnd *cmd, struct vtl_host
     }
 
     bool voltag;
+    bool voltag_std;
+
     req_len = vtl_res_alloc_len(cmd);
+    vtl_detect_pvoltag(cmd, req_len, &voltag, &voltag_std);
     work_len = req_len ? min_t(unsigned int, req_len, VTL_ELEMENT_STATUS_BUFLEN)
 			: VTL_ELEMENT_STATUS_BUFLEN;
-    voltag = (cdb[1] & 0x10) != 0;
     /*
-     * Backup apps / mistaken 12-byte CDB with cmd_len=10 parse alloc from bytes 7–8
-     * only (e.g. …00 10 → 16 bytes) and see an “empty” library. mtx uses 10-byte
-     * READ ELEMENT STATUS with a large alloc (255–0xffff). Floor at 4 KiB when
-     * voltag is requested so inventory/mtx/sg agree.
+     * Floor at 4 KiB when voltag is requested so inventory/mtx/sg agree.
      */
-    if (!voltag && req_len >= 32U)
-        voltag = true; /* Mars/Veritas often omit PV bit but expect barcodes */
     if (voltag && work_len < 4096U)
         work_len = min_t(unsigned int, VTL_ELEMENT_STATUS_BUFLEN, 4096U);
     if (cmd->cmd_len >= 10 && work_len < 4096U)
@@ -1008,7 +1236,7 @@ static int vtl_handle_read_element_status(struct scsi_cmnd *cmd, struct vtl_host
         work_len = 8;
     vtl_res_element_range(cmd, &start_elem, &num_elems);
     ret = vtl_changer_read_element_status(
-        ch, buffer, work_len, voltag, cdb[1] & 0x0f,
+        ch, buffer, work_len, voltag, voltag_std, cdb[1] & 0x0f,
         start_elem, num_elems);
     if (ret < 0) {
         vtl_set_sense(&ch->sense, HARDWARE_ERROR, 0x00, 0x00);
@@ -1336,7 +1564,7 @@ static int vtl_tape_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost,
     case WRITE_FILEMARKS:
         return vtl_handle_write_filemarks(cmd, drv);
     case LOAD_UNLOAD:
-        return vtl_handle_load_unload(cmd, drv);
+        return vtl_handle_load_unload(cmd, drv, ch, drive_idx);
     case LOG_SENSE:
         return vtl_handle_log_sense(cmd, drv);
     case READ_POSITION:
