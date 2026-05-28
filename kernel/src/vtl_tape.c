@@ -431,7 +431,7 @@ int vtl_changer_load_slot_to_drive(struct vtl_changer *ch, int slot, int drive,
             return ret;
     }
 
-    return vtl_changer_move_medium(ch, slot, VTL_ELEM_DRIVE_BASE + drive);
+    return vtl_changer_move_medium(ch, slot, vtl_elem_drive_base(ch) + drive);
 }
 
 int vtl_changer_unload_drive_to_slot(struct vtl_changer *ch, int drive, int slot)
@@ -441,7 +441,7 @@ int vtl_changer_unload_drive_to_slot(struct vtl_changer *ch, int drive, int slot
     if (slot < 0 || slot >= ch->num_slots)
         return -EINVAL;
 
-    return vtl_changer_move_medium(ch, VTL_ELEM_DRIVE_BASE + drive, slot);
+    return vtl_changer_move_medium(ch, vtl_elem_drive_base(ch) + drive, slot);
 }
 
 void vtl_changer_clear_media(struct vtl_changer *ch)
@@ -807,14 +807,15 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 
     mutex_lock(&ch->lock);
 
-    if (src < 1000) {
+    if (vtl_elem_is_storage(ch, src)) {
+        int si_src = src - 1;
         struct vtl_slot *src_slot;
 
-        if (src < 0 || src >= ch->num_slots) {
+        if (si_src < 0 || si_src >= ch->num_slots) {
             ret = -EINVAL;
             goto out;
         }
-        src_slot = &ch->slots[src];
+        src_slot = &ch->slots[si_src];
         if (!src_slot->occupied || !src_slot->tape) {
             ret = -ENODEV;
             goto out;
@@ -823,9 +824,9 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
         src_slot->tape = NULL;
         src_slot->occupied = false;
         vtl_tape_put(t);
-	    } else if (src < VTL_ELEM_IE_BASE) {
+	    } else if (vtl_elem_is_drive(ch, src)) {
 	        struct vtl_drive *src_drv;
-	        int di = src - VTL_ELEM_DRIVE_BASE;
+	        int di = src - vtl_elem_drive_base(ch);
 
         if (di < 0 || di >= ch->num_drives) {
             ret = -EINVAL;
@@ -848,10 +849,9 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 	        src_drv->at_bot = true;
             vtl_tape_put(t);
 	        mutex_unlock(&src_drv->lock);
-    } else if (src >= VTL_ELEM_IE_BASE &&
-	       src < VTL_ELEM_IE_BASE + ch->num_mailslots) {
+    } else if (vtl_elem_is_ie(ch, src)) {
         struct vtl_slot *ms;
-        int mi = src - VTL_ELEM_IE_BASE;
+        int mi = src - vtl_elem_ie_base(ch);
 
         ms = &ch->mailslots[mi];
         if (!ms->occupied || !ms->tape) {
@@ -867,14 +867,15 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
         goto out;
     }
 
-    if (dst < 1000) {
+    if (vtl_elem_is_storage(ch, dst)) {
+        int si_dst = dst - 1;
         struct vtl_slot *dst_slot;
 
-        if (dst < 0 || dst >= ch->num_slots) {
+        if (si_dst < 0 || si_dst >= ch->num_slots) {
             ret = -EINVAL;
             goto rollback;
         }
-        dst_slot = &ch->slots[dst];
+        dst_slot = &ch->slots[si_dst];
         if (dst_slot->occupied) {
             ret = -EBUSY;
             goto rollback;
@@ -882,9 +883,9 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
         dst_slot->tape = t;
         dst_slot->occupied = true;
         kref_get(&t->ref);
-    } else if (dst < VTL_ELEM_IE_BASE) {
+    } else if (vtl_elem_is_drive(ch, dst)) {
         struct vtl_drive *dst_drv;
-        int di = dst - VTL_ELEM_DRIVE_BASE;
+        int di = dst - vtl_elem_drive_base(ch);
 
         if (di < 0 || di >= ch->num_drives) {
             ret = -EINVAL;
@@ -899,7 +900,7 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 	        }
 	        dst_drv->loaded_tape = t;
 	        kref_get(&t->ref);
-        dst_drv->source_slot = (src < 1000) ? src : saved_source_slot;
+        dst_drv->source_slot = vtl_elem_is_storage(ch, src) ? src : saved_source_slot;
 	        t->loaded = true;
 	        dst_drv->at_filemark = false;
 	        dst_drv->at_end = false;
@@ -909,10 +910,9 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 	            dst_drv->block_size = t->meta.block_size;
 	        dst_drv->density = t->meta.density;
 	        mutex_unlock(&dst_drv->lock);
-    } else if (dst >= VTL_ELEM_IE_BASE &&
-	       dst < VTL_ELEM_IE_BASE + ch->num_mailslots) {
+    } else if (vtl_elem_is_ie(ch, dst)) {
         struct vtl_slot *ms;
-        int mi = dst - VTL_ELEM_IE_BASE;
+        int mi = dst - vtl_elem_ie_base(ch);
 
         ms = &ch->mailslots[mi];
         if (ms->occupied) {
@@ -933,12 +933,15 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
     goto out;
 
 rollback:
-    if (src < 1000 && src >= 0 && src < ch->num_slots) {
-        ch->slots[src].tape = t;
+    if (vtl_elem_is_storage(ch, src)) {
+        int si_rb = src - 1;
+        if (si_rb >= 0 && si_rb < ch->num_slots) {
+        ch->slots[si_rb].tape = t;
         kref_get(&t->ref);
-        ch->slots[src].occupied = (t != NULL);
-    } else if (src >= VTL_ELEM_DRIVE_BASE && src < VTL_ELEM_IE_BASE) {
-        int di = src - VTL_ELEM_DRIVE_BASE;
+        ch->slots[si_rb].occupied = (t != NULL);
+        }
+    } else if (vtl_elem_is_drive(ch, src)) {
+        int di = src - vtl_elem_drive_base(ch);
 
 	        if (di >= 0 && di < ch->num_drives && t) {
 	            mutex_lock(&ch->drives[di].lock);
@@ -951,9 +954,9 @@ rollback:
 	            ch->drives[di].at_bot = true;
 	            mutex_unlock(&ch->drives[di].lock);
 	        }
-    } else if (src >= VTL_ELEM_IE_BASE &&
-	       src < VTL_ELEM_IE_BASE + ch->num_mailslots) {
-        int mi = src - VTL_ELEM_IE_BASE;
+    } else if (src >= vtl_elem_ie_base(ch) &&
+	       src < vtl_elem_ie_base(ch) + ch->num_mailslots) {
+        int mi = src - vtl_elem_ie_base(ch);
 
         if (mi >= 0 && mi < ch->num_mailslots && t) {
             ch->mailslots[mi].tape = t;
@@ -979,14 +982,15 @@ int vtl_changer_remove_medium(struct vtl_changer *ch, int elem)
 
     mutex_lock(&ch->lock);
 
-    if (elem < 1000) {
+    if (vtl_elem_is_storage(ch, elem)) {
+        int si_rm = elem - 1;
         struct vtl_slot *s;
 
-        if (elem < 0 || elem >= ch->num_slots) {
+        if (si_rm < 0 || si_rm >= ch->num_slots) {
             ret = -EINVAL;
             goto out;
         }
-        s = &ch->slots[elem];
+        s = &ch->slots[si_rm];
         if (!s->occupied || !s->tape) {
             ret = -ENODEV;
             goto out;
@@ -994,10 +998,10 @@ int vtl_changer_remove_medium(struct vtl_changer *ch, int elem)
             vtl_tape_put(s->tape);
         s->tape = NULL;
         s->occupied = false;
-    } else if (elem < VTL_ELEM_IE_BASE) {
+    } else if (vtl_elem_is_drive(ch, elem)) {
         struct vtl_drive *d;
         struct vtl_tape *t;
-        int di = elem - VTL_ELEM_DRIVE_BASE;
+        int di = elem - vtl_elem_drive_base(ch);
 
         if (di < 0 || di >= ch->num_drives) {
             ret = -EINVAL;
@@ -1018,10 +1022,9 @@ int vtl_changer_remove_medium(struct vtl_changer *ch, int elem)
 	        d->at_bot = true;
 	        mutex_unlock(&d->lock);
 	        vtl_tape_put(t);
-    } else if (elem >= VTL_ELEM_IE_BASE &&
-	       elem < VTL_ELEM_IE_BASE + ch->num_mailslots) {
+    } else if (vtl_elem_is_ie(ch, elem)) {
         struct vtl_slot *ms;
-        int mi = elem - VTL_ELEM_IE_BASE;
+        int mi = elem - vtl_elem_ie_base(ch);
 
         ms = &ch->mailslots[mi];
         if (!ms->occupied || !ms->tape) {
@@ -1144,13 +1147,13 @@ static u32 vtl_append_elem_status_page(struct vtl_changer *ch, u8 *p, u32 left,
             struct vtl_slot *slot = &ch->slots[i];
             u32 n;
 
-            if (!vtl_elem_in_range(i, start_elem, num_elems))
+            if (!vtl_elem_in_range(i + 1, start_elem, num_elems))
                 continue;
             if (left < page_hdr + desc_bytes + desc_len)
                 break;
             n = vtl_elem_status_desc(desc + desc_bytes,
 					     left - page_hdr - desc_bytes,
-					     smc_type, i,
+					     smc_type, i + 1,
 					     slot->occupied && slot->tape != NULL,
 					     slot->tape ? slot->tape->meta.barcode : NULL,
 					     voltag, voltag_std, -1);
@@ -1163,7 +1166,7 @@ static u32 vtl_append_elem_status_page(struct vtl_changer *ch, u8 *p, u32 left,
 	            struct vtl_drive *drv = &ch->drives[i];
 	            struct vtl_tape *tape;
 	            char barcode[sizeof(drv->loaded_tape->meta.barcode)];
-	            int addr = VTL_ELEM_DRIVE_BASE + i;
+	            int addr = vtl_elem_drive_base(ch) + i;
 	            u32 n;
 
             if (!vtl_elem_in_range(addr, start_elem, num_elems))
@@ -1189,7 +1192,7 @@ static u32 vtl_append_elem_status_page(struct vtl_changer *ch, u8 *p, u32 left,
     } else if (smc_type == VTL_SMC_ELEM_IE) {
         for (i = 0; i < ch->num_mailslots; i++) {
             struct vtl_slot *ms = &ch->mailslots[i];
-            int addr = VTL_ELEM_IE_BASE + i;
+            int addr = vtl_elem_ie_base(ch) + i;
             u32 n;
 
             if (!vtl_elem_in_range(addr, start_elem, num_elems))
@@ -1356,7 +1359,7 @@ int vtl_changer_collect_inventory(struct vtl_changer *ch, int *num_drives,
 
     for (i = 0; i < ch->num_slots && n < max_items; i++) {
         if (ch->slots[i].occupied && ch->slots[i].tape) {
-            elements[n] = i;
+            elements[n] = i + 1;
             strscpy(names[n], ch->slots[i].tape->name, 64);
             n++;
         }
@@ -1364,7 +1367,7 @@ int vtl_changer_collect_inventory(struct vtl_changer *ch, int *num_drives,
 	    for (i = 0; i < ch->num_drives && n < max_items; i++) {
 	        mutex_lock(&ch->drives[i].lock);
 	        if (ch->drives[i].loaded_tape) {
-	            elements[n] = VTL_ELEM_DRIVE_BASE + i;
+	            elements[n] = vtl_elem_drive_base(ch) + i;
 	            strscpy(names[n], ch->drives[i].loaded_tape->name, 64);
 	            n++;
 	        }
@@ -1372,7 +1375,7 @@ int vtl_changer_collect_inventory(struct vtl_changer *ch, int *num_drives,
 	    }
     for (i = 0; i < ch->num_mailslots && n < max_items; i++) {
         if (ch->mailslots[i].occupied && ch->mailslots[i].tape) {
-            elements[n] = VTL_ELEM_IE_BASE + i;
+            elements[n] = vtl_elem_ie_base(ch) + i;
             strscpy(names[n], ch->mailslots[i].tape->name, 64);
             n++;
         }

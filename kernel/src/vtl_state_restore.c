@@ -103,7 +103,7 @@ static int apply_one_state_line(struct vtl_changer *ch, char *line)
 				empty_slot, name, ret);
 			return 0;
 		}
-		ret = vtl_changer_move_medium(ch, empty_slot, VTL_ELEM_DRIVE_BASE + addr);
+		ret = vtl_changer_move_medium(ch, empty_slot, vtl_elem_drive_base(ch) + addr);
 		if (ret < 0) {
 			pr_warn("VTL: state restore: move to drive %d '%s': %d (tape left in slot %d)\n",
 				addr, name, ret, empty_slot);
@@ -124,7 +124,7 @@ static int apply_one_state_line(struct vtl_changer *ch, char *line)
 				empty_slot, name, ret);
 			return 0;
 		}
-		ret = vtl_changer_move_medium(ch, empty_slot, VTL_ELEM_IE_BASE + addr);
+		ret = vtl_changer_move_medium(ch, empty_slot, vtl_elem_ie_base(ch) + addr);
 		if (ret < 0) {
 			pr_warn("VTL: state restore: move to mailslot %d '%s': %d (tape left in slot %d)\n",
 				addr, name, ret, empty_slot);

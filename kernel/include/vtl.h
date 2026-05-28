@@ -112,9 +112,7 @@ static inline void vtl_put_be64(u64 v, u8 *p)
 #define VTL_PRODUCT_TAPE    "VTL TAPE DRV    "
 #define VTL_REVISION "1.00"
 
-/** SCSI element addresses (SMC-3 style; matches vtladm DB slot 0..N-1, drive 1000+i, IE 2000+i). */
-#define VTL_ELEM_DRIVE_BASE 1000
-#define VTL_ELEM_IE_BASE 2000
+struct vtl_changer; /* forward ref for element-address helpers below */
 
 /** SMC-3 element type codes in READ ELEMENT STATUS pages (not the same as SCSI device types). */
 #define VTL_SMC_ELEM_ST 0x02 /* storage */
@@ -207,6 +205,45 @@ struct vtl_changer {
     struct vtl_sense_data sense;
     struct mutex lock;
 };
+
+/** SCSI element addresses: sequential SMC-3 conventional layout.
+ *  Storage: 1..num_slots
+ *  Data transfer (drives): num_slots+1 .. num_slots+num_drives
+ *  Import/export: num_slots+num_drives+1 .. num_slots+num_drives+num_mailslots
+ */
+static inline int vtl_elem_drive_base(const struct vtl_changer *ch)
+{
+    return ch->num_slots + 1;
+}
+
+static inline int vtl_elem_ie_base(const struct vtl_changer *ch)
+{
+    return ch->num_slots + ch->num_drives + 1;
+}
+
+static inline int vtl_elem_is_storage(const struct vtl_changer *ch, int addr)
+{
+    return addr >= 1 && addr <= ch->num_slots;
+}
+
+static inline int vtl_elem_is_drive(const struct vtl_changer *ch, int addr)
+{
+    int base = vtl_elem_drive_base(ch);
+    return addr >= base && addr < base + ch->num_drives;
+}
+
+static inline int vtl_elem_is_ie(const struct vtl_changer *ch, int addr)
+{
+    int base = vtl_elem_ie_base(ch);
+    return addr >= base && addr < base + ch->num_mailslots;
+}
+
+/* 0-based slot index from storage element address (1-based). */
+static inline int vtl_elem_to_slot(const struct vtl_changer *ch, int addr)
+{
+    (void)ch;
+    return addr - 1;
+}
 
 struct vtl_host {
     struct Scsi_Host *shost;

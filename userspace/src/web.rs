@@ -1315,6 +1315,35 @@ struct ManageTapeCreate {
     density: Option<String>,
 }
 
+async fn api_manage_tape_density_limits() -> impl IntoResponse {
+    use super::density_capacity_limits;
+    use super::density_label;
+    let codes: [u8; 7] = [
+        super::DENSITY_DEFAULT,
+        super::DENSITY_LTO5,
+        super::DENSITY_LTO6,
+        super::DENSITY_LTO7,
+        super::DENSITY_LTO8,
+        super::DENSITY_LTO9,
+        super::DENSITY_LTO10,
+    ];
+    let limits: Vec<serde_json::Value> = codes
+        .iter()
+        .map(|&c| {
+            let (min, max) = density_capacity_limits(c);
+            serde_json::json!({
+                "code": format!("0x{:02X}", c),
+                "label": density_label(c),
+                "min_bytes": min,
+                "max_bytes": max,
+                "min_human": super::format_size(min),
+                "max_human": super::format_size(max),
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "density_limits": limits })).into_response()
+}
+
 async fn api_manage_tape_create(
     State(st): State<Arc<super::web_auth::WebState>>,
     jar: CookieJar,
@@ -3960,6 +3989,7 @@ pub(crate) fn build_web_router(auth: Arc<super::web_auth::WebState>) -> Router<(
         .route("/api/change-password", post(api_change_password))
         .route("/api/sessions", get(api_sessions))
         .route("/api/sessions/revoke", post(api_sessions_revoke))
+        .route("/api/manage/tape/density-limits", get(api_manage_tape_density_limits))
         .route("/api/manage/tape/create", post(api_manage_tape_create))
         .route(
             "/api/manage/library/create",

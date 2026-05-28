@@ -38,6 +38,15 @@
 #ifndef DRIVER_SENSE
 #define DRIVER_SENSE 0x08
 #endif
+#ifndef SERVICE_ACTION_IN
+#define SERVICE_ACTION_IN 0x9e
+#endif
+#ifndef READ_CAPACITY
+#define READ_CAPACITY 0x25
+#endif
+#ifndef SERVICE_ACTION_READ_CAPACITY_16
+#define SERVICE_ACTION_READ_CAPACITY_16 0x10
+#endif
 
 /*
  * Compose cmd->result for SG_IO / sg3_utils: status in bits 0..7 is SAM status << 1;
@@ -463,11 +472,11 @@ static unsigned int vtl_changer_mode_sense_fill(u8 *buffer, unsigned int buf_max
         pg[1] = 16;
         vtl_put_be16(0, &pg[2]);
         vtl_put_be16(0, &pg[4]);
-        vtl_put_be16(0, &pg[6]);
+        vtl_put_be16(1, &pg[6]);
         vtl_put_be16(ch->num_slots, &pg[8]);
-        vtl_put_be16(VTL_ELEM_IE_BASE, &pg[10]);
+        vtl_put_be16(vtl_elem_ie_base(ch), &pg[10]);
         vtl_put_be16(ch->num_mailslots, &pg[12]);
-        vtl_put_be16(VTL_ELEM_DRIVE_BASE, &pg[14]);
+        vtl_put_be16(vtl_elem_drive_base(ch), &pg[14]);
         vtl_put_be16(ch->num_drives, &pg[16]);
         off += 18;
     } else if (page == 0x1e) {
@@ -518,11 +527,11 @@ static unsigned int vtl_changer_mode_sense_fill(u8 *buffer, unsigned int buf_max
         pg[1] = 16;
         vtl_put_be16(0, &pg[2]);
         vtl_put_be16(0, &pg[4]);
-        vtl_put_be16(0, &pg[6]);
+        vtl_put_be16(1, &pg[6]);
         vtl_put_be16(ch->num_slots, &pg[8]);
-        vtl_put_be16(VTL_ELEM_IE_BASE, &pg[10]);
+        vtl_put_be16(vtl_elem_ie_base(ch), &pg[10]);
         vtl_put_be16(ch->num_mailslots, &pg[12]);
-        vtl_put_be16(VTL_ELEM_DRIVE_BASE, &pg[14]);
+        vtl_put_be16(vtl_elem_drive_base(ch), &pg[14]);
         vtl_put_be16(ch->num_drives, &pg[16]);
         off += 18;
         if (off + 8 <= buf_max) {
@@ -849,9 +858,12 @@ static void vtl_parse_rw_blocks(const u8 *cdb, u8 op, u32 *blocks, u32 *block_le
     case WRITE_6:
         fixed = (cdb[1] & 0x01) != 0;
         transfer_len = vtl_get_u24(&cdb[2]);
-        if (fixed) {
+        /* variable block mode: ignore FIXED, use CDB length as block size */
+        if (drv->block_size == 0)
+            fixed = false;
+        if (fixed)
             *blocks = transfer_len;
-        } else {
+        else {
             *block_len = transfer_len;
             *blocks = 1;
         }
@@ -860,9 +872,11 @@ static void vtl_parse_rw_blocks(const u8 *cdb, u8 op, u32 *blocks, u32 *block_le
     case WRITE_10:
         fixed = (cdb[1] & 0x02) != 0;
         transfer_len = vtl_get_u24(&cdb[6]);
-        if (fixed) {
+        if (drv->block_size == 0)
+            fixed = false;
+        if (fixed)
             *blocks = transfer_len;
-        } else {
+        else {
             *block_len = transfer_len;
             *blocks = 1;
         }
@@ -871,9 +885,11 @@ static void vtl_parse_rw_blocks(const u8 *cdb, u8 op, u32 *blocks, u32 *block_le
     case WRITE_12:
         fixed = (cdb[1] & 0x02) != 0;
         transfer_len = vtl_get_be32(&cdb[6]);
-        if (fixed) {
+        if (drv->block_size == 0)
+            fixed = false;
+        if (fixed)
             *blocks = transfer_len;
-        } else {
+        else {
             *block_len = transfer_len;
             *blocks = 1;
         }
@@ -1047,6 +1063,93 @@ static int vtl_handle_space(struct scsi_cmnd *cmd, struct vtl_drive *drv)
     return SAM_STAT_GOOD;
 }
 
+/*
+ * READ CAPACITY (10): returns tape file capacity as LBA + block length.
+ * Uses 512-byte logical blocks when drive is in variable block mode.
+ */
+static int vtl_handle_read_capacity_10(struct scsi_cmnd *cmd, struct vtl_drive *drv)
+{
+    struct vtl_tape *tape;
+    u8 buf[8];
+    u64 capacity;
+    u32 block_len;
+    u32 max_lba;
+
+    mutex_lock(&drv->lock);
+    tape = drv->loaded_tape;
+    if (!tape) {
+        mutex_unlock(&drv->lock);
+        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
+        vtl_build_sense_buffer(cmd, &drv->sense);
+        return SAM_STAT_CHECK_CONDITION;
+    }
+    capacity = tape->meta.capacity;
+    block_len = drv->block_size ? drv->block_size : 512U;
+    mutex_unlock(&drv->lock);
+
+    if (capacity == 0 || block_len == 0) {
+        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
+        vtl_build_sense_buffer(cmd, &drv->sense);
+        return SAM_STAT_CHECK_CONDITION;
+    }
+
+    max_lba = (u32)((capacity / (u64)block_len) - 1ULL);
+    if (capacity / (u64)block_len > 0xFFFFFFFFULL)
+        max_lba = 0xFFFFFFFFU;
+
+    memset(buf, 0, sizeof(buf));
+    vtl_put_be32(max_lba, &buf[0]);
+    vtl_put_be32(block_len, &buf[4]);
+
+    if (vtl_scsi_copy_to_sg(cmd, buf, sizeof(buf), &drv->sense)) {
+        vtl_build_sense_buffer(cmd, &drv->sense);
+        return SAM_STAT_CHECK_CONDITION;
+    }
+    return SAM_STAT_GOOD;
+}
+
+/*
+ * SERVICE ACTION IN (0x9E) — READ CAPACITY (16) service action 0x10.
+ */
+static int vtl_handle_read_capacity_16(struct scsi_cmnd *cmd, struct vtl_drive *drv)
+{
+    struct vtl_tape *tape;
+    u8 buf[32];
+    u64 capacity;
+    u32 block_len;
+    u64 max_lba;
+
+    mutex_lock(&drv->lock);
+    tape = drv->loaded_tape;
+    if (!tape) {
+        mutex_unlock(&drv->lock);
+        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
+        vtl_build_sense_buffer(cmd, &drv->sense);
+        return SAM_STAT_CHECK_CONDITION;
+    }
+    capacity = tape->meta.capacity;
+    block_len = drv->block_size ? drv->block_size : 512U;
+    mutex_unlock(&drv->lock);
+
+    if (capacity == 0 || block_len == 0) {
+        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
+        vtl_build_sense_buffer(cmd, &drv->sense);
+        return SAM_STAT_CHECK_CONDITION;
+    }
+
+    max_lba = (capacity / (u64)block_len) - 1ULL;
+
+    memset(buf, 0, sizeof(buf));
+    vtl_put_be64(max_lba, &buf[0]);
+    vtl_put_be32(block_len, &buf[8]);
+
+    if (vtl_scsi_copy_to_sg(cmd, buf, sizeof(buf), &drv->sense)) {
+        vtl_build_sense_buffer(cmd, &drv->sense);
+        return SAM_STAT_CHECK_CONDITION;
+    }
+    return SAM_STAT_GOOD;
+}
+
 static int vtl_handle_write_filemarks(struct scsi_cmnd *cmd, struct vtl_drive *drv)
 {
     u8 *cdb = cmd->cmnd;
@@ -1092,7 +1195,7 @@ static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv,
         mutex_unlock(&drv->lock);
 
         if (has_tape) {
-            if (src_slot >= 0 && src_slot < ch->num_slots) {
+            if (src_slot >= 1 && src_slot <= ch->num_slots) {
                 int ret;
 
                 ret = vtl_changer_unload_drive_to_slot(ch, drive_idx,
@@ -1763,6 +1866,12 @@ static int vtl_tape_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost,
         return vtl_handle_prevent_allow(cmd, drv);
     case REPORT_DENSITY_SUPPORT:
         return vtl_handle_report_density_support(cmd, drv);
+    case READ_CAPACITY:
+        return vtl_handle_read_capacity_10(cmd, drv);
+    case SERVICE_ACTION_IN:
+        if (cdb[1] == SERVICE_ACTION_READ_CAPACITY_16)
+            return vtl_handle_read_capacity_16(cmd, drv);
+        return vtl_cmd_illegal(cmd, &drv->sense);
     default:
         return vtl_cmd_illegal(cmd, &drv->sense);
     }

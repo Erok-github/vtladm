@@ -153,6 +153,47 @@ pub(crate) fn density_label(code: u8) -> &'static str {
     }
 }
 
+/// Return (min_bytes, max_bytes) for a given density code.
+/// Kernel enforces global VTL_MIN_TAPE_SIZE (10 MiB) and VTL_MAX_TAPE_SIZE (10 TiB)
+/// as ultimate bounds; these per-density ranges provide sensible guidance.
+pub(crate) fn density_capacity_limits(code: u8) -> (u64, u64) {
+    const GB: u64 = 1024 * 1024 * 1024;
+    const TB: u64 = GB * 1024;
+    match code {
+        DENSITY_LTO5 => (GB, 3 * TB),
+        DENSITY_LTO6 => (GB, 6 * TB),
+        DENSITY_LTO7 => (GB, 15 * TB),
+        DENSITY_LTO8 => (GB, 30 * TB),
+        DENSITY_LTO9 => (GB, 45 * TB),
+        DENSITY_LTO10 => (GB, 90 * TB),
+        _ => (100 * 1024 * 1024, TB), // Default LTO: 100 MB .. 1 TB
+    }
+}
+
+/// Validate tape size against per-density limits.
+fn validate_tape_capacity(size: u64, density: u8) -> Result<(), VtlError> {
+    let (min, max) = density_capacity_limits(density);
+    if size < min {
+        return Err(VtlError::InvalidParameter(format!(
+            "磁带容量 {} 小于 {} 格式最小容量 {}，请使用 {} 或更大",
+            format_size(size),
+            density_label(density),
+            format_size(min),
+            format_size(min),
+        )));
+    }
+    if size > max {
+        return Err(VtlError::InvalidParameter(format!(
+            "磁带容量 {} 超过 {} 格式最大容量 {}，请使用 {} 或更小",
+            format_size(size),
+            density_label(density),
+            format_size(max),
+            format_size(max),
+        )));
+    }
+    Ok(())
+}
+
 thread_local! {
     static CURRENT_LIBRARY: RefCell<String> = RefCell::new(String::new());
 }
@@ -3370,7 +3411,7 @@ fn validate_tape_name(name: &str) -> Result<(), VtlError> {
     Ok(())
 }
 
-fn format_size(bytes: u64) -> String {
+pub(crate) fn format_size(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{}B", bytes)
     } else if bytes < 1024 * 1024 {
@@ -3387,6 +3428,7 @@ fn format_size(bytes: u64) -> String {
 fn create_tape(name: &str, size: u64, shelf_name: Option<&str>, density: u8) -> Result<(), VtlError> {
     validate_tape_name(name)?;
     check_quota(size)?;
+    validate_tape_capacity(size, density)?;
     let lib_name = current_library_name();
     log_message(&format!(
         "Creating tape '{}' in library '{}' with size {}, density {}",
