@@ -106,6 +106,7 @@ impl WebState {
 
     /// 仅测试用：强制重写认证文件，不要求首次登录后改密。
     #[doc(hidden)]
+    #[allow(dead_code)]
     pub fn force_reset_auth_no_pw_change(&self, password: &str) -> Result<(), String> {
         self.write_default_auth_with_flags(password, false)
     }
