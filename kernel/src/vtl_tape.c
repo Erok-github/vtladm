@@ -645,7 +645,13 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
             }
 
             /* Re-read the whole block (header + compressed data) */
-            kernel_read(tape->file, cbuf, block_total, &pos);
+            ret = kernel_read(tape->file, cbuf, block_total, &pos);
+            if (ret < block_total) {
+                vfree(cbuf);
+                mutex_unlock(&tape->lock);
+                mutex_unlock(&drv->lock);
+                return -EIO;
+            }
 
             ret = vtl_decompress_block(cbuf, block_total,
                                        buffer, &uncomp_sz);

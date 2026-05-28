@@ -82,16 +82,23 @@ int vtl_decompress_block(const u8 *in, u32 in_len,
 			 u8 *out, u32 *out_len)
 {
 	const struct vtl_block_header *hdr = (const void *)in;
-	u32 uncomp_sz = be32_to_cpu(hdr->uncompressed_size);
-	u32 comp_sz = be32_to_cpu(hdr->compressed_size);
-	u8 algo = hdr->algorithm;
-	const u8 *data = in + VTL_BLOCK_HEADER_SIZE;
+	u32 uncomp_sz, comp_sz;
+	u8 algo;
+	const u8 *data;
 	int ret;
 
 	if (in_len < VTL_BLOCK_HEADER_SIZE)
 		return -EINVAL;
 	if (be32_to_cpu(hdr->magic) != VTL_BLOCK_MAGIC)
 		return -EINVAL;
+
+	uncomp_sz = be32_to_cpu(hdr->uncompressed_size);
+	comp_sz = be32_to_cpu(hdr->compressed_size);
+	algo = hdr->algorithm;
+
+	if (in_len < VTL_BLOCK_HEADER_SIZE + comp_sz)
+		return -EINVAL;
+	data = in + VTL_BLOCK_HEADER_SIZE;
 
 	switch (algo) {
 	case VTL_COMP_NONE:
