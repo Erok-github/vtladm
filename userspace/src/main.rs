@@ -6795,10 +6795,10 @@ mod tests {
         let result = create_named_library("default", 2, 4);
         assert!(result.is_ok());
 
-        let result = create_tape("test_tape_1", 10 * 1024 * 1024, None, 0x40, false, None);
+        let result = create_tape("test_tape_1", 200 * 1024 * 1024, None, 0x40, false, None);
         assert!(result.is_ok());
 
-        let result = create_tape("test_tape_2", 20 * 1024 * 1024, None, 0x40, false, None);
+        let result = create_tape("test_tape_2", 200 * 1024 * 1024, None, 0x40, false, None);
         assert!(result.is_ok());
 
         let result = list_tapes();
@@ -6849,7 +6849,7 @@ mod tests {
         let dir = prepare_temp_vtl("snapshot_test");
 
         let _ = create_named_library("default", 1, 1);
-        let _ = create_tape("snap_test", 5 * 1024 * 1024, None, 0x40, false, None);
+        let _ = create_tape("snap_test", 200 * 1024 * 1024, None, 0x40, false, None);
 
         let result = snapshot_tape("snap_test", "snap_001");
         assert!(result.is_ok());
@@ -6868,7 +6868,7 @@ mod tests {
         let dir = prepare_temp_vtl("export_test");
 
         let _ = create_named_library("default", 1, 1);
-        let _ = create_tape("export_test", 5 * 1024 * 1024, None, 0x40, false, None);
+        let _ = create_tape("export_test", 200 * 1024 * 1024, None, 0x40, false, None);
         let p = dir
             .join("tapes")
             .join("default")
@@ -6888,7 +6888,7 @@ mod tests {
         let dir = prepare_temp_vtl("export_checksum_test");
 
         let _ = create_named_library("default", 1, 1);
-        let _ = create_tape("ck_tape", 5 * 1024 * 1024, None, 0x40, false, None);
+        let _ = create_tape("ck_tape", 200 * 1024 * 1024, None, 0x40, false, None);
         let p = dir.join("tapes").join("default").join("ck_tape.vtltape");
         let _ = import_tape(p.to_str().unwrap(), 0);
 
@@ -6910,7 +6910,7 @@ mod tests {
         let dir = prepare_temp_vtl("eject_test");
 
         let _ = create_named_library("default", 1, 1);
-        let _ = create_tape("eject_test", 5 * 1024 * 1024, None, 0x40, false, None);
+        let _ = create_tape("eject_test", 200 * 1024 * 1024, None, 0x40, false, None);
         let p = dir.join("tapes").join("default").join("eject_test.vtltape");
         let _ = import_tape(p.to_str().unwrap(), 0);
 
@@ -6925,7 +6925,7 @@ mod tests {
         let dir = prepare_temp_vtl("drive_busy_test");
 
         let _ = create_named_library("default", 1, 2);
-        let _ = create_tape("tape1", 5 * 1024 * 1024, None, 0x40, false, None);
+        let _ = create_tape("tape1", 200 * 1024 * 1024, None, 0x40, false, None);
         let p = dir.join("tapes").join("default").join("tape1.vtltape");
         let _ = import_tape(p.to_str().unwrap(), 0);
 
@@ -6980,7 +6980,7 @@ mod tests {
         let dir = prepare_temp_vtl("cycle_test");
 
         let _ = create_named_library("default", 2, 4);
-        let _ = create_tape("cycle_tape", 10 * 1024 * 1024, None, 0x40, false, None);
+        let _ = create_tape("cycle_tape", 200 * 1024 * 1024, None, 0x40, false, None);
         let p = dir.join("tapes").join("default").join("cycle_tape.vtltape");
         let _ = import_tape(p.to_str().unwrap(), 0);
 
@@ -7058,7 +7058,7 @@ mod tests {
             .map(|i| {
                 thread::spawn(move || {
                     let tape_name = format!("concurrent_tape_{}", i);
-                    let result = create_tape(&tape_name, 5 * 1024 * 1024, None, 0x40, false, None);
+                    let result = create_tape(&tape_name, 200 * 1024 * 1024, None, 0x40, false, None);
                     assert!(result.is_ok(), "Failed to create tape {}", i);
                 })
             })
@@ -7111,7 +7111,7 @@ mod tests {
     fn test_delete_tape_removes_tape_tag_links() {
         let dir = prepare_temp_vtl("del_tape_tags");
         let _ = create_named_library("default", 1, 2);
-        let _ = create_tape("tagged_for_delete", 1024 * 1024, None, 0x40, false, None);
+        let _ = create_tape("tagged_for_delete", 200 * 1024 * 1024, None, 0x40, false, None);
         let _ = tag_add("tagged_for_delete", &["keep_schema".to_string()]);
         let before: i64 = init_db()
             .unwrap()
@@ -7135,7 +7135,7 @@ mod tests {
 
         let result = batch_create_tapes(
             3,
-            5 * 1024 * 1024,
+            200 * 1024 * 1024,
             "batch_test",
             &["backup".to_string(), "important".to_string()],
             0x40, false, None,
@@ -7155,8 +7155,8 @@ mod tests {
         let dir = prepare_temp_vtl("batch_import_test");
 
         let _ = create_named_library("default", 2, 10);
-        let _ = create_tape("import_tape_1", 5 * 1024 * 1024, None, 0x40, false, None);
-        let _ = create_tape("import_tape_2", 5 * 1024 * 1024, None, 0x40, false, None);
+        let _ = create_tape("import_tape_1", 200 * 1024 * 1024, None, 0x40, false, None);
+        let _ = create_tape("import_tape_2", 200 * 1024 * 1024, None, 0x40, false, None);
 
         let import_dir = dir.join("import");
         fs::create_dir_all(&import_dir).unwrap();
@@ -7204,7 +7204,7 @@ mod tests {
         let dir = prepare_temp_vtl("tag_test");
 
         let _ = create_named_library("default", 2, 10);
-        let _ = create_tape("tag_test_tape", 5 * 1024 * 1024, None, 0x40, false, None);
+        let _ = create_tape("tag_test_tape", 200 * 1024 * 1024, None, 0x40, false, None);
 
         let result = tag_add("tag_test_tape", &["backup".to_string(), "2024".to_string()]);
         assert!(result.is_ok());
@@ -7229,8 +7229,8 @@ mod tests {
         let dir = prepare_temp_vtl("search_test");
 
         let _ = create_named_library("default", 2, 10);
-        let _ = create_tape("search_test_1", 10 * 1024 * 1024, None, 0x40, false, None);
-        let _ = create_tape("search_test_2", 20 * 1024 * 1024, None, 0x40, false, None);
+        let _ = create_tape("search_test_1", 200 * 1024 * 1024, None, 0x40, false, None);
+        let _ = create_tape("search_test_2", 200 * 1024 * 1024, None, 0x40, false, None);
 
         let mut conn = init_db().unwrap();
         let library_id = resolve_library_id(&conn, &current_library_name()).unwrap();
@@ -7269,12 +7269,12 @@ mod tests {
         let dir = prepare_temp_vtl("quota_exceed_test");
 
         let _ = create_named_library("default", 2, 10);
-        let _ = quota_set(Some("10M"), Some(1));
+        let _ = quota_set(Some("300M"), Some(1));
 
-        let result = create_tape("quota_test_1", 5 * 1024 * 1024, None, 0x40, false, None);
+        let result = create_tape("quota_test_1", 200 * 1024 * 1024, None, 0x40, false, None);
         assert!(result.is_ok());
 
-        let result = create_tape("quota_test_2", 5 * 1024 * 1024, None, 0x40, false, None);
+        let result = create_tape("quota_test_2", 200 * 1024 * 1024, None, 0x40, false, None);
         assert!(result.is_err());
 
         cleanup_temp_vtl(&dir);
@@ -7284,9 +7284,9 @@ mod tests {
     fn test_create_auto_named_tapes_batch() {
         let dir = prepare_temp_vtl("auto_tape_names");
         let _ = create_named_library("default", 1, 2);
-        let v1 = create_auto_named_tapes_batch("default", None, 2, 1024 * 1024, 0x40).unwrap();
+        let v1 = create_auto_named_tapes_batch("default", None, 2, 200 * 1024 * 1024, 0x40).unwrap();
         assert_eq!(v1, vec!["default_tape01", "default_tape02"]);
-        let v2 = create_auto_named_tapes_batch("default", None, 1, 1024 * 1024, 0x40).unwrap();
+        let v2 = create_auto_named_tapes_batch("default", None, 1, 200 * 1024 * 1024, 0x40).unwrap();
         assert_eq!(v2, vec!["default_tape03"]);
         let conn = init_db().unwrap();
         let lid = resolve_library_id(&conn, "default").unwrap();
@@ -7316,9 +7316,9 @@ mod tests {
         let _ = create_named_library("lib_a", 1, 2).unwrap();
         let _ = create_named_library("lib_b", 1, 2).unwrap();
         set_current_library("lib_a");
-        let _ = create_tape("shared_tape", 1024, None, 0x40, false, None).unwrap();
+        let _ = create_tape("shared_tape", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
         set_current_library("lib_b");
-        let r = create_tape("shared_tape", 1024, None, 0x40, false, None);
+        let r = create_tape("shared_tape", 200 * 1024 * 1024, None, 0x40, false, None);
         assert!(matches!(r, Err(VtlError::InvalidParameter(_))));
         cleanup_temp_vtl(&dir);
     }
@@ -7329,7 +7329,7 @@ mod tests {
         let _ = create_named_library("lib_x", 1, 2).unwrap();
         let _ = create_named_library("lib_y", 1, 2).unwrap();
         set_current_library("lib_x");
-        let _ = create_tape("imp_dup", 4096, None, 0x40, false, None).unwrap();
+        let _ = create_tape("imp_dup", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let src = dir.join("tapes").join("lib_y").join("imp_dup.vtltape");
         fs::create_dir_all(src.parent().unwrap()).unwrap();
         fs::write(&src, b"x").unwrap();
@@ -7405,7 +7405,7 @@ mod tests {
         set_current_library("default");
         let _ = create_shelf("sA").unwrap();
         let _ = create_shelf("sB").unwrap();
-        let _ = create_tape("tmove", 1024 * 1024, Some("sA"), 0x40, false, None).unwrap();
+        let _ = create_tape("tmove", 200 * 1024 * 1024, Some("sA"), 0x40, false, None).unwrap();
         let _ =
             migrate_tapes_between_shelves("default", "sA", "sB", &[String::from("tmove")]).unwrap();
         let conn = init_db().unwrap();
@@ -7427,7 +7427,7 @@ mod tests {
         let dir = prepare_temp_vtl("init_tape_clear");
         let _ = create_named_library("default", 1, 2);
         set_current_library("default");
-        let _ = create_tape("ti", 4096, None, 0x40, false, None).unwrap();
+        let _ = create_tape("ti", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let conn = init_db().unwrap();
         let lid = resolve_library_id(&conn, "default").unwrap();
         conn.execute(
@@ -7454,7 +7454,7 @@ mod tests {
         let dir = prepare_temp_vtl("init_tape_in_slot");
         let _ = create_named_library("default", 1, 2);
         set_current_library("default");
-        let _ = create_tape("in_slot", 4096, None, 0x40, false, None).unwrap();
+        let _ = create_tape("in_slot", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let _ = assign_tape_to_slot("in_slot", 0).unwrap();
         let r = init_tape_in_library("default", "in_slot");
         match r {
@@ -7476,7 +7476,7 @@ mod tests {
         let dir = prepare_temp_vtl("init_tape_in_drive");
         let _ = create_named_library("default", 1, 2);
         set_current_library("default");
-        let _ = create_tape("in_drv", 4096, None, 0x40, false, None).unwrap();
+        let _ = create_tape("in_drv", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let _ = assign_tape_to_slot("in_drv", 0).unwrap();
         let _ = load_tape(0, 0).unwrap();
         let r = init_tape_in_library("default", "in_drv");
@@ -7495,7 +7495,7 @@ mod tests {
         let dir = prepare_temp_vtl("init_tape_no_shelf");
         let _ = create_named_library("default", 1, 2);
         set_current_library("default");
-        let _ = create_tape("no_shelf", 4096, None, 0x40, false, None).unwrap();
+        let _ = create_tape("no_shelf", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let conn = init_db().unwrap();
         let lid = resolve_library_id(&conn, "default").unwrap();
         conn.execute(
@@ -7541,7 +7541,7 @@ mod tests {
         let _ = create_named_library("default", 1, 2);
         set_current_library("default");
         let _ = create_shelf("sy").unwrap();
-        let _ = create_tape("t_on_shelf", 1024, Some("sy"), 0x40, false, None).unwrap();
+        let _ = create_tape("t_on_shelf", 200 * 1024 * 1024, Some("sy"), 0x40, false, None).unwrap();
         let r = delete_shelf_in_library("default", "sy");
         assert!(matches!(r, Err(VtlError::InvalidParameter(_))));
         cleanup_temp_vtl(&dir);
@@ -7610,10 +7610,10 @@ mod tests {
 
         set_current_library("lib_b");
         let _ = create_shelf("archive").unwrap();
-        let _ = create_tape("only_b", 1024 * 1024, Some("archive"), 0x40, false, None).unwrap();
+        let _ = create_tape("only_b", 200 * 1024 * 1024, Some("archive"), 0x40, false, None).unwrap();
 
         set_current_library("default");
-        let _ = create_tape("only_default", 1024 * 1024, None, 0x40, false, None).unwrap();
+        let _ = create_tape("only_default", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
 
         let conn = init_db().unwrap();
         let id_b = resolve_library_id(&conn, "lib_b").unwrap();
@@ -7633,7 +7633,7 @@ mod tests {
     fn test_assign_tape_from_shelf_to_slot() {
         let dir = prepare_temp_vtl("assign_shelf_slot");
         let _ = create_named_library("default", 1, 2);
-        let _ = create_tape("shelf_tape", 2 * 1024 * 1024, None, 0x40, false, None).unwrap();
+        let _ = create_tape("shelf_tape", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let _ = assign_tape_to_slot("shelf_tape", 0).unwrap();
         let _ = load_tape(0, 0).unwrap();
         let _ = unload_tape(0).unwrap();
@@ -7676,7 +7676,7 @@ mod tests {
     fn test_assign_slot_rejected_when_tape_in_drive() {
         let dir = prepare_temp_vtl("assign_in_drive");
         let _ = create_named_library("default", 1, 2);
-        let _ = create_tape("td", 2 * 1024 * 1024, None, 0x40, false, None).unwrap();
+        let _ = create_tape("td", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let _ = assign_tape_to_slot("td", 0).unwrap();
         let _ = load_tape(0, 0).unwrap();
         let r = assign_tape_to_slot("td", 1);
@@ -7689,7 +7689,7 @@ mod tests {
         let dir = prepare_temp_vtl("import_loaded");
         let _ = create_named_library("default", 1, 2);
         set_current_library("default");
-        let _ = create_tape("loaded_import", 2 * 1024 * 1024, None, 0x40, false, None).unwrap();
+        let _ = create_tape("loaded_import", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let _ = assign_tape_to_slot("loaded_import", 0).unwrap();
         let _ = load_tape(0, 0).unwrap();
         let src = dir.join("loaded_import.vtltape");
@@ -7703,7 +7703,7 @@ mod tests {
     fn test_assign_slot_rejected_when_already_in_slot() {
         let dir = prepare_temp_vtl("assign_already_slot");
         let _ = create_named_library("default", 1, 3);
-        let _ = create_tape("t1", 1024 * 1024, None, 0x40, false, None).unwrap();
+        let _ = create_tape("t1", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let _ = assign_tape_to_slot("t1", 0).unwrap();
         let r = assign_tape_to_slot("t1", 1);
         assert!(matches!(r, Err(VtlError::InvalidParameter(_))));
@@ -7714,8 +7714,8 @@ mod tests {
     fn test_assign_slot_rejected_when_target_slot_occupied() {
         let dir = prepare_temp_vtl("assign_slot_busy");
         let _ = create_named_library("default", 1, 3);
-        let _ = create_tape("ta", 1024 * 1024, None, 0x40, false, None).unwrap();
-        let _ = create_tape("tb", 1024 * 1024, None, 0x40, false, None).unwrap();
+        let _ = create_tape("ta", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
+        let _ = create_tape("tb", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let _ = assign_tape_to_slot("ta", 0).unwrap();
         let _ = assign_tape_to_slot("tb", 1).unwrap();
         let r = assign_tape_to_slot("tb", 0);
@@ -7727,7 +7727,7 @@ mod tests {
     fn test_shelf_place_rejected_when_tape_in_drive() {
         let dir = prepare_temp_vtl("shelf_place_drive");
         let _ = create_named_library("default", 1, 2);
-        let _ = create_tape("sp", 2 * 1024 * 1024, None, 0x40, false, None).unwrap();
+        let _ = create_tape("sp", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let _ = assign_tape_to_slot("sp", 0).unwrap();
         let _ = load_tape(0, 0).unwrap();
         let r = shelf_place_tape("sp", None);
@@ -7858,7 +7858,7 @@ mod tests {
     fn test_create_tape_unknown_shelf() {
         let dir = prepare_temp_vtl("tape_bad_shelf");
         let _ = create_named_library("default", 1, 2);
-        let r = create_tape("t1", 1024 * 1024, Some("no_such_shelf_xyz"), 0x40, false, None);
+        let r = create_tape("t1", 200 * 1024 * 1024, Some("no_such_shelf_xyz"), 0x40, false, None);
         assert!(matches!(r, Err(VtlError::ShelfNotFound(_))));
         cleanup_temp_vtl(&dir);
     }
@@ -7902,7 +7902,7 @@ mod tests {
     fn test_shelf_place_unknown_shelf() {
         let dir = prepare_temp_vtl("place_bad_shelf");
         let _ = create_named_library("default", 1, 2);
-        let _ = create_tape("tp", 1024 * 1024, None, 0x40, false, None).unwrap();
+        let _ = create_tape("tp", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let r = shelf_place_tape("tp", Some("missing_shelf"));
         assert!(matches!(r, Err(VtlError::ShelfNotFound(_))));
         cleanup_temp_vtl(&dir);
@@ -7971,7 +7971,7 @@ mod tests {
     fn test_assign_slot_rejected_after_import_to_slot() {
         let dir = prepare_temp_vtl("assign_after_import");
         let _ = create_named_library("default", 1, 2);
-        let _ = create_tape("imp_slot", 2 * 1024 * 1024, None, 0x40, false, None).unwrap();
+        let _ = create_tape("imp_slot", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let p = dir.join("tapes").join("default").join("imp_slot.vtltape");
         let _ = import_tape(p.to_str().unwrap(), 0).unwrap();
         let r = assign_tape_to_slot("imp_slot", 1);
@@ -8010,7 +8010,7 @@ mod tests {
     fn test_inventory_succeeds() {
         let dir = prepare_temp_vtl("inventory_ok");
         let _ = create_named_library("default", 1, 2);
-        let _ = create_tape("inv_t", 1024 * 1024, None, 0x40, false, None).unwrap();
+        let _ = create_tape("inv_t", 200 * 1024 * 1024, None, 0x40, false, None).unwrap();
         let r = inventory();
         assert!(r.is_ok());
         cleanup_temp_vtl(&dir);
