@@ -943,7 +943,7 @@ async fn require_authenticated(
         return next.run(request).await;
     }
     if session_authenticated(&st, request.headers()) {
-        if method == Method::POST && !csrf_header_ok(request.headers(), &st) {
+        if method == Method::POST && path != "/api/logout" && !csrf_header_ok(request.headers(), &st) {
             return (
                 StatusCode::FORBIDDEN,
                 Json(json!({ "error": "缺少 CSRF 请求头" })),
