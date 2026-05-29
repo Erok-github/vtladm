@@ -668,7 +668,7 @@ fn changer_inventory_from_db(
     for row in rows {
         let (id, name, bc) = row?;
         data_slots.push(ChangerRow {
-            label: format!("slot{}", id),
+            label: format!("slot{}", id + 1),
             tape_name: name,
             barcode: bc,
         });
@@ -716,7 +716,7 @@ fn changer_inventory_from_db(
     for row in mrows {
         let (id, name, bc) = row?;
         mailslots.push(ChangerRow {
-            label: format!("mail{}", id - MAILSLOT_OFFSET),
+            label: format!("mail{}", id - MAILSLOT_OFFSET + 1),
             tape_name: name,
             barcode: bc,
         });
@@ -763,7 +763,7 @@ fn changer_inventory_from_kernel(
         let id = sid?;
         let tape = by_slot.get(&id).cloned();
         data_slots.push(ChangerRow {
-            label: format!("slot{}", id),
+            label: format!("slot{}", id + 1),
             tape_name: tape.clone(),
             barcode: tape.as_ref().and_then(|t| row_barcode(&barcodes, t)),
         });
@@ -792,7 +792,7 @@ fn changer_inventory_from_kernel(
         let id = mid?;
         let tape = by_mail.get(&id).cloned();
         mailslots.push(ChangerRow {
-            label: format!("mail{}", id - MAILSLOT_OFFSET),
+            label: format!("mail{}", id - MAILSLOT_OFFSET + 1),
             tape_name: tape.clone(),
             barcode: tape.as_ref().and_then(|t| row_barcode(&barcodes, t)),
         });

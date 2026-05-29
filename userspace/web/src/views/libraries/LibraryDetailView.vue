@@ -310,7 +310,7 @@ function setMapping(tape: string, slot: number | null) {
   // Check if slot already used by another tape
   for (const [ta, sl] of next) {
     if (sl === slot && ta !== tape) {
-      message.warning(`槽位 ${slot} 已分配给 ${ta}`);
+      message.warning(`槽位 ${slot + 1} 已分配给 ${ta}`);
       return;
     }
   }
@@ -319,7 +319,7 @@ function setMapping(tape: string, slot: number | null) {
 }
 
 const slotOpts = computed(() =>
-  emptySlots.value.map((s) => ({ label: `Slot ${s}`, value: s })),
+  emptySlots.value.map((s) => ({ label: `Slot ${s + 1}`, value: s })),
 );
 
 async function handleBatchAssign() {
@@ -618,7 +618,7 @@ onMounted(async () => {
                   { title: '名称', key: 'name', width: 140 },
                   { title: '条码', key: 'barcode', width: 120 },
                   { title: '容量', key: 'cap', width: 90, render: (r: TapeRow) => fmtBytes(r.capacity_bytes) },
-                  { title: '位置', key: 'loc', width: 90, render: (r: TapeRow) => r.in_drive ? '驱动器中' : r.slot != null ? '槽位 '+r.slot : r.shelf_name ?? '——' },
+                  { title: '位置', key: 'loc', width: 90, render: (r: TapeRow) => r.in_drive ? '驱动器中' : r.slot != null ? '槽位 '+(r.slot+1) : r.shelf_name ?? '——' },
                   {
                     title: '操作', key: 'actions', width: 180,
                     render(row: TapeRow) {
