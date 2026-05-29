@@ -8,6 +8,9 @@ import type {
   IscsiExportDefaultsResponse,
   IscsiAllowExecResponse,
   TransportScanResponse,
+  SystemSnapshot,
+  CapacityTrendResponse,
+  EventsResponse,
 } from './types';
 
 export function fetchEmptySlots(library: string) {
