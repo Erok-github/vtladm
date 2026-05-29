@@ -240,6 +240,19 @@ if [ "$DO_BUILD" -eq 1 ]; then
   fi
   echo ">> userspace (cargo build --release)"
   (cd "$ROOT/userspace" && _vtl_cargo_build_release)
+
+  # Vue3 web UI (optional: requires npm/node)
+  _WEB_SRC="$ROOT/userspace/web"
+  if [ -f "$_WEB_SRC/package.json" ] && command -v npm >/dev/null 2>&1; then
+    echo ">> web UI (npm install && npm run build)"
+    if (cd "$_WEB_SRC" && npm install --no-audit --no-fund && npm run build); then
+      true
+    else
+      echo "WARN: Vue3 web UI build failed — will fall back to legacy HTML" >&2
+    fi
+  elif [ -f "$_WEB_SRC/package.json" ]; then
+    echo "WARN: npm not found — skipping Vue3 web UI build (legacy HTML will be used)" >&2
+  fi
 fi
 
 _ko="$ROOT/kernel/vtl.ko"
@@ -305,6 +318,17 @@ if ! _vtl_verify_elf_bin "$PREFIX/bin/vtladm"; then
 fi
 if [ -f "$_iscsi" ]; then
   install -m 0755 "$_iscsi" "$PREFIX/bin/vtladm-iscsi"
+fi
+
+# Vue3 web UI dist (static SPA files)
+_WEB_DIST_SRC="$ROOT/userspace/web/dist"
+if [ -f "$_WEB_DIST_SRC/index.html" ]; then
+  mkdir -p "$PREFIX/lib/vtladm/web"
+  rm -rf "$PREFIX/lib/vtladm/web/"*
+  cp -r "$_WEB_DIST_SRC/"* "$PREFIX/lib/vtladm/web/"
+  echo "installed Vue3 web UI to $PREFIX/lib/vtladm/web/"
+else
+  echo "NOTE: Vue3 web UI not built — will use legacy HTML pages (run: cd userspace/web && npm run build)"
 fi
 
 # packaging helpers

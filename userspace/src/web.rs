@@ -22,6 +22,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use tower_http::services::{ServeDir, ServeFile};
 
 #[derive(serde::Deserialize)]
 struct LibraryQuery {
@@ -889,7 +890,10 @@ fn path_allowed_during_setup(method: &Method, path: &str) -> bool {
 fn is_public_route(method: &Method, path: &str) -> bool {
     matches!(
         (method, path),
-        (&Method::GET, "/login") | (&Method::GET, "/api/captcha") | (&Method::POST, "/api/login")
+        (&Method::GET, "/login")
+            | (&Method::GET, "/api/captcha")
+            | (&Method::POST, "/api/login")
+            | (&Method::GET, "/api/setup/status")
     )
 }
 
@@ -3947,8 +3951,71 @@ async fn page_admin_setup_init() -> Html<&'static str> {
     Html(ADMIN_SETUP_INIT_HTML)
 }
 
-/// 与 `run_web_ui` 内 `serve` 使用的路由、状态与鉴权中间件一致（供 `tower::ServiceExt::oneshot` 等测试）。
-/// 返回 **`Router<()>`**：`with_state` 已注入 `Arc<WebState>` 后，axum 0.7 中不再「缺状态」，故实现 `Service` 与 `oneshot`。
+/// API-only router (no HTML page routes). Used when Vue3 SPA serves the frontend.
+pub(crate) fn build_api_router(auth: Arc<super::web_auth::WebState>) -> Router<()> {
+    let auth_layer = auth.clone();
+    // Start with API routes only (strip page routes by rebuilding)
+    Router::new()
+        .route("/api/setup/status", get(api_setup_status))
+        .route("/api/setup/complete", post(api_setup_complete))
+        .route("/api/libraries", get(api_libraries))
+        .route("/api/libraries-status", get(api_libraries_status))
+        .route("/api/library/detail", get(api_library_detail))
+        .route("/api/shelves", get(api_shelves))
+        .route("/api/offline-shelves", get(api_offline_shelves))
+        .route("/api/empty-slots", get(api_empty_slots))
+        .route("/api/tapes", get(api_tapes))
+        .route("/api/status", get(api_status))
+        .route("/api/fabric", get(api_fabric))
+        .route("/api/patrol", get(api_patrol_run))
+        .route("/api/captcha", get(api_captcha))
+        .route("/api/login", post(api_login))
+        .route("/api/logout", post(api_logout))
+        .route("/api/change-password", post(api_change_password))
+        .route("/api/sessions", get(api_sessions))
+        .route("/api/sessions/revoke", post(api_sessions_revoke))
+        .route("/api/manage/tape/density-limits", get(api_manage_tape_density_limits))
+        .route("/api/manage/tape/create", post(api_manage_tape_create))
+        .route("/api/manage/library/create", post(api_manage_library_create))
+        .route("/api/manage/library/delete", post(api_manage_library_delete))
+        .route("/api/manage/shelf/create", post(api_manage_shelf_create))
+        .route("/api/manage/shelf/delete", post(api_manage_shelf_delete))
+        .route("/api/manage/tape/assign-slot", post(api_manage_assign))
+        .route("/api/manage/tape/load", post(api_manage_changer_load))
+        .route("/api/manage/tape/unload", post(api_manage_changer_unload))
+        .route("/api/manage/tape/eject", post(api_manage_changer_eject))
+        .route("/api/manage/robot/sync", post(api_manage_robot_sync))
+        .route("/api/manage/robot/auto-align", post(api_manage_robot_auto_align))
+        .route("/api/manage/robot/reconcile", post(api_manage_robot_reconcile))
+        .route("/api/manage/tape/shelf-place", post(api_manage_shelf_place))
+        .route("/api/manage/tape/shelf-place-batch", post(api_manage_shelf_place_batch))
+        .route("/api/manage/shelf/create-offline", post(api_manage_shelf_create_offline))
+        .route("/api/manage/tape/assign-slot-batch", post(api_manage_assign_batch))
+        .route("/api/manage/tape/create-batch", post(api_manage_tape_create_batch))
+        .route("/api/manage/tape/create-auto-batch", post(api_manage_tape_create_auto_batch))
+        .route("/api/manage/tape/delete", post(api_manage_tape_delete))
+        .route("/api/manage/tape/init", post(api_manage_tape_init))
+        .route("/api/manage/tape/migrate-shelves-batch", post(api_manage_tape_migrate_shelves_batch))
+        .route("/api/manage/iscsi/quick-export", post(api_manage_iscsi_quick_export))
+        .route("/api/manage/iscsi/quick-unexport", post(api_manage_iscsi_quick_unexport))
+        .route("/api/manage/iscsi/library-export-defaults", get(api_manage_iscsi_library_export_defaults))
+        .route("/api/manage/transport/scan-sg", get(api_manage_transport_scan_sg))
+        .route("/api/manage/iscsi/scan-sg", get(api_manage_iscsi_scan_sg))
+        .route("/api/manage/iscsi/library-export", post(api_manage_iscsi_library_export))
+        .route("/api/manage/iscsi/library-unexport", post(api_manage_iscsi_library_unexport))
+        .route("/api/manage/iscsi/config", get(api_manage_iscsi_config))
+        .route("/api/manage/iscsi/check", post(api_manage_iscsi_check))
+        .route("/api/manage/iscsi/allow-exec", post(api_manage_iscsi_allow_exec))
+        .with_state(auth)
+        .layer(middleware::from_fn_with_state(
+            auth_layer,
+            require_authenticated,
+        ))
+}
+
+/// Full router with legacy HTML pages + API routes (used by tests and when SPA dist unavailable).
+/// Full router with legacy HTML pages + API routes.
+/// Used by tests and when SPA dist is unavailable at runtime.
 pub(crate) fn build_web_router(auth: Arc<super::web_auth::WebState>) -> Router<()> {
     let auth_layer = auth.clone();
     Router::new()
@@ -3991,14 +4058,8 @@ pub(crate) fn build_web_router(auth: Arc<super::web_auth::WebState>) -> Router<(
         .route("/api/sessions/revoke", post(api_sessions_revoke))
         .route("/api/manage/tape/density-limits", get(api_manage_tape_density_limits))
         .route("/api/manage/tape/create", post(api_manage_tape_create))
-        .route(
-            "/api/manage/library/create",
-            post(api_manage_library_create),
-        )
-        .route(
-            "/api/manage/library/delete",
-            post(api_manage_library_delete),
-        )
+        .route("/api/manage/library/create", post(api_manage_library_create))
+        .route("/api/manage/library/delete", post(api_manage_library_delete))
         .route("/api/manage/shelf/create", post(api_manage_shelf_create))
         .route("/api/manage/shelf/delete", post(api_manage_shelf_delete))
         .route("/api/manage/tape/assign-slot", post(api_manage_assign))
@@ -4006,72 +4067,27 @@ pub(crate) fn build_web_router(auth: Arc<super::web_auth::WebState>) -> Router<(
         .route("/api/manage/tape/unload", post(api_manage_changer_unload))
         .route("/api/manage/tape/eject", post(api_manage_changer_eject))
         .route("/api/manage/robot/sync", post(api_manage_robot_sync))
-        .route(
-            "/api/manage/robot/auto-align",
-            post(api_manage_robot_auto_align),
-        )
-        .route(
-            "/api/manage/robot/reconcile",
-            post(api_manage_robot_reconcile),
-        )
+        .route("/api/manage/robot/auto-align", post(api_manage_robot_auto_align))
+        .route("/api/manage/robot/reconcile", post(api_manage_robot_reconcile))
         .route("/api/manage/tape/shelf-place", post(api_manage_shelf_place))
-        .route(
-            "/api/manage/tape/shelf-place-batch",
-            post(api_manage_shelf_place_batch),
-        )
-        .route(
-            "/api/manage/shelf/create-offline",
-            post(api_manage_shelf_create_offline),
-        )
-        .route(
-            "/api/manage/tape/assign-slot-batch",
-            post(api_manage_assign_batch),
-        )
-        .route(
-            "/api/manage/tape/create-batch",
-            post(api_manage_tape_create_batch),
-        )
-        .route(
-            "/api/manage/tape/create-auto-batch",
-            post(api_manage_tape_create_auto_batch),
-        )
+        .route("/api/manage/tape/shelf-place-batch", post(api_manage_shelf_place_batch))
+        .route("/api/manage/shelf/create-offline", post(api_manage_shelf_create_offline))
+        .route("/api/manage/tape/assign-slot-batch", post(api_manage_assign_batch))
+        .route("/api/manage/tape/create-batch", post(api_manage_tape_create_batch))
+        .route("/api/manage/tape/create-auto-batch", post(api_manage_tape_create_auto_batch))
         .route("/api/manage/tape/delete", post(api_manage_tape_delete))
         .route("/api/manage/tape/init", post(api_manage_tape_init))
-        .route(
-            "/api/manage/tape/migrate-shelves-batch",
-            post(api_manage_tape_migrate_shelves_batch),
-        )
-        .route(
-            "/api/manage/iscsi/quick-export",
-            post(api_manage_iscsi_quick_export),
-        )
-        .route(
-            "/api/manage/iscsi/quick-unexport",
-            post(api_manage_iscsi_quick_unexport),
-        )
-        .route(
-            "/api/manage/iscsi/library-export-defaults",
-            get(api_manage_iscsi_library_export_defaults),
-        )
-        .route(
-            "/api/manage/transport/scan-sg",
-            get(api_manage_transport_scan_sg),
-        )
+        .route("/api/manage/tape/migrate-shelves-batch", post(api_manage_tape_migrate_shelves_batch))
+        .route("/api/manage/iscsi/quick-export", post(api_manage_iscsi_quick_export))
+        .route("/api/manage/iscsi/quick-unexport", post(api_manage_iscsi_quick_unexport))
+        .route("/api/manage/iscsi/library-export-defaults", get(api_manage_iscsi_library_export_defaults))
+        .route("/api/manage/transport/scan-sg", get(api_manage_transport_scan_sg))
         .route("/api/manage/iscsi/scan-sg", get(api_manage_iscsi_scan_sg))
-        .route(
-            "/api/manage/iscsi/library-export",
-            post(api_manage_iscsi_library_export),
-        )
-        .route(
-            "/api/manage/iscsi/library-unexport",
-            post(api_manage_iscsi_library_unexport),
-        )
+        .route("/api/manage/iscsi/library-export", post(api_manage_iscsi_library_export))
+        .route("/api/manage/iscsi/library-unexport", post(api_manage_iscsi_library_unexport))
         .route("/api/manage/iscsi/config", get(api_manage_iscsi_config))
         .route("/api/manage/iscsi/check", post(api_manage_iscsi_check))
-        .route(
-            "/api/manage/iscsi/allow-exec",
-            post(api_manage_iscsi_allow_exec),
-        )
+        .route("/api/manage/iscsi/allow-exec", post(api_manage_iscsi_allow_exec))
         .with_state(auth)
         .layer(middleware::from_fn_with_state(
             auth_layer,
@@ -4149,9 +4165,36 @@ pub(crate) fn run_web_ui(host: &str, port: u16) -> Result<(), super::VtlError> {
         .build()
         .map_err(super::VtlError::IoError)?;
 
+    // Vue3 SPA static file directory
+    let spa_dir: PathBuf = if let Ok(d) = std::env::var("VTL_WEB_DIST") {
+        PathBuf::from(d)
+    } else {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir.join("web").join("dist")
+    };
+    if !spa_dir.join("index.html").exists() {
+        eprintln!(
+            "VTL web: Vue3 SPA dist not found at {} — run 'cd web && npm run build' first; falling back to legacy UI",
+            spa_dir.display()
+        );
+    }
+
     let auth_clone = auth.clone();
     rt.block_on(async move {
-        let app = build_web_router(auth_clone);
+        let app = if spa_dir.join("index.html").exists() {
+            eprintln!(
+                "VTL web: serving Vue3 SPA from {}",
+                spa_dir.display()
+            );
+            let api_router = build_api_router(auth_clone);
+            Router::new()
+                .nest_service("/assets", ServeDir::new(spa_dir.join("assets")))
+                .merge(api_router)
+                .fallback_service(ServeFile::new(spa_dir.join("index.html")))
+        } else {
+            // Fallback: legacy HTML pages
+            build_web_router(auth_clone)
+        };
 
         let listener = tokio::net::TcpListener::bind(addr)
             .await

@@ -1,0 +1,1 @@
+import{a}from"./index-CtxQmfRh.js";function r(e){return a.get(`/api/shelves?library=${encodeURIComponent(e)}`)}function o(e,t){return a.post("/api/manage/shelf/create",{library:e,name:t})}function s(e,t){return a.post("/api/manage/shelf/delete",{library:e,name:t})}export{o as c,s as d,r as f};

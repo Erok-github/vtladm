@@ -60,6 +60,11 @@ if [ "$_elf" != "7f454c46" ]; then
 fi
 
 export VTL_CONF_PATH="${VTL_CONF_PATH:-$PREFIX/var/vtl.conf}"
+# Vue3 SPA static files (fallback to CARGO_MANIFEST_DIR at build time if absent)
+_VTL_WEB_DIST="$PREFIX/lib/vtladm/web"
+if [ -d "$_VTL_WEB_DIST" ] && [ -f "$_VTL_WEB_DIST/index.html" ]; then
+  export VTL_WEB_DIST="$_VTL_WEB_DIST"
+fi
 [ -n "$VTLADM_WEB_COOKIE_SECURE" ] && export VTLADM_WEB_COOKIE_SECURE
 cd "$PREFIX/var" 2>/dev/null || cd / || exit 1
 

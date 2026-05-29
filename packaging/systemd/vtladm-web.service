@@ -18,7 +18,7 @@ RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/opt/vtladm/var /opt/vtladm/sbin/vtladm-web-serve /etc/target /sys/kernel/config
+ReadWritePaths=/opt/vtladm/var /opt/vtladm/sbin/vtladm-web-serve /opt/vtladm/lib/vtladm/web /etc/target /sys/kernel/config
 
 [Install]
 WantedBy=multi-user.target
