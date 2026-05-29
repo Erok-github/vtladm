@@ -158,7 +158,8 @@ onMounted(async () => {
           <NGi>
             <NCard size="small" v-if="systemSnapshot" style="text-align:center;padding:16px">
               <div style="font-size:24px;font-weight:700">{{ (systemSnapshot.mem.pct).toFixed(1) }}%</div>
-              <div style="font-size:12px;color:#999">内存 {{ (systemSnapshot.mem.used_kb / 1024 / 1024).toFixed(1) }} / {{ (systemSnapshot.mem.total_kb / 1024 / 1024).toFixed(1) }} GB</div>
+              <div style="font-size:11px;color:#999;margin-top:2px">已用 {{ (systemSnapshot.mem.used_kb / 1024 / 1024).toFixed(1) }} GB</div>
+              <div style="font-size:11px;color:#999">共 {{ (systemSnapshot.mem.total_kb / 1024 / 1024).toFixed(1) }} GB</div>
               <NProgress type="line" :percentage="systemSnapshot.mem.pct" :height="6" style="margin-top:8px" />
             </NCard>
             <NCard v-else size="small" style="text-align:center;padding:24px;color:#999">聚合性能<br><small>暂无数据</small></NCard>

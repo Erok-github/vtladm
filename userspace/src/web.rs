@@ -110,9 +110,27 @@ fn count_lsscsi_vtl_lines() -> u32 {
         Ok(o) if o.status.success() => o,
         _ => return 0,
     };
-    String::from_utf8_lossy(&out.stdout)
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    stdout
         .lines()
-        .filter(|l| l.contains("VTL"))
+        .filter(|l| {
+            if l.contains("VTL") {
+                return true;
+            }
+            // 兼容非 vtl personality（ibm/stk/hp）：通过 SCSI host proc_name 识别
+            let t = l.trim_start();
+            if !t.starts_with('[') {
+                return false;
+            }
+            let end = match t.find(']') { Some(e) => e, None => return false };
+            let host: u32 = match t[1..end].split(':').next().and_then(|v| v.parse().ok()) {
+                Some(h) => h,
+                None => return false,
+            };
+            std::fs::read_to_string(format!("/sys/class/scsi_host/host{}/proc_name", host))
+                .map(|s| s.trim() == "vtl")
+                .unwrap_or(false)
+        })
         .count() as u32
 }
 
@@ -2311,7 +2329,23 @@ fn scsi_lun_from_lsscsi_line(line: &str) -> Option<u32> {
 
 #[cfg(unix)]
 fn lsscsi_line_is_vtl(line: &str) -> bool {
-    line.contains("VTL")
+    if line.contains("VTL") {
+        return true;
+    }
+    // 当内核模块以 personality=ibm/stk/hp 加载时，lsscsi 输出 vendor 不是 "VTL"，
+    // 需要通过 /sys/class/scsi_host/hostN/proc_name 来识别 VTL SCSI host
+    if let Some(host) = scsi_host_from_lsscsi_line(line) {
+        return is_vtl_scsi_host(host);
+    }
+    false
+}
+
+#[cfg(unix)]
+fn is_vtl_scsi_host(host: u32) -> bool {
+    let proc_path = format!("/sys/class/scsi_host/host{}/proc_name", host);
+    std::fs::read_to_string(&proc_path)
+        .map(|s| s.trim() == "vtl")
+        .unwrap_or(false)
 }
 
 #[cfg(unix)]

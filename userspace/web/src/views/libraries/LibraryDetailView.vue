@@ -360,6 +360,17 @@ const fcWwnn = ref('');
 // SCSI scan
 const scanResult = ref<{ changer_sg: string | null; drive_sg: string[] } | null>(null);
 const scanLoading = ref(false);
+const driveSgInput = computed({
+  get: () => iscsiConfig.value?.drive_sg.join(', ') ?? '',
+  set: (val: string) => {
+    if (iscsiConfig.value) {
+      iscsiConfig.value = {
+        ...iscsiConfig.value,
+        drive_sg: val.split(',').map(s => s.trim()).filter(Boolean),
+      };
+    }
+  },
+});
 
 const transportLoading = ref(false);
 
@@ -839,7 +850,7 @@ onMounted(async () => {
                     </div>
                     <div>
                       <span>Drive SG (逗号分隔)</span>
-                      <NInput :value="iscsiConfig.drive_sg.join(', ')" placeholder="/dev/sgY, /dev/sgZ" readonly />
+                      <NInput v-model:value="driveSgInput" placeholder="/dev/sgY, /dev/sgZ" />
                     </div>
                     <div style="font-size:12px;color:#999">
                       <template v-if="iscsiConfig.has_saved_export">已保存导出记录</template>
