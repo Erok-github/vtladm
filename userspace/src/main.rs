@@ -1214,6 +1214,7 @@ pub(crate) fn assign_tapes_to_slots_batch(
     if robot_sync::robot_sync_enabled() {
         reconcile::try_post_op_auto_align(online_lib_id);
     }
+    crate::monitor::log_event("slot", "assign", &format!("{} tape(s) → {}", pairs.len(), library));
     println!(
         "Assigned {} tape(s) to slots in library '{}'",
         pairs.len(),
@@ -3591,20 +3592,14 @@ fn create_tape(name: &str, size: u64, shelf_name: Option<&str>, density: u8,
         return Err(VtlError::from(e));
     }
 
+    crate::monitor::log_event("tape", "create", &format!("{} ({}, {})", name, format_size(size), density_label(density)));
     log_message(&format!(
         "Successfully created tape '{}' (barcode: {}, size: {}, density: {})",
-        name,
-        barcode,
-        format_size(size),
-        density_label(density)
+        name, barcode, format_size(size), density_label(density)
     ));
     println!(
         "Created tape '{}' (barcode: {}, size: {}, density: {}) in library '{}'",
-        name,
-        barcode,
-        format_size(size),
-        density_label(density),
-        lib_name
+        name, barcode, format_size(size), density_label(density), lib_name
     );
     println!("Image path: {}", image_path.display());
 
@@ -4258,6 +4253,7 @@ pub(crate) fn delete_tape_in_library(
             deleted_path.display()
         );
         log_error("delete_tape_in_library", &warning);
+        crate::monitor::log_event("tape", "delete", name);
         log_message(&format!("Deleted tape '{}' (with file warning)", name));
         println!(
             "Deleted tape '{}' from library '{}' (warning: orphan image)",
@@ -4266,6 +4262,7 @@ pub(crate) fn delete_tape_in_library(
         return Ok(Some(warning));
     }
 
+    crate::monitor::log_event("tape", "delete", name);
     log_message(&format!("Successfully deleted tape '{}'", name));
     println!("Deleted tape '{}' from library '{}'", name, library);
 
@@ -4508,6 +4505,7 @@ pub(crate) fn delete_named_library(name: &str) -> Result<(Vec<String>, KernelGeo
         }
     }
 
+    crate::monitor::log_event("library", "delete", &format!("{}", name));
     log_message(&format!("Deleted VTL library '{}'", name));
     println!("Deleted library '{}'", name);
     if !file_warnings.is_empty() {
@@ -4739,6 +4737,7 @@ fn load_tape(slot: i32, drive: i32) -> Result<(), VtlError> {
         reconcile::try_post_op_auto_align(library_id);
     }
 
+    crate::monitor::log_event("changer", "load", &format!("{}: slot{} → drive{}", tape_name, slot, drive));
     log_message(&format!(
         "Successfully loaded tape '{}' from slot {} to drive {}",
         tape_name, slot, drive
@@ -4832,6 +4831,7 @@ fn unload_tape(drive: i32) -> Result<i32, VtlError> {
         reconcile::try_post_op_auto_align(library_id);
     }
 
+    crate::monitor::log_event("changer", "unload", &format!("{}: drive{} → slot{}", tape_name, drive, target_slot));
     log_message(&format!(
         "Successfully unloaded tape '{}' from drive {} to slot {}",
         tape_name, drive, target_slot
@@ -4912,6 +4912,7 @@ fn eject_tape(slot: i32) -> Result<i32, VtlError> {
         reconcile::try_post_op_auto_align(library_id);
     }
 
+    crate::monitor::log_event("changer", "eject", &format!("{}: slot{} → mailslot{}", tape_name, slot, mailslot));
     log_message(&format!(
         "Successfully ejected tape '{}' from slot {} to mailslot {}",
         tape_name, slot, mailslot
@@ -5657,6 +5658,7 @@ pub(crate) fn create_named_library(
             drives
         );
     }
+    crate::monitor::log_event("library", "create", &format!("{} (drives={}, slots={})", name, drives, slots));
     Ok(geom)
 }
 

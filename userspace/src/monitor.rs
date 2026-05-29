@@ -225,9 +225,18 @@ pub fn snapshot_capacity() -> Result<(), String> {
 }
 
 /// Read capacity trend for a library (or all). Returns last `limit` points.
+/// Auto-generates an initial snapshot if none exist.
 pub fn get_capacity_trend(library: Option<&str>, limit: u32) -> Result<CapacityTrendResponse, String> {
     let conn = init_db().map_err(|e| e.to_string())?;
     ensure_capacity_snapshots_table(&conn)?;
+
+    // Auto-snapshot if no data exists yet
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM capacity_snapshots", [], |r| r.get(0))
+        .unwrap_or(0);
+    if count == 0 {
+        let _ = snapshot_capacity();
+    }
 
     let points: Vec<CapacityPoint> = {
         if let Some(lib) = library {

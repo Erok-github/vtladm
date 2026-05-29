@@ -151,7 +151,7 @@ onMounted(async () => {
             <NCard size="small" v-if="systemSnapshot" style="text-align:center;padding:16px;overflow:hidden">
               <div style="font-size:24px;font-weight:700">{{ systemSnapshot.cpu.pct.toFixed(1) }}%</div>
               <div style="font-size:12px;color:#999;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">CPU 使用率 ({{ systemSnapshot.cpu.num_cores }} 核)</div>
-              <NProgress type="line" :percentage="Math.min(systemSnapshot.cpu.pct, 100)" :height="6" style="margin-top:8px" />
+              <NProgress type="line" :percentage="Math.round(Math.min(systemSnapshot.cpu.pct, 100))" :height="6" style="margin-top:8px" />
             </NCard>
             <NCard v-else size="small" style="text-align:center;padding:24px;color:#999">驱动器吞吐量<br><small>暂无数据</small></NCard>
           </NGi>
@@ -160,7 +160,7 @@ onMounted(async () => {
               <div style="font-size:24px;font-weight:700">{{ (systemSnapshot.mem.pct).toFixed(1) }}%</div>
               <div style="font-size:11px;color:#999;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">已用 {{ (systemSnapshot.mem.used_kb / 1024 / 1024).toFixed(1) }} GB</div>
               <div style="font-size:11px;color:#999;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">共 {{ (systemSnapshot.mem.total_kb / 1024 / 1024).toFixed(1) }} GB</div>
-              <NProgress type="line" :percentage="systemSnapshot.mem.pct" :height="6" style="margin-top:8px" />
+              <NProgress type="line" :percentage="Math.round(systemSnapshot.mem.pct)" :height="6" style="margin-top:8px" />
             </NCard>
             <NCard v-else size="small" style="text-align:center;padding:24px;color:#999">聚合性能<br><small>暂无数据</small></NCard>
           </NGi>
@@ -200,9 +200,14 @@ onMounted(async () => {
             <NCard v-else size="small" style="text-align:center;padding:24px;color:#999">存储容量趋势<br><small>暂无数据 — 容量快照由定时巡检测试写入</small></NCard>
           </NGi>
           <NGi>
-            <NCard size="small" style="text-align:center;padding:24px;color:#999">
-              系统资源<br><small>CPU/内存/文件系统 — 暂无数据</small>
+            <NCard size="small" v-if="systemSnapshot" style="text-align:center;padding:16px;overflow:hidden">
+              <div style="font-size:13px;font-weight:600;margin-bottom:6px">系统资源</div>
+              <div style="font-size:11px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">CPU: {{ systemSnapshot.cpu.num_cores }} 核</div>
+              <div style="font-size:11px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">内存: {{ (systemSnapshot.mem.total_kb / 1024 / 1024).toFixed(1) }} GB</div>
+              <div style="font-size:11px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">磁盘: {{ systemSnapshot.disks.length > 0 ? systemSnapshot.disks[0].name : '—' }}</div>
+              <NProgress type="line" :percentage="Math.round(systemSnapshot.mem.pct)" :height="4" style="margin-top:8px" :color="systemSnapshot.mem.pct > 90 ? '#d03050' : '#18a058'" />
             </NCard>
+            <NCard v-else size="small" style="text-align:center;padding:24px;color:#999">系统资源<br><small>暂无数据</small></NCard>
           </NGi>
         </NGrid>
       </NCard>
