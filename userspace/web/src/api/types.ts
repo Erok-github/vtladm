@@ -89,9 +89,9 @@ export interface LibraryDetailResponse {
   tapes: TapeRow[];
   changer: {
     source: string;
-    data_slots: { slot_id: number; tape_name: string | null; barcode: string | null }[];
-    drives: { drive_id: number; tape_name: string | null; barcode: string | null }[];
-    mailslots: { slot_id: number; tape_name: string | null; barcode: string | null }[];
+    data_slots: { label: string; tape_name: string | null; barcode: string | null }[];
+    drives: { label: string; tape_name: string | null; barcode: string | null }[];
+    mailslots: { label: string; tape_name: string | null; barcode: string | null }[];
   };
 }
 

@@ -124,7 +124,7 @@ onMounted(async () => {
     <NSpin :show="loading">
       <!-- 资产管理 -->
       <NCard title="资产管理" size="small" style="margin-bottom: 16px">
-        <NGrid :cols="4" :x-gap="12" :y-gap="12" style="margin-bottom: 16px">
+        <NGrid responsive="screen" cols="1 s:2 m:3 l:4" :x-gap="12" :y-gap="12" style="margin-bottom: 16px">
           <NGi><NCard size="small" :bordered="true"><NStatistic label="在线库" :value="totalOnline" /></NCard></NGi>
           <NGi><NCard size="small" :bordered="true"><NStatistic label="驱动器总计" :value="totalDrives" /></NCard></NGi>
           <NGi><NCard size="small" :bordered="true"><NStatistic label="插槽总计" :value="totalSlots" /></NCard></NGi>
@@ -146,28 +146,28 @@ onMounted(async () => {
 
       <!-- 性能监控 -->
       <NCard title="性能监控" size="small" style="margin-bottom: 16px">
-        <NGrid :cols="3" :x-gap="12">
+        <NGrid responsive="screen" cols="1 s:2 m:3" :x-gap="12">
           <NGi>
-            <NCard size="small" v-if="systemSnapshot" style="text-align:center;padding:16px">
+            <NCard size="small" v-if="systemSnapshot" style="text-align:center;padding:16px;overflow:hidden">
               <div style="font-size:24px;font-weight:700">{{ systemSnapshot.cpu.pct.toFixed(1) }}%</div>
-              <div style="font-size:12px;color:#999">CPU 使用率 ({{ systemSnapshot.cpu.num_cores }} 核)</div>
+              <div style="font-size:12px;color:#999;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">CPU 使用率 ({{ systemSnapshot.cpu.num_cores }} 核)</div>
               <NProgress type="line" :percentage="Math.min(systemSnapshot.cpu.pct, 100)" :height="6" style="margin-top:8px" />
             </NCard>
             <NCard v-else size="small" style="text-align:center;padding:24px;color:#999">驱动器吞吐量<br><small>暂无数据</small></NCard>
           </NGi>
           <NGi>
-            <NCard size="small" v-if="systemSnapshot" style="text-align:center;padding:16px">
+            <NCard size="small" v-if="systemSnapshot" style="text-align:center;padding:16px;overflow:hidden">
               <div style="font-size:24px;font-weight:700">{{ (systemSnapshot.mem.pct).toFixed(1) }}%</div>
-              <div style="font-size:11px;color:#999;margin-top:2px">已用 {{ (systemSnapshot.mem.used_kb / 1024 / 1024).toFixed(1) }} GB</div>
-              <div style="font-size:11px;color:#999">共 {{ (systemSnapshot.mem.total_kb / 1024 / 1024).toFixed(1) }} GB</div>
+              <div style="font-size:11px;color:#999;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">已用 {{ (systemSnapshot.mem.used_kb / 1024 / 1024).toFixed(1) }} GB</div>
+              <div style="font-size:11px;color:#999;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">共 {{ (systemSnapshot.mem.total_kb / 1024 / 1024).toFixed(1) }} GB</div>
               <NProgress type="line" :percentage="systemSnapshot.mem.pct" :height="6" style="margin-top:8px" />
             </NCard>
             <NCard v-else size="small" style="text-align:center;padding:24px;color:#999">聚合性能<br><small>暂无数据</small></NCard>
           </NGi>
           <NGi>
-            <NCard size="small" v-if="systemSnapshot && systemSnapshot.disks.length > 0" style="text-align:center;padding:16px">
+            <NCard size="small" v-if="systemSnapshot && systemSnapshot.disks.length > 0" style="text-align:center;padding:16px;overflow:hidden">
               <div style="font-size:13px;font-weight:600;margin-bottom:4px">磁盘 IO</div>
-              <div v-for="d in systemSnapshot.disks.slice(0, 3)" :key="d.name" style="font-size:11px;color:#666">
+              <div v-for="d in systemSnapshot.disks.slice(0, 3)" :key="d.name" style="font-size:11px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
                 {{ d.name }}: 读 {{ fmtBytes(d.read_bytes) }} / 写 {{ fmtBytes(d.write_bytes) }}
               </div>
             </NCard>
@@ -178,11 +178,11 @@ onMounted(async () => {
 
       <!-- 资源利用率 -->
       <NCard title="资源利用率" size="small" style="margin-bottom: 16px">
-        <NGrid :cols="3" :x-gap="12">
+        <NGrid responsive="screen" cols="1 s:2 m:3" :x-gap="12">
           <NGi>
-            <NCard size="small" style="text-align:center;padding:16px">
+            <NCard size="small" style="text-align:center;padding:16px;overflow:hidden">
               <div style="font-size:13px;font-weight:600">驱动器使用率</div>
-              <div v-if="totalDrives > 0" style="font-size:12px;color:#666">
+              <div v-if="totalDrives > 0" style="font-size:12px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
                 {{ statuses.reduce((s, l) => s + l.loaded_in_drives, 0) }} / {{ totalDrives }} 已装载
                 <NProgress type="line" :percentage="totalDrives > 0 ? Math.round(statuses.reduce((s,l) => s + l.loaded_in_drives, 0) / totalDrives * 100) : 0" :height="6" style="margin-top:4px" />
               </div>
@@ -190,9 +190,9 @@ onMounted(async () => {
             </NCard>
           </NGi>
           <NGi>
-            <NCard size="small" v-if="latestCapacity.length > 0" style="text-align:center;padding:16px">
+            <NCard size="small" v-if="latestCapacity.length > 0" style="text-align:center;padding:16px;overflow:hidden">
               <div style="font-size:13px;font-weight:600">存储容量趋势</div>
-              <div v-for="cp in latestCapacity" :key="cp.library" style="font-size:11px;color:#666;margin-top:4px">
+              <div v-for="cp in latestCapacity" :key="cp.library" style="font-size:11px;color:#666;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
                 {{ cp.library }}: {{ fmtBytes(cp.used_bytes) }} / {{ fmtBytes(cp.total_bytes) }}
                 <NProgress type="line" :percentage="cp.total_bytes > 0 ? Math.round(cp.used_bytes / cp.total_bytes * 100) : 0" :height="4" style="margin-top:2px" />
               </div>
@@ -209,7 +209,7 @@ onMounted(async () => {
 
       <!-- 状态与事件 -->
       <NCard title="状态与事件" size="small">
-        <NGrid :cols="2" :x-gap="12">
+        <NGrid responsive="screen" cols="1 m:2" :x-gap="12">
           <NGi>
             <div style="font-size:14px;font-weight:600;margin-bottom:8px">巡检测试</div>
             <template v-if="patrol">
@@ -225,7 +225,7 @@ onMounted(async () => {
           <NGi>
             <div style="font-size:14px;font-weight:600;margin-bottom:8px">操作日志</div>
             <template v-if="events.length > 0">
-              <div v-for="ev in events.slice(0, 8)" :key="ev.id" style="font-size:11px;color:#666;padding:2px 0;border-bottom:1px solid #f5f5f5">
+              <div v-for="ev in events.slice(0, 8)" :key="ev.id" style="font-size:11px;color:#666;padding:2px 0;border-bottom:1px solid #f5f5f5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
                 <span style="color:#999">{{ ev.ts }}</span>
                 <NTag size="tiny" style="margin:0 4px">{{ ev.category }}</NTag>
                 {{ ev.action }} — {{ ev.detail }}

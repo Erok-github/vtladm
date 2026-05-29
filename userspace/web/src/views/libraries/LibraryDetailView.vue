@@ -172,7 +172,6 @@ const shelfColumns: DataTableColumns<ShelfRow> = [
 const densityLimits = ref<DensityLimit[]>([]);
 const selectedDensity = ref<number | null>(null);
 const batchCount = ref(5);
-const batchPrefix = ref('TAPE');
 const batchSize = ref('100G');
 const batchShelf = ref<string | null>(null);
 const tapeShelfOpts = ref<{ label: string; value: string }[]>([]);
@@ -203,13 +202,14 @@ const capacityError = computed(() => {
   return null;
 });
 
+const namePrefix = computed(() => libraryName.value ? `${libraryName.value}_Tape` : 'Tape');
+
 const namePreview = computed(() => {
-  const pad = Math.max(4, String(batchCount.value).length);
-  const start = 1;
+  const pad = Math.max(2, String(batchCount.value).length);
   const end = batchCount.value;
   const fmt = (n: number) => String(n).padStart(pad, '0');
-  if (end <= 5) return Array.from({ length: end }, (_, i) => `${batchPrefix.value}${fmt(start + i)}`).join(', ');
-  return `${batchPrefix.value}${fmt(start)} ~ ${batchPrefix.value}${fmt(end)}`;
+  if (end <= 5) return Array.from({ length: end }, (_, i) => `${namePrefix.value}${fmt(i + 1)}`).join(', ');
+  return `${namePrefix.value}${fmt(1)} ~ ${namePrefix.value}${fmt(end)}`;
 });
 
 async function loadDensityLimits() {
@@ -604,9 +604,9 @@ onMounted(async () => {
 
             <NCard title="槽位占用分布" size="small" style="margin-bottom:16px">
               <div style="display:flex;flex-wrap:wrap;gap:6px">
-                <template v-for="s in detail.changer.data_slots" :key="s.slot_id">
+                <template v-for="s in detail.changer.data_slots" :key="s.label">
                   <NTag :type="s.tape_name ? 'info' : 'default'" size="small">
-                    {{ s.slot_id }}: {{ s.tape_name || '空' }}
+                    {{ s.label }}: {{ s.tape_name || '空' }}
                   </NTag>
                 </template>
               </div>
@@ -702,9 +702,8 @@ onMounted(async () => {
                   <span>数量</span>
                   <NInputNumber v-model:value="batchCount" :min="1" :max="100" style="width:100%" />
                 </div>
-                <div>
-                  <span>名称前缀</span>
-                  <NInput v-model:value="batchPrefix" placeholder="TAPE" />
+                <div style="font-size:13px;color:#666;margin-bottom:8px">
+                  命名规则: <strong>{{ namePrefix }}01</strong> · {{ namePrefix }}02 · ...（库名自动前缀，确保唯一）
                 </div>
                 <div>
                   <span>密度格式</span>

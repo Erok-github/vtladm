@@ -1248,10 +1248,10 @@ pub(crate) fn create_tapes_batch(
 
 /// Auto tape name prefix: `{library}_tape` so names are unique under flat kernel `tape_dir`.
 fn auto_tape_name_prefix(library: &str) -> String {
-    format!("{}_tape", sanitize_lib_dir_component(library))
+    format!("{}_Tape", sanitize_lib_dir_component(library))
 }
 
-/// 当前库中 `{lib}_tape` + 十进制数字 的名称里，最大的数字后缀。
+/// 当前库中 `{lib}_Tape` + 十进制数字 的名称里，最大的数字后缀。
 fn max_auto_tape_suffix_for_library(
     conn: &Connection,
     library_id: i64,
@@ -1287,7 +1287,7 @@ fn allocate_auto_tape_names(library: &str, start: u64, count: usize) -> Vec<Stri
         .collect()
 }
 
-/// 按库内已有 `{lib}_tape`+数字 规则顺序生成名称（如 `marstor_tape01`），批量创建。
+/// 按库内已有 `{lib}_Tape`+数字 规则顺序生成名称（如 `marstor_Tape01`），批量创建。
 pub(crate) fn create_auto_named_tapes_batch(
     library: &str,
     shelf: Option<&str>,
@@ -7294,14 +7294,14 @@ mod tests {
         let dir = prepare_temp_vtl("auto_tape_names");
         let _ = create_named_library("default", 1, 2);
         let v1 = create_auto_named_tapes_batch("default", None, 2, 200 * 1024 * 1024, 0x40).unwrap();
-        assert_eq!(v1, vec!["default_tape01", "default_tape02"]);
+        assert_eq!(v1, vec!["default_Tape01", "default_Tape02"]);
         let v2 = create_auto_named_tapes_batch("default", None, 1, 200 * 1024 * 1024, 0x40).unwrap();
-        assert_eq!(v2, vec!["default_tape03"]);
+        assert_eq!(v2, vec!["default_Tape03"]);
         let conn = init_db().unwrap();
         let lid = resolve_library_id(&conn, "default").unwrap();
         let n: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM tapes WHERE library_id = ?1 AND name IN ('default_tape01','default_tape02','default_tape03')",
+                "SELECT COUNT(*) FROM tapes WHERE library_id = ?1 AND name IN ('default_Tape01','default_Tape02','default_Tape03')",
                 params![lid],
                 |r| r.get(0),
             )
