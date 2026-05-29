@@ -21,6 +21,7 @@ mod fab_transport;
 mod iscsi_export;
 mod kernel_geom_ioctl;
 pub(crate) mod lio_hold;
+mod monitor;
 mod patrol;
 mod reconcile;
 mod robot_sync;

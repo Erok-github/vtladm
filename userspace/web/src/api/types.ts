@@ -254,3 +254,35 @@ export interface TransportScanResponse {
   product_limits?: unknown;
   error?: string;
 }
+
+// ── Monitor ──
+
+export interface SystemSnapshot {
+  cpu: { pct: number; num_cores: number };
+  mem: { total_kb: number; used_kb: number; pct: number };
+  disks: { name: string; read_bytes: number; write_bytes: number }[];
+}
+
+export interface CapacityPoint {
+  ts: string;
+  library: string;
+  total_bytes: number;
+  used_bytes: number;
+  tape_count: number;
+}
+
+export interface CapacityTrendResponse {
+  points: CapacityPoint[];
+}
+
+export interface EventEntry {
+  id: number;
+  ts: string;
+  category: string;
+  action: string;
+  detail: string;
+}
+
+export interface EventsResponse {
+  events: EventEntry[];
+}

@@ -2896,6 +2896,56 @@ async fn api_manage_iscsi_allow_exec(
     }
 }
 
+// Monitor API handlers
+
+async fn api_monitor_system(
+    State(st): State<Arc<super::web_auth::WebState>>,
+    jar: CookieJar,
+) -> Response {
+    if let Err(resp) = require_session(&st, &jar) {
+        return resp;
+    }
+    let snap = super::monitor::system_snapshot();
+    Json(serde_json::to_value(&snap).unwrap_or(json!({}))).into_response()
+}
+
+#[derive(Deserialize)]
+struct MonitorQuery {
+    library: Option<String>,
+    category: Option<String>,
+    #[serde(default = "default_monitor_limit")]
+    limit: u32,
+}
+fn default_monitor_limit() -> u32 { 50 }
+
+async fn api_monitor_capacity_trend(
+    State(st): State<Arc<super::web_auth::WebState>>,
+    jar: CookieJar,
+    Query(q): Query<MonitorQuery>,
+) -> Response {
+    if let Err(resp) = require_session(&st, &jar) {
+        return resp;
+    }
+    match super::monitor::get_capacity_trend(q.library.as_deref(), q.limit) {
+        Ok(trend) => Json(serde_json::to_value(&trend).unwrap_or(json!({}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+async fn api_monitor_events(
+    State(st): State<Arc<super::web_auth::WebState>>,
+    jar: CookieJar,
+    Query(q): Query<MonitorQuery>,
+) -> Response {
+    if let Err(resp) = require_session(&st, &jar) {
+        return resp;
+    }
+    match super::monitor::get_events(q.limit, q.category.as_deref()) {
+        Ok(ev) => Json(serde_json::to_value(&ev).unwrap_or(json!({}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
 #[derive(Deserialize)]
 struct IscsiQuickExportBody {
     file: String,
@@ -4018,6 +4068,9 @@ pub(crate) fn build_api_router(auth: Arc<super::web_auth::WebState>) -> Router<(
         .route("/api/manage/iscsi/config", get(api_manage_iscsi_config))
         .route("/api/manage/iscsi/check", post(api_manage_iscsi_check))
         .route("/api/manage/iscsi/allow-exec", post(api_manage_iscsi_allow_exec))
+        .route("/api/monitor/system", get(api_monitor_system))
+        .route("/api/monitor/capacity-trend", get(api_monitor_capacity_trend))
+        .route("/api/monitor/events", get(api_monitor_events))
         .with_state(auth)
         .layer(middleware::from_fn_with_state(
             auth_layer,
@@ -4101,6 +4154,9 @@ pub(crate) fn build_web_router(auth: Arc<super::web_auth::WebState>) -> Router<(
         .route("/api/manage/iscsi/config", get(api_manage_iscsi_config))
         .route("/api/manage/iscsi/check", post(api_manage_iscsi_check))
         .route("/api/manage/iscsi/allow-exec", post(api_manage_iscsi_allow_exec))
+        .route("/api/monitor/system", get(api_monitor_system))
+        .route("/api/monitor/capacity-trend", get(api_monitor_capacity_trend))
+        .route("/api/monitor/events", get(api_monitor_events))
         .with_state(auth)
         .layer(middleware::from_fn_with_state(
             auth_layer,

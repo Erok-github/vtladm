@@ -1,12 +1,21 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, h } from 'vue';
 import { useRouter } from 'vue-router';
-import { NGrid, NGi, NCard, NStatistic, NButton, NTag, NSpace, NSpin, NEmpty, NDataTable } from 'naive-ui';
+import {
+  NGrid, NGi, NCard, NStatistic, NButton, NTag, NSpace,
+  NSpin, NEmpty, NDataTable, NProgress,
+} from 'naive-ui';
 import type { DataTableColumns } from 'naive-ui';
 import { useLibraryStore } from '@/stores/library';
 import { fetchLibrariesStatus } from '@/api/libraries';
-import { fetchPatrol, fetchFabric } from '@/api/other';
-import type { LibraryStatus, PatrolResponse } from '@/api/types';
+import {
+  fetchPatrol, fetchFabric, fetchSystemSnapshot,
+  fetchCapacityTrend, fetchEvents,
+} from '@/api/other';
+import type {
+  LibraryStatus, PatrolResponse,
+  SystemSnapshot, CapacityPoint, EventEntry,
+} from '@/api/types';
 
 const router = useRouter();
 const libraryStore = useLibraryStore();
@@ -14,6 +23,9 @@ const loading = ref(true);
 const patrol = ref<PatrolResponse | null>(null);
 const fabricTransport = ref('');
 const statuses = ref<LibraryStatus[]>([]);
+const systemSnapshot = ref<SystemSnapshot | null>(null);
+const capacityPoints = ref<CapacityPoint[]>([]);
+const events = ref<EventEntry[]>([]);
 
 interface LibSummary {
   name: string;
@@ -30,25 +42,25 @@ const totalDrives = computed(() => statuses.value.reduce((s, l) => s + l.drives,
 const totalSlots = computed(() => statuses.value.reduce((s, l) => s + l.data_slots, 0));
 const totalTapes = computed(() => statuses.value.reduce((s, l) => s + l.tape_count, 0));
 
+function fmtBytes(b: number): string {
+  if (b >= 1024 * 1024 * 1024 * 1024) return (b / (1024 * 1024 * 1024 * 1024)).toFixed(1) + ' TB';
+  if (b >= 1024 * 1024 * 1024) return (b / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+  if (b >= 1024 * 1024) return (b / (1024 * 1024)).toFixed(0) + ' MB';
+  return b + ' B';
+}
+
 const libColumns: DataTableColumns<LibSummary> = [
   { title: '库名', key: 'name', width: 130 },
   { title: '驱动器', key: 'drives', width: 70, render: (r) => `${r.drives}` },
   { title: '插槽', key: 'slots', width: 60, render: (r) => `${r.slots}` },
   { title: '磁带', key: 'tapes', width: 60, render: (r) => `${r.tapes}` },
   {
-    title: '占用',
-    key: 'usage',
-    width: 80,
-    render(r) {
-      const pct = r.slots > 0 ? Math.round((r.tapes / r.slots) * 100) : 0;
-      return `${pct}%`;
-    },
+    title: '占用', key: 'usage', width: 80,
+    render(r) { return r.slots > 0 ? `${Math.round((r.tapes / r.slots) * 100)}%` : '0%'; },
   },
   { title: '传输', key: 'transport', width: 70 },
   {
-    title: '操作',
-    key: 'actions',
-    width: 80,
+    title: '操作', key: 'actions', width: 80,
     render(row) {
       const lib = libraryStore.libraries.find((l) => l.name === row.name);
       if (!lib) return null;
@@ -57,29 +69,39 @@ const libColumns: DataTableColumns<LibSummary> = [
   },
 ];
 
+// Capacity trend summary: pick latest point per library
+const latestCapacity = computed(() => {
+  const map = new Map<string, CapacityPoint>();
+  for (const p of capacityPoints.value) {
+    if (!map.has(p.library)) map.set(p.library, p);
+  }
+  return Array.from(map.values());
+});
+
 onMounted(async () => {
   await libraryStore.loadLibraries();
 
-  // statuses — critical, must not be blocked by patrol/fabric
   try {
     const s = await fetchLibrariesStatus();
     statuses.value = s.libraries;
-  } catch {
-    console.error('加载库状态失败');
-  }
+  } catch { console.error('加载库状态失败'); }
 
-  try {
-    patrol.value = await fetchPatrol();
-  } catch {
-    // patrol is optional
-  }
-
+  try { patrol.value = await fetchPatrol(); } catch { /* optional */ }
   try {
     const f = await fetchFabric();
     fabricTransport.value = f.transport || '';
-  } catch {
-    // fabric is optional
-  }
+  } catch { /* optional */ }
+
+  // Load monitor data
+  try { systemSnapshot.value = await fetchSystemSnapshot(); } catch { /* optional */ }
+  try {
+    const trend = await fetchCapacityTrend(undefined, 200);
+    capacityPoints.value = trend.points;
+  } catch { /* optional */ }
+  try {
+    const ev = await fetchEvents(20);
+    events.value = ev.events;
+  } catch { /* optional */ }
 
   libSummaries.value = libraryStore.onlineLibraries.map((lib) => {
     const st = statuses.value.find((s) => s.library === lib.name);
@@ -103,26 +125,10 @@ onMounted(async () => {
       <!-- 资产管理 -->
       <NCard title="资产管理" size="small" style="margin-bottom: 16px">
         <NGrid :cols="4" :x-gap="12" :y-gap="12" style="margin-bottom: 16px">
-          <NGi>
-            <NCard size="small" :bordered="true">
-              <NStatistic label="在线库" :value="totalOnline" />
-            </NCard>
-          </NGi>
-          <NGi>
-            <NCard size="small" :bordered="true">
-              <NStatistic label="驱动器总计" :value="totalDrives" />
-            </NCard>
-          </NGi>
-          <NGi>
-            <NCard size="small" :bordered="true">
-              <NStatistic label="插槽总计" :value="totalSlots" />
-            </NCard>
-          </NGi>
-          <NGi>
-            <NCard size="small" :bordered="true">
-              <NStatistic label="磁带总计" :value="totalTapes" />
-            </NCard>
-          </NGi>
+          <NGi><NCard size="small" :bordered="true"><NStatistic label="在线库" :value="totalOnline" /></NCard></NGi>
+          <NGi><NCard size="small" :bordered="true"><NStatistic label="驱动器总计" :value="totalDrives" /></NCard></NGi>
+          <NGi><NCard size="small" :bordered="true"><NStatistic label="插槽总计" :value="totalSlots" /></NCard></NGi>
+          <NGi><NCard size="small" :bordered="true"><NStatistic label="磁带总计" :value="totalTapes" /></NCard></NGi>
         </NGrid>
 
         <div v-if="fabricTransport" style="font-size:13px;color:#666;margin-bottom:8px">
@@ -131,10 +137,7 @@ onMounted(async () => {
 
         <NDataTable
           v-if="libSummaries.length > 0"
-          :columns="libColumns"
-          :data="libSummaries"
-          :bordered="false"
-          size="small"
+          :columns="libColumns" :data="libSummaries" :bordered="false" size="small"
         />
         <NEmpty v-else description="暂无磁带库">
           <NButton size="small" style="margin-top:8px" @click="router.push('/libraries')">去建库</NButton>
@@ -145,19 +148,29 @@ onMounted(async () => {
       <NCard title="性能监控" size="small" style="margin-bottom: 16px">
         <NGrid :cols="3" :x-gap="12">
           <NGi>
-            <NCard size="small" style="text-align:center;padding:24px;color:#999">
-              驱动器吞吐量<br><small>暂无数据</small>
+            <NCard size="small" v-if="systemSnapshot" style="text-align:center;padding:16px">
+              <div style="font-size:24px;font-weight:700">{{ systemSnapshot.cpu.pct.toFixed(1) }}%</div>
+              <div style="font-size:12px;color:#999">CPU 使用率 ({{ systemSnapshot.cpu.num_cores }} 核)</div>
+              <NProgress type="line" :percentage="Math.min(systemSnapshot.cpu.pct, 100)" :height="6" style="margin-top:8px" />
             </NCard>
+            <NCard v-else size="small" style="text-align:center;padding:24px;color:#999">驱动器吞吐量<br><small>暂无数据</small></NCard>
           </NGi>
           <NGi>
-            <NCard size="small" style="text-align:center;padding:24px;color:#999">
-              聚合性能<br><small>暂无数据</small>
+            <NCard size="small" v-if="systemSnapshot" style="text-align:center;padding:16px">
+              <div style="font-size:24px;font-weight:700">{{ (systemSnapshot.mem.pct).toFixed(1) }}%</div>
+              <div style="font-size:12px;color:#999">内存 {{ (systemSnapshot.mem.used_kb / 1024 / 1024).toFixed(1) }} / {{ (systemSnapshot.mem.total_kb / 1024 / 1024).toFixed(1) }} GB</div>
+              <NProgress type="line" :percentage="systemSnapshot.mem.pct" :height="6" style="margin-top:8px" />
             </NCard>
+            <NCard v-else size="small" style="text-align:center;padding:24px;color:#999">聚合性能<br><small>暂无数据</small></NCard>
           </NGi>
           <NGi>
-            <NCard size="small" style="text-align:center;padding:24px;color:#999">
-              系统性能<br><small>CPU/内存/IO — 暂无数据</small>
+            <NCard size="small" v-if="systemSnapshot && systemSnapshot.disks.length > 0" style="text-align:center;padding:16px">
+              <div style="font-size:13px;font-weight:600;margin-bottom:4px">磁盘 IO</div>
+              <div v-for="d in systemSnapshot.disks.slice(0, 3)" :key="d.name" style="font-size:11px;color:#666">
+                {{ d.name }}: 读 {{ fmtBytes(d.read_bytes) }} / 写 {{ fmtBytes(d.write_bytes) }}
+              </div>
             </NCard>
+            <NCard v-else size="small" style="text-align:center;padding:24px;color:#999">系统性能<br><small>暂无数据</small></NCard>
           </NGi>
         </NGrid>
       </NCard>
@@ -166,18 +179,28 @@ onMounted(async () => {
       <NCard title="资源利用率" size="small" style="margin-bottom: 16px">
         <NGrid :cols="3" :x-gap="12">
           <NGi>
-            <NCard size="small" style="text-align:center;padding:24px;color:#999">
-              驱动器使用率<br><small>暂无数据</small>
+            <NCard size="small" style="text-align:center;padding:16px">
+              <div style="font-size:13px;font-weight:600">驱动器使用率</div>
+              <div v-if="totalDrives > 0" style="font-size:12px;color:#666">
+                {{ statuses.reduce((s, l) => s + l.loaded_in_drives, 0) }} / {{ totalDrives }} 已装载
+                <NProgress type="line" :percentage="totalDrives > 0 ? Math.round(statuses.reduce((s,l) => s + l.loaded_in_drives, 0) / totalDrives * 100) : 0" :height="6" style="margin-top:4px" />
+              </div>
+              <div v-else style="color:#999;font-size:12px">暂无数据</div>
             </NCard>
+          </NGi>
+          <NGi>
+            <NCard size="small" v-if="latestCapacity.length > 0" style="text-align:center;padding:16px">
+              <div style="font-size:13px;font-weight:600">存储容量趋势</div>
+              <div v-for="cp in latestCapacity" :key="cp.library" style="font-size:11px;color:#666;margin-top:4px">
+                {{ cp.library }}: {{ fmtBytes(cp.used_bytes) }} / {{ fmtBytes(cp.total_bytes) }}
+                <NProgress type="line" :percentage="cp.total_bytes > 0 ? Math.round(cp.used_bytes / cp.total_bytes * 100) : 0" :height="4" style="margin-top:2px" />
+              </div>
+            </NCard>
+            <NCard v-else size="small" style="text-align:center;padding:24px;color:#999">存储容量趋势<br><small>暂无数据 — 容量快照由定时巡检测试写入</small></NCard>
           </NGi>
           <NGi>
             <NCard size="small" style="text-align:center;padding:24px;color:#999">
               系统资源<br><small>CPU/内存/文件系统 — 暂无数据</small>
-            </NCard>
-          </NGi>
-          <NGi>
-            <NCard size="small" style="text-align:center;padding:24px;color:#999">
-              存储容量趋势<br><small>暂无数据</small>
             </NCard>
           </NGi>
         </NGrid>
@@ -185,30 +208,31 @@ onMounted(async () => {
 
       <!-- 状态与事件 -->
       <NCard title="状态与事件" size="small">
-        <template v-if="patrol">
-          <div style="margin-bottom: 12px; font-size: 14px; font-weight: 600">巡检测试</div>
-          <NSpace>
-            <template v-for="(item, idx) in patrol.ok" :key="'ok-'+idx">
-              <NTag type="success" size="small">{{ item }}</NTag>
+        <NGrid :cols="2" :x-gap="12">
+          <NGi>
+            <div style="font-size:14px;font-weight:600;margin-bottom:8px">巡检测试</div>
+            <template v-if="patrol">
+              <NSpace>
+                <template v-for="(item, idx) in patrol.ok" :key="'ok-'+idx"><NTag type="success" size="small">{{ item }}</NTag></template>
+                <template v-for="(item, idx) in patrol.warn" :key="'warn-'+idx"><NTag type="warning" size="small">{{ item }}</NTag></template>
+                <template v-for="(item, idx) in patrol.crit" :key="'crit-'+idx"><NTag type="error" size="small">{{ item }}</NTag></template>
+              </NSpace>
+              <div v-if="!patrol.ok.length && !patrol.warn.length && !patrol.crit.length" style="color:#999;font-size:13px;margin-top:4px">无异常项</div>
             </template>
-            <template v-for="(item, idx) in patrol.warn" :key="'warn-'+idx">
-              <NTag type="warning" size="small">{{ item }}</NTag>
+            <div v-else style="color:#999;font-size:13px">巡检测试 — 暂无数据</div>
+          </NGi>
+          <NGi>
+            <div style="font-size:14px;font-weight:600;margin-bottom:8px">操作日志</div>
+            <template v-if="events.length > 0">
+              <div v-for="ev in events.slice(0, 8)" :key="ev.id" style="font-size:11px;color:#666;padding:2px 0;border-bottom:1px solid #f5f5f5">
+                <span style="color:#999">{{ ev.ts }}</span>
+                <NTag size="tiny" style="margin:0 4px">{{ ev.category }}</NTag>
+                {{ ev.action }} — {{ ev.detail }}
+              </div>
             </template>
-            <template v-for="(item, idx) in patrol.crit" :key="'crit-'+idx">
-              <NTag type="error" size="small">{{ item }}</NTag>
-            </template>
-          </NSpace>
-          <div
-            v-if="!patrol.ok.length && !patrol.warn.length && !patrol.crit.length"
-            style="color:#999;font-size:13px;margin-top:4px"
-          >
-            无异常项
-          </div>
-        </template>
-        <div v-else style="color:#999;font-size:13px">巡检测试 — 暂无数据</div>
-        <div style="margin-top: 16px; font-size: 14px; font-weight: 600; color: #999">
-          操作日志<br><small>暂无数据 — 需后端暴露监控端点后对接</small>
-        </div>
+            <div v-else style="color:#999;font-size:13px">操作日志 — 暂无数据</div>
+          </NGi>
+        </NGrid>
       </NCard>
     </NSpin>
   </div>

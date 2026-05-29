@@ -80,3 +80,21 @@ export function scanTransportSg(library: string) {
     `/api/manage/transport/scan-sg?library=${encodeURIComponent(library)}`,
   );
 }
+
+// ── Monitor ──
+
+export function fetchSystemSnapshot() {
+  return api.get<SystemSnapshot>('/api/monitor/system');
+}
+
+export function fetchCapacityTrend(library?: string, limit = 50) {
+  const qs = library ? `?library=${encodeURIComponent(library)}&limit=${limit}` : `?limit=${limit}`;
+  return api.get<CapacityTrendResponse>(`/api/monitor/capacity-trend${qs}`);
+}
+
+export function fetchEvents(limit = 50, category?: string) {
+  const params = new URLSearchParams();
+  params.set('limit', String(limit));
+  if (category) params.set('category', category);
+  return api.get<EventsResponse>(`/api/monitor/events?${params.toString()}`);
+}

@@ -15,6 +15,7 @@ use crate::iscsi_export::{
 };
 use crate::reconcile::{auto_sync_db_from_kernel_enabled, sync_db_from_kernel_all_libraries};
 use crate::robot_sync::robot_sync_enabled;
+use crate::monitor;
 use crate::{
     build_vtl_instances_kernel_spec, get_config, init_db, lio_hold, primary_vtl_conf_path,
     primary_vtl_statedir, scsi_tape_holders, VtlError,
@@ -107,6 +108,14 @@ fn run_patrol_inner() -> Result<i32, VtlError> {
     check_iscsi_db_lio_alignment(&mut pr);
     check_robot_inventory_automation(&mut pr);
     check_web_optional(&mut pr);
+
+    // Monitor housekeeping: snapshot capacity for trend analysis
+    if let Err(e) = monitor::snapshot_capacity() {
+        pr.warn(format!("capacity snapshot failed: {}", e));
+    }
+    if let Err(e) = monitor::purge_old_events() {
+        pr.warn(format!("event purge failed: {}", e));
+    }
 
     println!(
         "=== patrol summary: crit={} warn={} strict={} ===",
