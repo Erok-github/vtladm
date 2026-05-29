@@ -1,5 +1,14 @@
 import { api } from './client';
-import type { EmptySlotsResponse, PatrolResponse, FabricResponse } from './types';
+import type {
+  EmptySlotsResponse,
+  PatrolResponse,
+  FabricResponse,
+  IscsiConfigResponse,
+  IscsiExecResult,
+  IscsiExportDefaultsResponse,
+  IscsiAllowExecResponse,
+  TransportScanResponse,
+} from './types';
 
 export function fetchEmptySlots(library: string) {
   return api.get<EmptySlotsResponse>(`/api/empty-slots?library=${encodeURIComponent(library)}`);
@@ -16,5 +25,58 @@ export function fetchFabric() {
 export function fetchStatus(library: string) {
   return api.get<{ library: string; tape_count: number; loaded_in_drives: number; drives: number; data_slots: number }>(
     `/api/status?library=${encodeURIComponent(library)}`,
+  );
+}
+
+// ── iSCSI ──
+
+export function fetchIscsiConfig() {
+  return api.get<IscsiConfigResponse>('/api/manage/iscsi/config');
+}
+
+export function checkIscsi(sudo = false) {
+  return api.post<IscsiExecResult>('/api/manage/iscsi/check', { sudo });
+}
+
+export function setIscsiAllowExec(allow: boolean) {
+  return api.post<IscsiAllowExecResponse>('/api/manage/iscsi/allow-exec', { allow });
+}
+
+export function fetchIscsiExportDefaults(library: string, regenerate = false) {
+  const qs = `library=${encodeURIComponent(library)}${regenerate ? '&regenerate=1' : ''}`;
+  return api.get<IscsiExportDefaultsResponse>(`/api/manage/iscsi/library-export-defaults?${qs}`);
+}
+
+export function libraryIscsiExport(params: {
+  library: string;
+  iqn?: string;
+  export_id?: string;
+  changer_sg: string;
+  drive_sg: string[];
+  lun_map?: number[];
+  portal_ip: string;
+  portal_port: number;
+  dry_run?: boolean;
+  sudo?: boolean;
+}) {
+  return api.post<IscsiExecResult>('/api/manage/iscsi/library-export', params);
+}
+
+export function libraryIscsiUnexport(params: {
+  library: string;
+  iqn?: string;
+  export_id?: string;
+  lun_map?: number[];
+  dry_run?: boolean;
+  sudo?: boolean;
+}) {
+  return api.post<IscsiExecResult>('/api/manage/iscsi/library-unexport', params);
+}
+
+// ── SCSI Scan ──
+
+export function scanTransportSg(library: string) {
+  return api.get<TransportScanResponse>(
+    `/api/manage/transport/scan-sg?library=${encodeURIComponent(library)}`,
   );
 }

@@ -886,7 +886,7 @@ fn path_allowed_during_setup(method: &Method, path: &str) -> bool {
     )
 }
 
-/// 无需会话即可访问的路由（登录页、验证码、登录接口）。
+/// 无需会话即可访问的路由（登录页、验证码、登录接口、会话检查）。
 fn is_public_route(method: &Method, path: &str) -> bool {
     matches!(
         (method, path),
@@ -894,6 +894,7 @@ fn is_public_route(method: &Method, path: &str) -> bool {
             | (&Method::GET, "/api/captcha")
             | (&Method::POST, "/api/login")
             | (&Method::GET, "/api/setup/status")
+            | (&Method::GET, "/api/session/ping")
     )
 }
 
@@ -1257,6 +1258,16 @@ async fn api_setup_status() -> impl IntoResponse {
         })),
     )
         .into_response()
+}
+
+async fn api_session_ping(
+    State(st): State<Arc<super::web_auth::WebState>>,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    match require_session(&st, &jar) {
+        Ok(()) => (StatusCode::OK, Json(json!({ "authenticated": true }))).into_response(),
+        Err(_) => (StatusCode::UNAUTHORIZED, Json(json!({ "authenticated": false }))).into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -3958,6 +3969,7 @@ pub(crate) fn build_api_router(auth: Arc<super::web_auth::WebState>) -> Router<(
     Router::new()
         .route("/api/setup/status", get(api_setup_status))
         .route("/api/setup/complete", post(api_setup_complete))
+        .route("/api/session/ping", get(api_session_ping))
         .route("/api/libraries", get(api_libraries))
         .route("/api/libraries-status", get(api_libraries_status))
         .route("/api/library/detail", get(api_library_detail))
@@ -4027,6 +4039,7 @@ pub(crate) fn build_web_router(auth: Arc<super::web_auth::WebState>) -> Router<(
         .route("/admin/setup-init", get(page_admin_setup_init))
         .route("/api/setup/status", get(api_setup_status))
         .route("/api/setup/complete", post(api_setup_complete))
+        .route("/api/session/ping", get(api_session_ping))
         .route("/admin", get(redirect_admin_to_overview))
         .route("/admin/overview", get(page_admin_overview))
         .route("/admin/account", get(page_admin_account))

@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted, h } from 'vue';
+import { useRouter } from 'vue-router';
 import { NCard, NButton, NInput, NDataTable, NSpace, useMessage } from 'naive-ui';
 import type { DataTableColumns } from 'naive-ui';
 import { useAuthStore } from '@/stores/auth';
 import type { SessionInfo } from '@/api/types';
 
+const router = useRouter();
 const message = useMessage();
 const auth = useAuthStore();
 
@@ -27,10 +29,14 @@ async function handleChangePassword() {
   }
   try {
     await auth.changePassword(oldPassword.value, newPassword.value);
-    message.success('密码修改成功');
+    message.success('密码修改成功，即将跳转登录页');
     oldPassword.value = '';
     newPassword.value = '';
     confirmPassword.value = '';
+    setTimeout(() => {
+      auth.logout();
+      router.push('/login');
+    }, 1500);
   } catch (e: unknown) {
     message.error(e instanceof Error ? e.message : '修改失败');
   }

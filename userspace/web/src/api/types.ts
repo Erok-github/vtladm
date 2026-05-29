@@ -187,3 +187,70 @@ export interface SetupStatusResponse {
     vtl_reload_scan_delay_ms: number;
   };
 }
+
+// ── iSCSI / Transport ──
+
+export interface IscsiConfigResponse {
+  tape_dir: string;
+  transport: string;
+  iscsi_iqn: string | null;
+  iscsi_portals: string | null;
+  portal_ip_suggested: string;
+  portal_port_suggested: number;
+  vtladm_iscsi_path: string;
+  allow_iscsi_exec: boolean;
+  non_unix_build: boolean;
+  kernel_reload_on_db_change: boolean;
+  kernel_geom_prefer_ioctl: boolean;
+}
+
+export interface IscsiExecResult {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  dry_run?: boolean;
+  iqn?: string;
+  export_id?: string;
+  saved_to_db?: boolean;
+  save_blocked_reason?: string;
+  hint?: string;
+}
+
+export interface IscsiExportDefaultsResponse {
+  library: string;
+  iqn: string;
+  export_id: string;
+  backend_ch: string;
+  backend_drives: string[];
+  portal_ip: string;
+  portal_port: number;
+  drive_count: number;
+  default_lun_map: number[];
+  changer_sg: string | null;
+  drive_sg: string[] | null;
+  has_saved_export: boolean;
+  exported_at: string | null;
+  saved_drive_mismatch: boolean;
+  can_export: boolean;
+  export_blocked_reason: unknown;
+  product_limits: unknown;
+}
+
+export interface IscsiAllowExecResponse {
+  ok: boolean;
+  allow_iscsi_exec: boolean;
+}
+
+export interface TransportScanResponse {
+  library: string;
+  transport?: string;
+  note?: string;
+  changer_sg: string | null;
+  drive_sg: string[];
+  drive_count?: number;
+  picked_scsi_host?: number;
+  devices?: { role: string; lun: number; sg: string; sch?: string; st?: string; index?: number }[];
+  raw_tail?: string;
+  product_limits?: unknown;
+  error?: string;
+}

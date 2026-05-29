@@ -1,1 +1,0 @@
-import{a as t}from"./index-CtxQmfRh.js";function e(a){return t.get(`/api/empty-slots?library=${encodeURIComponent(a)}`)}function o(){return t.get("/api/patrol")}function n(){return t.get("/api/fabric")}export{n as a,o as b,e as f};

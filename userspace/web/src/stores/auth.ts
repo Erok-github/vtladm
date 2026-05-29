@@ -23,7 +23,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function checkSession() {
     try {
-      const resp = await fetch('/api/setup/status', { credentials: 'include' });
+      const resp = await fetch('/api/session/ping', { credentials: 'include' });
       if (resp.status === 200) {
         sessionValid.value = true;
         return true;

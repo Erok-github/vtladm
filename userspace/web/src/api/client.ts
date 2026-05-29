@@ -36,9 +36,11 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   // Session expired → redirect to login
   if (resp.status === 401 || resp.status === 403) {
     const data = await resp.json().catch(() => ({}));
-    // Only redirect if it's an auth issue, not a CSRF/permission issue
     if (resp.status === 401) {
-      window.location.href = '/login';
+      // 防止在登录页无限重定向
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login';
+      }
       throw new ApiError(resp.status, 'Unauthorized');
     }
     throw new ApiError(resp.status, data.error || data.message || 'Forbidden');

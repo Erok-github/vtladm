@@ -39,36 +39,6 @@ const router = createRouter({
           meta: { title: '库详情' },
         },
         {
-          path: 'tapes',
-          name: 'tapes',
-          component: () => import('@/views/tapes/TapeListView.vue'),
-          meta: { title: '磁带管理' },
-        },
-        {
-          path: 'changer',
-          name: 'changer',
-          component: () => import('@/views/changer/ChangerReconcileView.vue'),
-          meta: { title: '对账面板' },
-        },
-        {
-          path: 'shelves',
-          name: 'shelves',
-          component: () => import('@/views/shelves/ShelfManageView.vue'),
-          meta: { title: '货架管理' },
-        },
-        {
-          path: 'assign-slot',
-          name: 'assign-slot',
-          component: () => import('@/views/assign/AssignSlotView.vue'),
-          meta: { title: '磁带入槽' },
-        },
-        {
-          path: 'transport',
-          name: 'transport',
-          component: () => import('@/views/transport/TransportView.vue'),
-          meta: { title: '传输向导' },
-        },
-        {
           path: 'account',
           name: 'account',
           component: () => import('@/views/account/AccountView.vue'),
@@ -86,7 +56,6 @@ router.beforeEach(async (to, _from, next) => {
   }
 
   const auth = useAuthStore();
-  // Check session if not already validated
   if (!auth.sessionValid) {
     const ok = await auth.checkSession();
     if (!ok) {
