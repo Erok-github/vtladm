@@ -1065,9 +1065,14 @@ fn session_cookie(token: &str, max_age: u64) -> String {
     } else {
         ""
     };
+    let age = if max_age > 0 {
+        String::new()
+    } else {
+        format!("; Max-Age={}", max_age)
+    };
     format!(
-        "vtl_session={}; Path=/; HttpOnly; SameSite=Lax{}; Max-Age={}",
-        token, secure, max_age
+        "vtl_session={}; Path=/; HttpOnly; SameSite=Lax{}{}",
+        token, secure, age
     )
 }
 
@@ -1077,9 +1082,14 @@ fn csrf_cookie(token: &str, max_age: u64) -> String {
     } else {
         ""
     };
+    let age = if max_age > 0 {
+        String::new()
+    } else {
+        format!("; Max-Age={}", max_age)
+    };
     format!(
-        "vtl_csrf={}; Path=/; SameSite=Lax{}; Max-Age={}",
-        token, secure, max_age
+        "vtl_csrf={}; Path=/; SameSite=Lax{}{}",
+        token, secure, age
     )
 }
 

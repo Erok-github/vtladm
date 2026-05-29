@@ -668,7 +668,7 @@ fn changer_inventory_from_db(
     for row in rows {
         let (id, name, bc) = row?;
         data_slots.push(ChangerRow {
-            label: format!("slot{}", id + 1),
+            label: format!("slot{}", id),
             tape_name: name,
             barcode: bc,
         });
@@ -716,7 +716,7 @@ fn changer_inventory_from_db(
     for row in mrows {
         let (id, name, bc) = row?;
         mailslots.push(ChangerRow {
-            label: format!("mail{}", id - MAILSLOT_OFFSET + 1),
+            label: format!("mail{}", id - MAILSLOT_OFFSET),
             tape_name: name,
             barcode: bc,
         });
@@ -761,10 +761,9 @@ fn changer_inventory_from_kernel(
     let slot_ids = sstmt.query_map(params![library_id], |r| r.get::<_, i32>(0))?;
     for sid in slot_ids {
         let id = sid?;
-        // Kernel reports data slot elements as 1-based; DB slot_id is 0-based.
         let tape = by_slot.get(&(id + 1)).cloned();
         data_slots.push(ChangerRow {
-            label: format!("slot{}", id + 1),
+            label: format!("slot{}", id),
             tape_name: tape.clone(),
             barcode: tape.as_ref().and_then(|t| row_barcode(&barcodes, t)),
         });
@@ -793,7 +792,7 @@ fn changer_inventory_from_kernel(
         let id = mid?;
         let tape = by_mail.get(&id).cloned();
         mailslots.push(ChangerRow {
-            label: format!("mail{}", id - MAILSLOT_OFFSET + 1),
+            label: format!("mail{}", id - MAILSLOT_OFFSET),
             tape_name: tape.clone(),
             barcode: tape.as_ref().and_then(|t| row_barcode(&barcodes, t)),
         });

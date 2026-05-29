@@ -13,8 +13,11 @@ use uuid::Uuid;
 pub const DEFAULT_WEB_USER: &str = "admin";
 #[allow(dead_code)]
 pub const DEFAULT_WEB_PASSWORD: &str = "admin";
-/// Cookie `Max-Age` 与会话有效期（秒）
+/// Cookie `Max-Age` 与会话有效期（秒）。设为会话 cookie（浏览器关闭即失效），
+/// 此常量仅用于服务端空闲超时判断。
 pub const SESSION_SECS: u64 = 86400;
+/// 空闲超时（秒）：超过此时间无活动则会话失效
+const SESSION_IDLE_SECS: u64 = 1800;
 
 const CAPTCHA_SECS: u64 = 300;
 const LOGIN_WINDOW_SECS: u64 = 60;
@@ -26,6 +29,7 @@ const MAX_SESSIONS: usize = 128;
 struct SessionData {
     username: String,
     created_at: Instant,
+    last_activity: Instant,
     csrf_token: String,
     password_change_required: bool,
 }
@@ -218,6 +222,7 @@ impl WebState {
             SessionData {
                 username: user.to_string(),
                 created_at: Instant::now(),
+                last_activity: Instant::now(),
                 csrf_token: csrf.clone(),
                 password_change_required: must_change,
             },
@@ -268,11 +273,18 @@ impl WebState {
     pub fn session_username(&self, token: Option<&str>) -> Option<String> {
         let t = token?;
         let mut sess = self.sessions.lock().unwrap();
-        if let Some(sd) = sess.get(t) {
-            if sd.created_at.elapsed() > Duration::from_secs(SESSION_SECS) {
+        if let Some(sd) = sess.get_mut(t) {
+            let elapsed = sd.created_at.elapsed();
+            if elapsed > Duration::from_secs(SESSION_SECS) {
                 sess.remove(t);
                 return None;
             }
+            let idle = sd.last_activity.elapsed();
+            if idle > Duration::from_secs(SESSION_IDLE_SECS) {
+                sess.remove(t);
+                return None;
+            }
+            sd.last_activity = Instant::now();
             return Some(sd.username.clone());
         }
         None
@@ -367,6 +379,7 @@ impl WebState {
             SessionData {
                 username: user.to_string(),
                 created_at: Instant::now() - Duration::from_secs(age_secs),
+                last_activity: Instant::now(),
                 csrf_token: format!("csrf_{}", token),
                 password_change_required: false,
             },
