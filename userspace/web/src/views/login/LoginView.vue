@@ -77,6 +77,9 @@ async function handleLogin() {
         </NFormItem>
 
         <div v-if="auth.loginError" class="login-error">{{ auth.loginError }}</div>
+        <div v-if="!auth.captchaQuestion && !submitting" style="margin-bottom:12px">
+          <NButton size="small" type="warning" block @click="auth.getCaptcha()">重新获取验证码</NButton>
+        </div>
 
         <NButton
           type="primary"

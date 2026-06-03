@@ -70,7 +70,9 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       await apiLogout();
     } catch {
-      // ignore
+      // Server-side logout failed — session may still be valid.
+      // Still redirect to /login; if the session is still alive, the user
+      // will be redirected back to the app by checkSession() on the login page.
     }
     sessionValid.value = false;
     username.value = '';

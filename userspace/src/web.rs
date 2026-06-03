@@ -265,7 +265,7 @@ async fn api_tapes(Query(q): Query<TapesQuery>) -> impl IntoResponse {
                 if !snap.truncated {
                     for tape in &mut v {
                         if tape.slot.is_none() && !tape.in_drive {
-                            if let Some(loc) = snap.locations.get(&tape.barcode) {
+                            if let Some(loc) = snap.locations.get(&tape.name) {
                                 match loc {
                                     super::robot_sync::MediumLocation::DataSlot(s) => {
                                         tape.slot = Some(s - 1);
@@ -732,8 +732,10 @@ async fn api_library_detail(Query(q): Query<LibraryQuery>) -> impl IntoResponse 
             changer
                 .data_slots
                 .iter()
-                .enumerate()
-                .filter_map(|(idx, row)| row.barcode.as_ref().map(|bc| (bc.clone(), idx as i32)))
+                .filter_map(|row| {
+                    let slot_id = row.label.strip_prefix("slot")?.parse::<i32>().ok()?;
+                    row.barcode.as_ref().map(|bc| (bc.clone(), slot_id))
+                })
                 .collect()
         } else {
             HashMap::new()
@@ -1345,12 +1347,12 @@ async fn api_session_ping(
         Some(t) => t,
         None => return (StatusCode::UNAUTHORIZED, Json(json!({ "authenticated": false }))).into_response(),
     };
-    match st.session_username(Some(&tok)) {
-        Some(_) => {
-            let must_change = st.session_must_change_password(&tok);
-            (StatusCode::OK, Json(json!({ "authenticated": true, "must_change_password": must_change }))).into_response()
-        }
-        None => (StatusCode::UNAUTHORIZED, Json(json!({ "authenticated": false }))).into_response(),
+    // Use session_is_valid (no activity refresh) to avoid defeating idle timeout via polling.
+    if st.session_is_valid(Some(&tok)) {
+        let must_change = st.session_must_change_password(&tok);
+        (StatusCode::OK, Json(json!({ "authenticated": true, "must_change_password": must_change }))).into_response()
+    } else {
+        (StatusCode::UNAUTHORIZED, Json(json!({ "authenticated": false }))).into_response()
     }
 }
 
@@ -4182,7 +4184,6 @@ pub(crate) fn build_api_router(auth: Arc<super::web_auth::WebState>) -> Router<(
 /// Full router with legacy HTML pages + API routes.
 /// Used by tests and when SPA dist is unavailable at runtime.
 pub(crate) fn build_web_router(auth: Arc<super::web_auth::WebState>) -> Router<()> {
-    let auth_layer = auth.clone();
     Router::new()
         .route("/", get(page_home))
         .route("/browse/tapes", get(page_browse_tapes))
@@ -4190,9 +4191,6 @@ pub(crate) fn build_web_router(auth: Arc<super::web_auth::WebState>) -> Router<(
         .route("/browse/fabric", get(page_browse_fabric))
         .route("/login", get(page_login))
         .route("/admin/setup-init", get(page_admin_setup_init))
-        .route("/api/setup/status", get(api_setup_status))
-        .route("/api/setup/complete", post(api_setup_complete))
-        .route("/api/session/ping", get(api_session_ping))
         .route("/admin", get(redirect_admin_to_overview))
         .route("/admin/overview", get(page_admin_overview))
         .route("/admin/account", get(page_admin_account))
@@ -4206,62 +4204,7 @@ pub(crate) fn build_web_router(auth: Arc<super::web_auth::WebState>) -> Router<(
         .route("/admin/shelf-place", get(page_admin_shelf_place))
         .route("/admin/iscsi", get(page_admin_iscsi))
         .route("/admin/transport", get(page_admin_transport))
-        .route("/api/libraries", get(api_libraries))
-        .route("/api/libraries-status", get(api_libraries_status))
-        .route("/api/library/detail", get(api_library_detail))
-        .route("/api/shelves", get(api_shelves))
-        .route("/api/offline-shelves", get(api_offline_shelves))
-        .route("/api/empty-slots", get(api_empty_slots))
-        .route("/api/tapes", get(api_tapes))
-        .route("/api/status", get(api_status))
-        .route("/api/fabric", get(api_fabric))
-        .route("/api/patrol", get(api_patrol_run))
-        .route("/api/captcha", get(api_captcha))
-        .route("/api/login", post(api_login))
-        .route("/api/logout", post(api_logout))
-        .route("/api/change-password", post(api_change_password))
-        .route("/api/sessions", get(api_sessions))
-        .route("/api/sessions/revoke", post(api_sessions_revoke))
-        .route("/api/manage/tape/density-limits", get(api_manage_tape_density_limits))
-        .route("/api/manage/tape/create", post(api_manage_tape_create))
-        .route("/api/manage/library/create", post(api_manage_library_create))
-        .route("/api/manage/library/delete", post(api_manage_library_delete))
-        .route("/api/manage/shelf/create", post(api_manage_shelf_create))
-        .route("/api/manage/shelf/delete", post(api_manage_shelf_delete))
-        .route("/api/manage/tape/assign-slot", post(api_manage_assign))
-        .route("/api/manage/tape/load", post(api_manage_changer_load))
-        .route("/api/manage/tape/unload", post(api_manage_changer_unload))
-        .route("/api/manage/tape/eject", post(api_manage_changer_eject))
-        .route("/api/manage/robot/sync", post(api_manage_robot_sync))
-        .route("/api/manage/robot/auto-align", post(api_manage_robot_auto_align))
-        .route("/api/manage/robot/reconcile", post(api_manage_robot_reconcile))
-        .route("/api/manage/tape/shelf-place", post(api_manage_shelf_place))
-        .route("/api/manage/tape/shelf-place-batch", post(api_manage_shelf_place_batch))
-        .route("/api/manage/shelf/create-offline", post(api_manage_shelf_create_offline))
-        .route("/api/manage/tape/assign-slot-batch", post(api_manage_assign_batch))
-        .route("/api/manage/tape/create-batch", post(api_manage_tape_create_batch))
-        .route("/api/manage/tape/create-auto-batch", post(api_manage_tape_create_auto_batch))
-        .route("/api/manage/tape/delete", post(api_manage_tape_delete))
-        .route("/api/manage/tape/init", post(api_manage_tape_init))
-        .route("/api/manage/tape/migrate-shelves-batch", post(api_manage_tape_migrate_shelves_batch))
-        .route("/api/manage/iscsi/quick-export", post(api_manage_iscsi_quick_export))
-        .route("/api/manage/iscsi/quick-unexport", post(api_manage_iscsi_quick_unexport))
-        .route("/api/manage/iscsi/library-export-defaults", get(api_manage_iscsi_library_export_defaults))
-        .route("/api/manage/transport/scan-sg", get(api_manage_transport_scan_sg))
-        .route("/api/manage/iscsi/scan-sg", get(api_manage_iscsi_scan_sg))
-        .route("/api/manage/iscsi/library-export", post(api_manage_iscsi_library_export))
-        .route("/api/manage/iscsi/library-unexport", post(api_manage_iscsi_library_unexport))
-        .route("/api/manage/iscsi/config", get(api_manage_iscsi_config))
-        .route("/api/manage/iscsi/check", post(api_manage_iscsi_check))
-        .route("/api/manage/iscsi/allow-exec", post(api_manage_iscsi_allow_exec))
-        .route("/api/monitor/system", get(api_monitor_system))
-        .route("/api/monitor/capacity-trend", get(api_monitor_capacity_trend))
-        .route("/api/monitor/events", get(api_monitor_events))
-        .with_state(auth)
-        .layer(middleware::from_fn_with_state(
-            auth_layer,
-            require_authenticated,
-        ))
+        .merge(build_api_router(auth))
 }
 
 pub(crate) fn run_web_ui(host: &str, port: u16) -> Result<(), super::VtlError> {
@@ -4356,10 +4299,11 @@ pub(crate) fn run_web_ui(host: &str, port: u16) -> Result<(), super::VtlError> {
                 spa_dir.display()
             );
             let api_router = build_api_router(auth_clone);
+            let spa_index = spa_dir.join("index.html");
             Router::new()
                 .nest_service("/assets", ServeDir::new(spa_dir.join("assets")))
                 .merge(api_router)
-                .fallback_service(ServeFile::new(spa_dir.join("index.html")))
+                .fallback_service(ServeFile::new(spa_index))
         } else {
             // Fallback: legacy HTML pages
             build_web_router(auth_clone)

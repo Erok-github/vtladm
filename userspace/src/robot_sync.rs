@@ -627,7 +627,9 @@ fn tape_barcode_map(
     library_id: i64,
 ) -> Result<HashMap<String, String>, VtlError> {
     let mut out = HashMap::new();
-    let mut stmt = conn.prepare("SELECT name, barcode FROM tapes WHERE library_id = ?1")?;
+    let mut stmt = conn.prepare(
+        "SELECT name, barcode FROM tapes WHERE library_id = ?1 AND barcode IS NOT NULL AND barcode != ''",
+    )?;
     let rows = stmt.query_map(params![library_id], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
     })?;

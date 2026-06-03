@@ -290,6 +290,29 @@ impl WebState {
         None
     }
 
+    /// Check if a session token is valid without updating last_activity (for ping endpoints).
+    pub fn session_is_valid(&self, token: Option<&str>) -> bool {
+        let t = match token {
+            Some(t) => t,
+            None => return false,
+        };
+        let mut sess = self.sessions.lock().unwrap();
+        if let Some(sd) = sess.get(t) {
+            let elapsed = sd.created_at.elapsed();
+            if elapsed > Duration::from_secs(SESSION_SECS) {
+                sess.remove(t);
+                return false;
+            }
+            let idle = sd.last_activity.elapsed();
+            if idle > Duration::from_secs(SESSION_IDLE_SECS) {
+                sess.remove(t);
+                return false;
+            }
+            return true;
+        }
+        false
+    }
+
     /// 查询会话的 CSRF token。
     pub fn csrf_token_for_session(&self, token: &str) -> Option<String> {
         self.sessions

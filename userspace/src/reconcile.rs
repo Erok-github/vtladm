@@ -104,7 +104,7 @@ fn apply_kernel_to_db(
         match loc {
             MediumLocation::DataSlot(slot) => {
                 // Kernel reports data slots as 1-based (i+1); convert to DB 0-based slot_id.
-                let db_slot = slot - 1;
+                let Some(db_slot) = slot.checked_sub(1) else { continue };
                 tx.execute(
                     "UPDATE slots SET tape_id = ?1 WHERE library_id = ?2 AND slot_id = ?3",
                     params![tape_id, library_id, db_slot],
@@ -548,7 +548,7 @@ pub(crate) fn mirror_kernel_catalog_hints_only(
         match loc {
             MediumLocation::DataSlot(slot) => {
                 // Kernel reports data slots as 1-based; DB tapes.slot is 0-based.
-                let db_slot = slot - 1;
+                let Some(db_slot) = slot.checked_sub(1) else { continue };
                 if let Ok(tape_id) = tape_id_by_name(&tx, library_id, tape_name) {
                     tx.execute(
                         "UPDATE tapes SET slot = ?1, shelf_id = NULL WHERE id = ?2",
