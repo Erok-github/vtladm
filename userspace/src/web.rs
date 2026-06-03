@@ -800,22 +800,23 @@ async fn api_library_detail(Query(q): Query<LibraryQuery>) -> impl IntoResponse 
             )
             .unwrap_or_else(|_| "10".to_string());
 
-        let mut dstmt = conn
-            .prepare(
-                "SELECT d.drive_id, t.name, t.barcode FROM drives d LEFT JOIN tapes t ON t.id = d.tape_id WHERE d.library_id = ?1 ORDER BY d.drive_id",
-            )
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let drives: Vec<serde_json::Value> = dstmt
-            .query_map(rusqlite::params![library_id], |r| {
-                Ok(json!({
-                    "drive_id": r.get::<_, i64>(0)?,
-                    "tape_name": r.get::<_, Option<String>>(1)?,
-                    "tape_barcode": r.get::<_, Option<String>>(2)?,
-                }))
+        // Build drives from kernel changer inventory (includes SCSI-loaded tapes).
+        let drives: Vec<serde_json::Value> = changer
+            .drives
+            .iter()
+            .map(|d| {
+                let drive_id: i64 = d
+                    .label
+                    .strip_prefix("drive")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                json!({
+                    "drive_id": drive_id,
+                    "tape_name": d.tape_name,
+                    "tape_barcode": d.barcode,
+                })
             })
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .collect();
 
         let mut tstmt = conn
             .prepare(
