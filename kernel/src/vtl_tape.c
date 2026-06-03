@@ -285,6 +285,7 @@ struct vtl_tape *vtl_tape_find_by_name(const char *name)
     for (i = 0; i < VTL_MAX_SLOTS; i++) {
         t = vtl_tapes[i];
         if (t && !strcmp(t->name, name)) {
+            kref_get(&t->ref);
             mutex_unlock(&vtl_tape_lock);
             return t;
         }
@@ -436,8 +437,10 @@ int vtl_changer_load_slot_to_drive(struct vtl_changer *ch, int slot, int drive,
         if (barcode && barcode[0])
             vtl_tape_set_barcode(tape, barcode);
         ret = vtl_changer_slot_place(ch, slot, tape);
-        if (ret)
+        if (ret) {
+            vtl_tape_put(tape);
             return ret;
+        }
     }
 
     return vtl_changer_move_medium(ch, slot, vtl_elem_drive_base(ch) + drive);

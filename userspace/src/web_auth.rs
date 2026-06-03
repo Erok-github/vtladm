@@ -102,7 +102,7 @@ impl WebState {
     /// 强制重写 `web_admin.json`（恢复默认用户 `admin` 与新密码哈希）。
     /// 必须提供密码，不接受空字符串或过短密码。
     pub fn force_reset_auth(&self, password: &str) -> Result<(), String> {
-        if password != DEFAULT_WEB_PASSWORD && password.chars().count() < 8 {
+        if password.chars().count() < 8 {
             return Err("密码至少 8 个字符".into());
         }
         self.write_default_auth_with_flags(password, true)

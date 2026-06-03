@@ -100,7 +100,7 @@ check_vtl_scsi_holders() {
       if [ -n "$_log" ]; then
         {
           echo "=== $_d (in use) ==="
-          fuser -v "$_d" 2>/dev/null || true
+          LANG=C fuser -v "$_d" 2>/dev/null || true
         } >>"$_log"
       fi
     fi
@@ -271,7 +271,7 @@ vtl_diagnose_rmmod_failure() {
   if command -v fuser >/dev/null 2>&1; then
     for _d in $(vtl_scsi_dev_paths); do
       [ -e "$_d" ] || continue
-      fuser -v "$_d" 2>/dev/null | sed 's/^/  /' >&2 || true
+      LANG=C fuser -v "$_d" 2>/dev/null | sed 's/^/  /' >&2 || true
     done
   else
     echo "  install psmisc for fuser holder checks" >&2

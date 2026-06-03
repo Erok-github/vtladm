@@ -61,24 +61,29 @@ vtl_vtladm_timers_start() {
 
 vtl_teardown_lio_before_rmmod() {
   if command -v targetcli >/dev/null 2>&1; then
-    echo "targetcli clearconfig (LIO pscsi/iscsi before rmmod)..."
-    if timeout 120 targetcli clearconfig confirm=true; then
-      sleep 3
-      if _vtl_source_helpers && lio_pscsi_references_vtl_sg; then
-        if [ "${VTL_FORCE_RMMOD:-}" = "1" ]; then
-          echo "WARN: LIO still references VTL /dev/sg after clearconfig" >&2
-        else
-          echo "ERROR: LIO still references VTL /dev/sg — aborting rmmod" >&2
-          echo "  Run: targetcli clearconfig confirm=true or Web library-unexport" >&2
-          return 1
-        fi
-      fi
-    else
-      if [ "${VTL_FORCE_RMMOD:-}" != "1" ]; then
-        echo "ERROR: targetcli clearconfig failed" >&2
+    echo "removing VTL-specific LIO backstores (targetcli)..."
+    _teardown_ok=0
+    if timeout 120 targetcli /backstores/pscsi ls 2>/dev/null | \
+        grep -qE 'vtl|VTL|vtladm'; then
+      targetcli /backstores/pscsi ls 2>/dev/null | \
+        awk '/pscsi\// {name=$1} /dev_sg/ && (/vtl/ || /VTL/) {print name}' | \
+        while read -r _p; do
+          [ -n "$_p" ] || continue
+          timeout 30 targetcli "/backstores/pscsi/${_p}" delete 2>/dev/null || true
+        done
+      echo "VTL pscsi backstores removed"
+      sleep 2
+    fi
+    if _vtl_source_helpers && lio_pscsi_references_vtl_sg; then
+      if [ "${VTL_FORCE_RMMOD:-}" = "1" ]; then
+        echo "WARN: LIO still references VTL /dev/sg after targeted removal" >&2
+      else
+        echo "ERROR: LIO still references VTL /dev/sg — use Web library-unexport first" >&2
+        echo "  If no non-VTL targets exist, run: targetcli clearconfig confirm=true" >&2
         return 1
       fi
     fi
+    _teardown_ok=1
   elif _vtl_source_helpers; then
     if lio_pscsi_references_vtl_sg; then
       echo "ERROR: LIO pscsi references VTL /dev/sg (no targetcli on PATH)" >&2

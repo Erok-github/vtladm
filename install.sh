@@ -31,7 +31,7 @@ _vtl_mktemp() {
 }
 
 _vtl_cleanup_tmp() {
-  [ -z "${_VTL_TMP_FILES:-}" ] || rm -f $_VTL_TMP_FILES
+  [ -z "${_VTL_TMP_FILES:-}" ] || rm -f -- $_VTL_TMP_FILES
 }
 trap _vtl_cleanup_tmp EXIT HUP INT TERM
 

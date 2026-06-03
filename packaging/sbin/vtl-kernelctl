@@ -241,7 +241,19 @@ _do_insmod() {
     _args="$_args vtl_instances=${VTL_INSTANCES}"
   fi
   # Split _args and VTL_INSMOD_EXTRA by word for set -- (safe for parameter=value pairs).
-  eval "set -- $_args $VTL_INSMOD_EXTRA"
+  	  # Build positional parameters safely: disable globbing, split _args by word.
+	  _restore_f="$(set +o | grep noglob)"
+	  set -f
+	  set -- $_args
+	  if [ -n "${VTL_INSMOD_EXTRA:-}" ]; then
+	    if printf '%s' "$VTL_INSMOD_EXTRA" | grep -qE '[][;&|`$(){}!#~<>]'; then
+	      echo "ERROR: VTL_INSMOD_EXTRA contains unsafe shell characters" >&2
+	      eval "$_restore_f"
+	      return 1
+	    fi
+	    set -- "$@" $VTL_INSMOD_EXTRA
+	  fi
+	  eval "$_restore_f"
   if [ "${VTL_RESOLVED_PLAN_B:-}" = "1" ]; then
     unset VTL_RESOLVED_PLAN_B
     case " $* " in

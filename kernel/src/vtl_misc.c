@@ -201,6 +201,7 @@ static long vtl_ioctl_slot_place(void __user *uarg)
 	struct vtl_slot_place_req place_req;
 	struct vtl_changer *ch;
 	struct vtl_tape *tape;
+	int ret;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -218,7 +219,10 @@ static long vtl_ioctl_slot_place(void __user *uarg)
 		return -EINVAL;
 	if (place_req.barcode[0])
 		vtl_tape_set_barcode(tape, place_req.barcode);
-	return vtl_changer_slot_place(ch, place_req.slot, tape);
+	ret = vtl_changer_slot_place(ch, place_req.slot, tape);
+	if (ret)
+		vtl_tape_put(tape);
+	return ret;
 }
 
 static long vtl_ioctl_move_medium(void __user *uarg)

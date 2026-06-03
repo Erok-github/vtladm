@@ -48,13 +48,14 @@ pub fn find_drifts(
     out
 }
 
-fn tape_id_by_name(conn: &Connection, library_id: i64, name: &str) -> Result<i64, VtlError> {
+// kernel GET_INVENTORY returns barcodes, not user-friendly names.
+fn tape_id_by_barcode(conn: &Connection, library_id: i64, barcode: &str) -> Result<i64, VtlError> {
     conn.query_row(
-        "SELECT id FROM tapes WHERE library_id = ?1 AND name = ?2",
-        params![library_id, name],
+        "SELECT id FROM tapes WHERE library_id = ?1 AND barcode = ?2",
+        params![library_id, barcode],
         |r| r.get(0),
     )
-    .map_err(|_| VtlError::TapeNotFound(name.to_string()))
+    .map_err(|_| VtlError::TapeNotFound(barcode.to_string()))
 }
 
 /// Write kernel changer inventory into DB (backup software is authoritative).
@@ -85,7 +86,7 @@ fn apply_kernel_to_db(
     )?;
     let mut n = 0usize;
     for (tape_name, loc) in kernel {
-        let tape_id = match tape_id_by_name(&tx, library_id, tape_name) {
+        let tape_id = match tape_id_by_barcode(&tx, library_id, tape_name) {
             Ok(id) => id,
             Err(VtlError::TapeNotFound(_)) => {
                 log_message(&format!(
@@ -547,7 +548,7 @@ pub(crate) fn mirror_kernel_catalog_hints_only(
         if let MediumLocation::DataSlot(slot) = loc {
             // Kernel reports data slots as 1-based; DB tapes.slot is 0-based.
             let db_slot = slot - 1;
-            if let Ok(tape_id) = tape_id_by_name(&tx, library_id, tape_name) {
+            if let Ok(tape_id) = tape_id_by_barcode(&tx, library_id, tape_name) {
                 tx.execute(
                     "UPDATE tapes SET slot = ?1, shelf_id = NULL WHERE id = ?2",
                     params![db_slot, tape_id],

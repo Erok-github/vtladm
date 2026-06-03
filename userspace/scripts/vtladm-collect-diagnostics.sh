@@ -73,21 +73,22 @@ else
   echo "dmesg not available" >"$COL/dmesg-tail.txt"
 fi
 
+_tmo() { command -v timeout >/dev/null 2>&1 && printf '%s' "timeout 30 " || true; }
 if command -v journalctl >/dev/null 2>&1; then
-  journalctl -k -n 4000 --no-pager -o short-iso >"$COL/journal-kernel-recent.txt" 2>&1 || true
+  $(_tmo) journalctl -k -n 4000 --no-pager -o short-iso >"$COL/journal-kernel-recent.txt" 2>&1 || true
   JOURNAL_PREV_N="${VTL_DIAG_JOURNAL_PREV_LINES:-8000}"
   echo "journal_prev_boot_lines=$JOURNAL_PREV_N" >>"$COL/00-meta.txt"
   {
     echo "### journalctl -k -b -1 -n $JOURNAL_PREV_N (oldest-first; set VTL_DIAG_JOURNAL_PREV_LINES)"
     echo
-    journalctl -k -b -1 -n "$JOURNAL_PREV_N" --no-pager -o short-iso 2>&1
+    $(_tmo) journalctl -k -b -1 -n "$JOURNAL_PREV_N" --no-pager -o short-iso 2>&1
   } >"$COL/journal-kernel-prev-boot.txt" || true
   JOURNAL_PREV_REV_N="${VTL_DIAG_JOURNAL_PREV_REV_LINES:-800}"
   echo "journal_prev_boot_rev_lines=$JOURNAL_PREV_REV_N" >>"$COL/00-meta.txt"
   {
     echo "### journalctl -k -b -1 -r -n $JOURNAL_PREV_REV_N (newest-first; set VTL_DIAG_JOURNAL_PREV_REV_LINES)"
     echo
-    journalctl -k -b -1 -n "$JOURNAL_PREV_REV_N" -r --no-pager -o short-iso 2>&1
+    $(_tmo) journalctl -k -b -1 -n "$JOURNAL_PREV_REV_N" -r --no-pager -o short-iso 2>&1
   } >"$COL/journal-kernel-prev-boot-rev.txt" || true
 fi
 

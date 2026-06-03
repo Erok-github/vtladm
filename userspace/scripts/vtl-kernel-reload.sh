@@ -1,4 +1,5 @@
 #!/bin/sh
+set -eu
 # Optional hook for vtladm: reload vtl.ko with geometry matching all online libraries.
 # Configure in vtl.conf: kernel_vtl_reload_script=/path/to/vtl-kernel-reload.sh
 # Argument $1: comma-separated "drivesxslots" per library, e.g. "2x32,1x10"

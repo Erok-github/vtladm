@@ -431,12 +431,27 @@ fn validate_sg_path(p: &Path) -> Result<String, String> {
             ));
         }
     }
+    // Verify the device belongs to a VTL SCSI host (read vendor from sysfs).
     let canon = p
         .canonicalize()
-        .unwrap_or_else(|_| p.to_path_buf())
-        .to_string_lossy()
-        .into_owned();
-    Ok(canon)
+        .unwrap_or_else(|_| p.to_path_buf());
+    let canon_str = canon.to_string_lossy().into_owned();
+    #[cfg(target_os = "linux")]
+    {
+        let dev_name = canon.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let vendor_path = format!("/sys/class/scsi_generic/{}/device/vendor", dev_name);
+        if let Ok(vendor) = fs::read_to_string(&vendor_path) {
+            if !vendor.trim().to_uppercase().contains("VTL") {
+                return Err(format!(
+                    "{} is not a VTL device (vendor: {})",
+                    p.display(), vendor.trim()
+                ));
+            }
+        }
+    }
+    Ok(canon_str)
 }
 
 /// 解析逗号分隔 LUN 列表；须恰好 `expected_len` 项、互不重复。

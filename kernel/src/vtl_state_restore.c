@@ -86,6 +86,7 @@ static int apply_one_state_line(struct vtl_changer *ch, char *line)
 		if (ret < 0) {
 			pr_warn("VTL: state restore: slot_place(%d) '%s': %d (tape kept in global table)\n",
 				addr, name, ret);
+			vtl_tape_put(tape);
 			return 0;
 		}
 		break;
@@ -95,12 +96,14 @@ static int apply_one_state_line(struct vtl_changer *ch, char *line)
 		if (empty_slot < 0) {
 			pr_warn("VTL: state restore: no empty slot to stage drive load '%s' (tape kept in global table)\n",
 				name);
+			vtl_tape_put(tape);
 			return 0;
 		}
 		ret = vtl_changer_slot_place(ch, empty_slot, tape);
 		if (ret < 0) {
 			pr_warn("VTL: state restore: preload slot_place(%d) '%s': %d (tape kept in global table)\n",
 				empty_slot, name, ret);
+			vtl_tape_put(tape);
 			return 0;
 		}
 		ret = vtl_changer_move_medium(ch, empty_slot, vtl_elem_drive_base(ch) + addr);
@@ -116,12 +119,14 @@ static int apply_one_state_line(struct vtl_changer *ch, char *line)
 		if (empty_slot < 0) {
 			pr_warn("VTL: state restore: no empty slot to stage mailslot load '%s' (tape kept in global table)\n",
 				name);
+			vtl_tape_put(tape);
 			return 0;
 		}
 		ret = vtl_changer_slot_place(ch, empty_slot, tape);
 		if (ret < 0) {
 			pr_warn("VTL: state restore: preload slot_place(%d) '%s': %d (tape kept in global table)\n",
 				empty_slot, name, ret);
+			vtl_tape_put(tape);
 			return 0;
 		}
 		ret = vtl_changer_move_medium(ch, empty_slot, vtl_elem_ie_base(ch) + addr);
@@ -134,6 +139,7 @@ static int apply_one_state_line(struct vtl_changer *ch, char *line)
 	default:
 		pr_warn("VTL: state restore: unknown element type '%c' for '%s' (tape kept in global table)\n",
 			type, name);
+		vtl_tape_put(tape);
 		return 0;
 	}
 

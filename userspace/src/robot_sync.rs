@@ -422,8 +422,9 @@ pub(crate) fn db_inventory(
     library_id: i64,
 ) -> Result<HashMap<String, MediumLocation>, crate::VtlError> {
     let mut out = HashMap::new();
+    // Use barcode as key so DB inventory matches kernel inventory (which uses barcodes).
     let mut stmt = conn.prepare(
-        "SELECT t.name, s.slot_id FROM slots s
+        "SELECT t.barcode, s.slot_id FROM slots s
          JOIN tapes t ON t.id = s.tape_id
          WHERE s.library_id = ?1 AND s.is_import_export = 0",
     )?;
@@ -431,34 +432,34 @@ pub(crate) fn db_inventory(
         Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)?))
     })?;
     for row in rows {
-        let (name, slot) = row?;
-        if out.contains_key(&name) {
+        let (barcode, slot) = row?;
+        if out.contains_key(&barcode) {
             return Err(VtlError::InvalidParameter(format!(
                 "DB inventory: tape '{}' assigned to multiple locations",
-                name
+                barcode
             )));
         }
-        out.insert(name, MediumLocation::DataSlot(slot));
+        out.insert(barcode, MediumLocation::DataSlot(slot));
     }
     let mut dstmt = conn.prepare(
-        "SELECT t.name, d.drive_id FROM drives d
+        "SELECT t.barcode, d.drive_id FROM drives d
          JOIN tapes t ON t.id = d.tape_id WHERE d.library_id = ?1",
     )?;
     let drows = dstmt.query_map(params![library_id], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)?))
     })?;
     for row in drows {
-        let (name, drive) = row?;
-        if out.contains_key(&name) {
+        let (barcode, drive) = row?;
+        if out.contains_key(&barcode) {
             return Err(VtlError::InvalidParameter(format!(
                 "DB inventory: tape '{}' assigned to multiple locations",
-                name
+                barcode
             )));
         }
-        out.insert(name, MediumLocation::Drive(drive));
+        out.insert(barcode, MediumLocation::Drive(drive));
     }
     let mut mstmt = conn.prepare(
-        "SELECT t.name, s.slot_id FROM slots s
+        "SELECT t.barcode, s.slot_id FROM slots s
          JOIN tapes t ON t.id = s.tape_id
          WHERE s.library_id = ?1 AND s.is_import_export != 0",
     )?;
@@ -466,14 +467,14 @@ pub(crate) fn db_inventory(
         Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)?))
     })?;
     for row in mrows {
-        let (name, slot) = row?;
-        if out.contains_key(&name) {
+        let (barcode, slot) = row?;
+        if out.contains_key(&barcode) {
             return Err(VtlError::InvalidParameter(format!(
                 "DB inventory: tape '{}' assigned to multiple locations",
-                name
+                barcode
             )));
         }
-        out.insert(name, MediumLocation::MailSlot(slot));
+        out.insert(barcode, MediumLocation::MailSlot(slot));
     }
     Ok(out)
 }
