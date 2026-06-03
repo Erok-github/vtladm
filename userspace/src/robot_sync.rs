@@ -18,7 +18,8 @@ use crate::{get_config, log_error, log_message, VtlError, OFFLINE_LIBRARY_NAME, 
 
 /// DB `slots.slot_id` for `mail0`..`mail3` (see `main.rs`).
 pub const MAILSLOT_OFFSET: i32 = 100;
-/// Kernel SCSI element address for tape drives (must match `kernel/include/vtl.h`).
+/// Kernel SCSI element address for tape drives (legacy; now computed dynamically from num_slots).
+#[allow(dead_code)]
 pub const VTL_ELEM_DRIVE_BASE: i32 = 1000;
 /// Kernel SCSI element address for import/export (IE) slots.
 pub const VTL_ELEM_IE_BASE: i32 = 2000;
@@ -94,6 +95,8 @@ struct VtlInventoryIoctl {
 pub struct KernelInventory {
     pub locations: HashMap<String, MediumLocation>,
     pub truncated: bool,
+    pub num_slots: i32,
+    pub num_drives: i32,
 }
 
 const VTL_INV_IOCTL_SZ: u32 = std::mem::size_of::<VtlInventoryIoctl>() as u32;
@@ -110,25 +113,34 @@ pub enum MediumLocation {
 }
 
 impl MediumLocation {
-    pub fn from_element(elem: i32) -> Option<Self> {
-        if elem >= VTL_ELEM_DRIVE_BASE && elem < VTL_ELEM_IE_BASE {
-            Some(MediumLocation::Drive(elem - VTL_ELEM_DRIVE_BASE))
-        } else if elem >= 0 && elem < VTL_ELEM_DRIVE_BASE {
-            Some(MediumLocation::DataSlot(elem))
-        } else if elem >= VTL_ELEM_IE_BASE {
+    /// Parse a kernel GET_INVENTORY element address.
+    /// The kernel uses SCSI-compliant contiguous addressing:
+    ///   Data slots: 1 .. num_slots
+    ///   Drives:     num_slots+1 .. num_slots+num_drives
+    ///   IE (mail):  num_slots+num_drives+1 ..
+    pub fn from_element(elem: i32, num_slots: i32, num_drives: i32) -> Option<Self> {
+        let drive_base = num_slots + 1;
+        let ie_base = num_slots + num_drives + 1;
+        if elem >= ie_base {
             Some(MediumLocation::MailSlot(
-                MAILSLOT_OFFSET + (elem - VTL_ELEM_IE_BASE),
+                MAILSLOT_OFFSET + (elem - ie_base),
             ))
+        } else if elem >= drive_base {
+            Some(MediumLocation::Drive(elem - drive_base))
+        } else if elem >= 1 && elem <= num_slots {
+            Some(MediumLocation::DataSlot(elem))
         } else {
             None
         }
     }
 
-    pub fn to_element(&self) -> i32 {
+    pub fn to_element(&self, num_slots: i32, num_drives: i32) -> i32 {
+        let drive_base = num_slots + 1;
+        let ie_base = num_slots + num_drives + 1;
         match self {
             MediumLocation::DataSlot(s) => *s,
-            MediumLocation::Drive(d) => VTL_ELEM_DRIVE_BASE + d,
-            MediumLocation::MailSlot(m) => db_mailslot_to_element(*m),
+            MediumLocation::Drive(d) => drive_base + d,
+            MediumLocation::MailSlot(m) => ie_base + (*m - MAILSLOT_OFFSET),
         }
     }
 }
@@ -385,6 +397,8 @@ pub(crate) fn kernel_inventory_snapshot(
         }; VTL_INV_MAX_ITEMS],
     };
     ioctl_vtl(VTL_IOCTL_GET_INVENTORY, &mut req).map_err(map_ioctl_error)?;
+    let num_slots = req.num_slots;
+    let num_drives = req.num_drives;
     let mut locations = HashMap::new();
     let n = req.count.max(0) as usize;
     for item in req.items.iter().take(n.min(VTL_INV_MAX_ITEMS)) {
@@ -392,7 +406,7 @@ pub(crate) fn kernel_inventory_snapshot(
         if name.is_empty() {
             continue;
         }
-        if let Some(loc) = MediumLocation::from_element(item.element) {
+        if let Some(loc) = MediumLocation::from_element(item.element, num_slots, num_drives) {
             if locations.contains_key(&name) {
                 return Err(crate::VtlError::InvalidParameter(format!(
                     "kernel inventory: duplicate tape name '{}'",
@@ -405,6 +419,8 @@ pub(crate) fn kernel_inventory_snapshot(
     Ok(KernelInventory {
         locations,
         truncated: req.truncated != 0,
+        num_slots,
+        num_drives,
     })
 }
 
@@ -559,7 +575,8 @@ pub(crate) fn evacuate_tape_from_changer(
 ) -> Result<(), VtlError> {
     let kernel = kernel_inventory_snapshot(conn, library_id)?;
     if let Some(loc) = kernel.locations.get(tape_name) {
-        evacuate_element(conn, library_id, loc.to_element()).map_err(VtlError::IoError)?;
+        let elem = loc.to_element(kernel.num_slots, kernel.num_drives);
+        evacuate_element(conn, library_id, elem).map_err(VtlError::IoError)?;
     }
     Ok(())
 }
