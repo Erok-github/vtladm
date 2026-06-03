@@ -75,6 +75,10 @@ fn apply_kernel_to_db(
     library_id: i64,
     kernel: &HashMap<String, MediumLocation>,
 ) -> Result<usize, VtlError> {
+    // Never clear DB when kernel has no locations — this would destroy all slot assignments.
+    if kernel.is_empty() {
+        return Ok(0);
+    }
     let tx = conn.transaction()?;
     tx.execute(
         "UPDATE slots SET tape_id = NULL WHERE library_id = ?1",
