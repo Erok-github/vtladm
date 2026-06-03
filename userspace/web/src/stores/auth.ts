@@ -25,7 +25,9 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const resp = await fetch('/api/session/ping', { credentials: 'include' });
       if (resp.status === 200) {
+        const data = await resp.json();
         sessionValid.value = true;
+        mustChangePassword.value = data.must_change_password ?? false;
         return true;
       }
     } catch {

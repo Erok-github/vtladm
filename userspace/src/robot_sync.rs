@@ -762,7 +762,7 @@ fn changer_inventory_from_kernel(
     let slot_ids = sstmt.query_map(params![library_id], |r| r.get::<_, i32>(0))?;
     for sid in slot_ids {
         let id = sid?;
-        let tape = by_slot.get(&(id + 1)).cloned();
+        let tape = by_slot.get(&id).cloned();
         data_slots.push(ChangerRow {
             label: format!("slot{}", id),
             tape_name: tape.clone(),
@@ -814,7 +814,20 @@ pub fn changer_inventory_display(
 ) -> Result<ChangerInventoryDisplay, VtlError> {
     if changer_inventory_uses_kernel() {
         match changer_inventory_from_kernel(conn, library_id) {
-            Ok(d) => return Ok(d),
+            Ok(d) => {
+                // If kernel inventory is completely empty, fall back to DB.
+                // This handles the case where kernel ioctl succeeds but has no tape state
+                // (e.g. kernel_slot_place failed, or kernel module was reloaded without restore).
+                let has_any = d.data_slots.iter().any(|s| s.tape_name.is_some())
+                    || d.drives.iter().any(|dr| dr.tape_name.is_some())
+                    || d.mailslots.iter().any(|m| m.tape_name.is_some());
+                if has_any {
+                    return Ok(d);
+                }
+                log_message(
+                    "changer inventory: kernel GET_INVENTORY returned empty; falling back to DB",
+                );
+            }
             Err(e) => {
                 log_message(&format!(
                     "changer inventory: kernel GET_INVENTORY failed ({}); falling back to DB",

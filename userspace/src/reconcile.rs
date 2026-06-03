@@ -539,21 +539,28 @@ pub(crate) fn mirror_kernel_catalog_hints_only(
     let kernel_snap = kernel_inventory_snapshot(conn, library_id)?;
     ensure_inventory_complete(&kernel_snap)?;
     let tx = conn.transaction()?;
-    tx.execute(
-        "UPDATE tapes SET slot = NULL WHERE library_id = ?1",
-        params![library_id],
-    )?;
     let mut n = 0usize;
     for (tape_name, loc) in &kernel_snap.locations {
-        if let MediumLocation::DataSlot(slot) = loc {
-            // Kernel reports data slots as 1-based; DB tapes.slot is 0-based.
-            let db_slot = slot - 1;
-            if let Ok(tape_id) = tape_id_by_barcode(&tx, library_id, tape_name) {
-                tx.execute(
-                    "UPDATE tapes SET slot = ?1, shelf_id = NULL WHERE id = ?2",
-                    params![db_slot, tape_id],
-                )?;
-                n += 1;
+        match loc {
+            MediumLocation::DataSlot(slot) => {
+                // Kernel reports data slots as 1-based; DB tapes.slot is 0-based.
+                let db_slot = slot - 1;
+                if let Ok(tape_id) = tape_id_by_barcode(&tx, library_id, tape_name) {
+                    tx.execute(
+                        "UPDATE tapes SET slot = ?1, shelf_id = NULL WHERE id = ?2",
+                        params![db_slot, tape_id],
+                    )?;
+                    n += 1;
+                }
+            }
+            _ => {
+                // Tape is in drive or mailslot — clear its data slot assignment
+                if let Ok(tape_id) = tape_id_by_barcode(&tx, library_id, tape_name) {
+                    tx.execute(
+                        "UPDATE tapes SET slot = NULL WHERE id = ?1",
+                        params![tape_id],
+                    )?;
+                }
             }
         }
     }

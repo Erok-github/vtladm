@@ -1341,9 +1341,16 @@ async fn api_session_ping(
     State(st): State<Arc<super::web_auth::WebState>>,
     jar: CookieJar,
 ) -> impl IntoResponse {
-    match require_session(&st, &jar) {
-        Ok(()) => (StatusCode::OK, Json(json!({ "authenticated": true }))).into_response(),
-        Err(_) => (StatusCode::UNAUTHORIZED, Json(json!({ "authenticated": false }))).into_response(),
+    let tok = match session_token(&jar) {
+        Some(t) => t,
+        None => return (StatusCode::UNAUTHORIZED, Json(json!({ "authenticated": false }))).into_response(),
+    };
+    match st.session_username(Some(&tok)) {
+        Some(_) => {
+            let must_change = st.session_must_change_password(&tok);
+            (StatusCode::OK, Json(json!({ "authenticated": true, "must_change_password": must_change }))).into_response()
+        }
+        None => (StatusCode::UNAUTHORIZED, Json(json!({ "authenticated": false }))).into_response(),
     }
 }
 

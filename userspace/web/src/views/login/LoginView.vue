@@ -11,9 +11,9 @@ const route = useRoute();
 const password = ref('');
 const captchaAnswer = ref('');
 const submitting = ref(false);
+let loginLock = false;
 
 onMounted(async () => {
-  // If already logged in, redirect
   const ok = await auth.checkSession();
   if (ok) {
     router.replace('/');
@@ -23,13 +23,18 @@ onMounted(async () => {
 });
 
 async function handleLogin() {
-  if (!password.value || !captchaAnswer.value) return;
+  if (loginLock || !password.value || !captchaAnswer.value) return;
+  loginLock = true;
   submitting.value = true;
-  const ok = await auth.login(password.value, captchaAnswer.value);
-  submitting.value = false;
-  if (ok) {
-    const redirect = (route.query.redirect as string) || '/';
-    router.replace(redirect);
+  try {
+    const ok = await auth.login(password.value, captchaAnswer.value);
+    if (ok) {
+      const redirect = (route.query.redirect as string) || '/';
+      router.replace(redirect);
+    }
+  } finally {
+    submitting.value = false;
+    loginLock = false;
   }
 }
 </script>
@@ -45,7 +50,7 @@ async function handleLogin() {
         </div>
       </template>
 
-      <NForm @submit.prevent="handleLogin">
+      <NForm>
         <NFormItem label="密码">
           <NInput
             v-model:value="password"
@@ -67,6 +72,7 @@ async function handleLogin() {
             placeholder="输入答案"
             :disabled="submitting"
             style="margin-top: 8px"
+            @keyup.enter="handleLogin"
           />
         </NFormItem>
 
@@ -76,7 +82,7 @@ async function handleLogin() {
           type="primary"
           block
           :loading="submitting"
-          attr-type="submit"
+          :disabled="submitting"
           @click="handleLogin"
         >
           登 录

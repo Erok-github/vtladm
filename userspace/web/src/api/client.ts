@@ -36,14 +36,14 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   // Session expired → redirect to login
   if (resp.status === 401 || resp.status === 403) {
     const data = await resp.json().catch(() => ({}));
+    const msg = data.error || data.message;
     if (resp.status === 401) {
-      // 防止在登录页无限重定向
       if (window.location.pathname !== '/login') {
         window.location.href = '/login';
       }
-      throw new ApiError(resp.status, 'Unauthorized');
+      throw new ApiError(resp.status, msg || 'Unauthorized');
     }
-    throw new ApiError(resp.status, data.error || data.message || 'Forbidden');
+    throw new ApiError(resp.status, msg || 'Forbidden');
   }
 
   const data = await resp.json().catch(() => ({}));
