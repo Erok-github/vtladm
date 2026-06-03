@@ -248,6 +248,7 @@ const columns: DataTableColumns<TapeRow> = [
       return h(
         NDropdown,
         {
+          trigger: 'click',
           options: opts,
           onSelect: (key: string) => {
             if (key === 'assign') openAssignSlot(row);

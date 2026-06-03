@@ -127,9 +127,10 @@ async function handleTapeInit(name: string) {
   }
 }
 
-function openShelfPlace(row: TapeRow) {
+async function openShelfPlace(row: TapeRow) {
   shelfPlaceTarget.value = row;
   shelfPlaceTargetShelf.value = row.shelf_name ?? null;
+  if (shelves.value.length === 0) await loadShelves();
   showShelfPlaceModal.value = true;
 }
 
@@ -674,24 +675,6 @@ onMounted(async () => {
               </NCard>
             </NModal>
 
-            <!-- Shelf place modal (shared) -->
-            <NModal v-model:show="showShelfPlaceModal" title="磁带换架">
-              <NCard style="width:380px" title="磁带换架" :bordered="false">
-                <p style="margin-bottom:8px">磁带: <strong>{{ shelfPlaceTarget?.name }}</strong></p>
-                <span>目标货架</span>
-                <NSelect
-                  v-model:value="shelfPlaceTargetShelf"
-                  :options="tapeShelfOpts"
-                  placeholder="未使用架"
-                  clearable
-                  style="margin-top:4px"
-                />
-                <NSpace justify="end" style="margin-top: 16px">
-                  <NButton @click="showShelfPlaceModal = false">取消</NButton>
-                  <NButton type="primary" @click="handleShelfPlaceExec">确认换架</NButton>
-                </NSpace>
-              </NCard>
-            </NModal>
           </NTabPane>
 
           <!-- ───── Tab 3: 批量建带 ───── -->
@@ -977,6 +960,25 @@ onMounted(async () => {
             </NSpin>
           </NTabPane>
         </NTabs>
+
+        <!-- 换架弹窗 (在 Tabs 外部，避免 inactive Tab 不渲染导致弹窗无法弹出) -->
+        <NModal v-model:show="showShelfPlaceModal" title="磁带换架">
+          <NCard style="width:380px" title="磁带换架" :bordered="false">
+            <p style="margin-bottom:8px">磁带: <strong>{{ shelfPlaceTarget?.name }}</strong></p>
+            <span>目标货架</span>
+            <NSelect
+              v-model:value="shelfPlaceTargetShelf"
+              :options="tapeShelfOpts"
+              placeholder="未使用架"
+              clearable
+              style="margin-top:4px"
+            />
+            <NSpace justify="end" style="margin-top: 16px">
+              <NButton @click="showShelfPlaceModal = false">取消</NButton>
+              <NButton type="primary" @click="handleShelfPlaceExec">确认换架</NButton>
+            </NSpace>
+          </NCard>
+        </NModal>
       </template>
       <div v-else style="color:#999;text-align:center;padding:40px">库不存在或已删除</div>
     </NSpin>

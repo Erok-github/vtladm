@@ -15,6 +15,7 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::{Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::collections::BTreeMap;
 use std::fs;
@@ -257,6 +258,28 @@ async fn api_tapes(Query(q): Query<TapesQuery>) -> impl IntoResponse {
         let mut v = Vec::new();
         for row in rows {
             v.push(row.map_err(|e| e.to_string())?);
+        }
+        // Fill in missing locations from kernel inventory when DB slot is NULL
+        if super::robot_sync::robot_sync_enabled() {
+            if let Ok(snap) = super::robot_sync::kernel_inventory_snapshot(&conn, library_id) {
+                if !snap.truncated {
+                    for tape in &mut v {
+                        if tape.slot.is_none() && !tape.in_drive {
+                            if let Some(loc) = snap.locations.get(&tape.barcode) {
+                                match loc {
+                                    super::robot_sync::MediumLocation::DataSlot(s) => {
+                                        tape.slot = Some(s - 1);
+                                    }
+                                    super::robot_sync::MediumLocation::Drive(_) => {
+                                        tape.in_drive = true;
+                                    }
+                                    super::robot_sync::MediumLocation::MailSlot(_) => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         Ok((v, total))
     })
@@ -703,6 +726,27 @@ async fn api_library_detail(Query(q): Query<LibraryQuery>) -> impl IntoResponse 
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let changer = super::robot_sync::changer_inventory_display(&conn, library_id)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        // Build kernel location lookup for filling gaps when DB slot is NULL
+        let kernel_slot_of: HashMap<String, i32> = if changer.source == "kernel" {
+            changer
+                .data_slots
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, row)| row.barcode.as_ref().map(|bc| (bc.clone(), idx as i32)))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        let kernel_drive_of: HashSet<String> = if changer.source == "kernel" {
+            changer
+                .drives
+                .iter()
+                .filter_map(|row| row.barcode.clone())
+                .collect()
+        } else {
+            HashSet::new()
+        };
         let loaded_in_drives: i64 = if changer.source == "kernel" {
             changer
                 .drives
@@ -782,14 +826,19 @@ async fn api_library_detail(Query(q): Query<LibraryQuery>) -> impl IntoResponse 
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let tapes: Vec<serde_json::Value> = tstmt
             .query_map(rusqlite::params![library_id], |r| {
+                let barcode: String = r.get(1)?;
+                let db_slot: Option<i32> = r.get(4)?;
+                let in_drive_db: bool = r.get::<_, i64>(6)? != 0;
+                let effective_slot = db_slot.or_else(|| kernel_slot_of.get(&barcode).copied());
+                let effective_in_drive = in_drive_db || kernel_drive_of.contains(&barcode);
                 Ok(json!({
                     "name": r.get::<_, String>(0)?,
-                    "barcode": r.get::<_, String>(1)?,
+                    "barcode": barcode,
                     "capacity_bytes": r.get::<_, i64>(2)?,
                     "used_bytes": r.get::<_, i64>(3)?,
-                    "slot": r.get::<_, Option<i32>>(4)?,
+                    "slot": effective_slot,
                     "shelf_name": r.get::<_, Option<String>>(5)?,
-                    "in_drive": r.get::<_, i64>(6)? != 0,
+                    "in_drive": effective_in_drive,
                 }))
             })
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
