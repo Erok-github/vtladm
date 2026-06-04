@@ -135,7 +135,6 @@ static int apply_one_state_line(struct vtl_changer *ch, char *line)
 		break;
 	}
 
-	vtl_tape_put(tape);
 	return 1;
 }
 

@@ -254,19 +254,11 @@ int vtl_tape_create(const char *name, u64 size, u8 density, u8 flags)
     /* Write sidecar metadata file (non-fatal on failure) */
     vtl_meta_write(path, density, flags);
 
-    mutex_lock(&vtl_tape_lock);
-    for (ret = 0; ret < VTL_MAX_SLOTS; ret++) {
-        if (!vtl_tapes[ret]) {
-            vtl_tapes[ret] = tape;
-            break;
-        }
-    }
-    mutex_unlock(&vtl_tape_lock);
-
-    if (ret >= VTL_MAX_SLOTS) {
+    ret = vtl_tape_table_insert(tape);
+    if (ret < 0) {
         filp_close(filp, NULL);
         kfree(tape);
-        return -ENOSPC;
+        return ret;
     }
 
     pr_info("VTL: Created tape %s (size %llu)\n", name, size);
@@ -301,8 +293,10 @@ struct vtl_tape *vtl_tape_open_existing(const char *name)
     char path[256];
 
     tape = vtl_tape_find_by_name(name);
-    if (tape)
+    if (tape) {
+        vtl_tape_put(tape);
         return tape;
+    }
 
     if (!vtl_tape_name_valid(name))
         return ERR_PTR(-EINVAL);
@@ -438,12 +432,10 @@ int vtl_changer_load_slot_to_drive(struct vtl_changer *ch, int slot, int drive,
             vtl_tape_set_barcode(tape, barcode);
         ret = vtl_changer_slot_place(ch, slot, tape);
         if (ret) {
-            vtl_tape_put(tape);
             return ret;
         }
         ret = vtl_changer_move_medium(ch, slot,
                           vtl_elem_drive_base(ch) + drive);
-        vtl_tape_put(tape);
         return ret;
     }
 
@@ -679,6 +671,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
             drv->at_end = (pos >= tape->meta.capacity);
             tape->meta.accessed = ktime_get_real_seconds();
             drv->comp_bytes_read += uncomp_sz;
+            tape->meta.log_bytes_read += (u64)uncomp_sz;
 
             mutex_unlock(&tape->lock);
             mutex_unlock(&drv->lock);
@@ -778,6 +771,7 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
         if (actual)
             *actual = to_write;
         drv->comp_bytes_written += to_write;
+        tape->meta.log_bytes_written += (u64)to_write;
     } else {
         ret = kernel_write(tape->file, buffer, to_write, &pos);
         if (ret < 0) {
@@ -972,7 +966,9 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
         saved_source_slot = src_drv->source_slot;
 	        src_drv->loaded_tape = NULL;
         src_drv->source_slot = -1;
+	        mutex_lock(&t->lock);
 	        t->loaded = false;
+	        mutex_unlock(&t->lock);
 	        src_drv->at_filemark = false;
 	        src_drv->at_end = false;
 	        src_drv->at_bot = true;
