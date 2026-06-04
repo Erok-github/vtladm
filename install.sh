@@ -497,6 +497,28 @@ auto_reconcile_pull=true
 auto_sync_db_from_kernel=true
 EOF
 fi
+
+_vtl_prompt_lib="$ROOT/scripts/install_prompt.sh"
+if [ -f "$_vtl_prompt_lib" ]; then
+  # shellcheck source=/dev/null
+  . "$_vtl_prompt_lib"
+  _vtl_conf="$PREFIX/var/vtl.conf"
+  if [ -f "$_vtl_conf" ]; then
+    _portal_ip=""
+    if ! grep -qE '^[[:space:]]*iscsi_portals[[:space:]]*=' "$_vtl_conf" 2>/dev/null; then
+      vtladm_prompt_ipv4 _portal_ip "iSCSI portal IPv4 (for client initiators)"
+      vtladm_set_vtl_conf_kv "$_vtl_conf" "iscsi_portals" "${_portal_ip}:3260"
+      echo ">> vtl.conf: iscsi_portals=${_portal_ip}:3260"
+    elif vtladm_is_interactive; then
+      _cur=$(grep -E '^[[:space:]]*iscsi_portals[[:space:]]*=' "$_vtl_conf" 2>/dev/null | tail -1 \
+        | sed 's/^[^=]*=//;s/^[[:space:]]*//;s/[[:space:]]*$//')
+      vtladm_prompt_ipv4 _portal_ip "iSCSI portal IPv4" "$(echo "$_cur" | sed 's/:.*//')"
+      vtladm_set_vtl_conf_kv "$_vtl_conf" "iscsi_portals" "${_portal_ip}:3260"
+      echo ">> vtl.conf: iscsi_portals=${_portal_ip}:3260"
+    fi
+  fi
+fi
+
 echo "=== installed to $PREFIX ==="
 echo "  modinfo $PREFIX/ko/vtl.ko"
 echo "  $PREFIX/sbin/vtl-kernelctl start"
