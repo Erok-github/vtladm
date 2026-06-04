@@ -441,6 +441,10 @@ int vtl_changer_load_slot_to_drive(struct vtl_changer *ch, int slot, int drive,
             vtl_tape_put(tape);
             return ret;
         }
+        ret = vtl_changer_move_medium(ch, slot,
+                          vtl_elem_drive_base(ch) + drive);
+        vtl_tape_put(tape);
+        return ret;
     }
 
     return vtl_changer_move_medium(ch, slot, vtl_elem_drive_base(ch) + drive);
@@ -567,6 +571,8 @@ int vtl_tape_load(struct vtl_drive *drv, struct vtl_tape *tape)
 int vtl_tape_unload(struct vtl_drive *drv)
 {
     struct vtl_tape *tape;
+    char tape_name[64];
+    int drive_id;
 
     mutex_lock(&drv->lock);
 
@@ -577,6 +583,8 @@ int vtl_tape_unload(struct vtl_drive *drv)
     }
 
     mutex_lock(&tape->lock);
+    strscpy(tape_name, tape->name, sizeof(tape_name));
+    drive_id = drv->id;
 
     drv->loaded_tape = NULL;
     tape->loaded = false;
@@ -585,7 +593,7 @@ int vtl_tape_unload(struct vtl_drive *drv)
     mutex_unlock(&tape->lock);
     mutex_unlock(&drv->lock);
 
-    pr_info("VTL: Unloaded tape %s from drive %d\n", tape->name, drv->id);
+    pr_info("VTL: Unloaded tape %s from drive %d\n", tape_name, drive_id);
     return 0;
 }
 
@@ -988,6 +996,13 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
         goto out;
     }
 
+    /*
+     * Hold a function-scope reference across the extract→place window.
+     * The per-element put above may have released the last element ref;
+     * this pin guarantees t stays alive until we reach out: below.
+     */
+    kref_get(&t->ref);
+
     if (vtl_elem_is_storage(ch, dst)) {
         int si_dst = dst - 1;
         struct vtl_slot *dst_slot;
@@ -1099,6 +1114,8 @@ rollback:
     }
 
 out:
+    if (t)
+        vtl_tape_put(t);
     mutex_unlock(&ch->lock);
     if (ret == 0 && vtl_move_delay_ms > 0)
         msleep(min_t(unsigned int, (unsigned int)vtl_move_delay_ms, 60000U));

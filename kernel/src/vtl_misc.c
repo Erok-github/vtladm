@@ -220,8 +220,7 @@ static long vtl_ioctl_slot_place(void __user *uarg)
 	if (place_req.barcode[0])
 		vtl_tape_set_barcode(tape, place_req.barcode);
 	ret = vtl_changer_slot_place(ch, place_req.slot, tape);
-	if (ret)
-		vtl_tape_put(tape);
+	vtl_tape_put(tape);
 	return ret;
 }
 
