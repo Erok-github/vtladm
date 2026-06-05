@@ -674,6 +674,9 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
             *actual = uncomp_sz;
             drv->at_bot = (pos == 0);
             drv->at_end = (pos >= tape->meta.capacity);
+
+            pr_info_ratelimited("VTL: read compressed blk at pos=%lld actual=%u new_pos=%lld\n",
+                        (long long)(pos - block_total), uncomp_sz, (long long)pos);
             tape->meta.accessed = ktime_get_real_seconds();
             drv->comp_bytes_read += uncomp_sz;
             tape->meta.log_bytes_read += (u64)uncomp_sz;
