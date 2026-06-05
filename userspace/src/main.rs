@@ -27,6 +27,7 @@ mod reconcile;
 mod robot_sync;
 mod scsi_rescan_vtl;
 mod scsi_tape_holders;
+mod label;
 mod web;
 mod web_auth;
 
@@ -3023,6 +3024,24 @@ enum Commands {
     InitTape {
         name: String,
     },
+
+    /// 为磁带写入 ANSI/IBM 标准卷标签 (VOL1+HDR1+HDR2)，备份软件清单扫描可识别。
+    /// 磁带须在货架上（未入机械手槽）、且不在驱动中。
+    Label {
+        name: String,
+        /// 标签格式: ansi 或 ibm
+        #[arg(short, long, default_value = "ansi")]
+        format: String,
+        /// 卷序列号（6字符），默认使用条形码后 6 位
+        #[arg(short, long)]
+        volser: Option<String>,
+        /// 所有者标识（最多14字符）
+        #[arg(short, long, default_value = "VTLADM")]
+        owner: String,
+        /// 磁带块大小（HDR2 字段），0=变长
+        #[arg(long, default_value = "0")]
+        block_size: u32,
+    },
     ListTapes,
     Load {
         source: String,
@@ -4366,6 +4385,88 @@ pub(crate) fn init_tape_in_library(library: &str, name: &str) -> Result<(), VtlE
 }
 
 /// 删除自建货架（不可删除默认「未使用」架；架上须无任何磁带）。
+
+/// 为指定磁带写入 ANSI/IBM 标准卷标签。
+/// 参数 format: "ansi" 或 "ibm"。
+/// 参数 volser: 卷序列号（可选，默认取条形码后 6 位）。
+/// 参数 owner: 所有者标识（最长 14 字符）。
+/// 参数 block_size: HDR2 中记录的块大小（0 = 变长）。
+pub(crate) fn label_tape_in_library(
+    library: &str,
+    name: &str,
+    format: &str,
+    volser: Option<String>,
+    owner: &str,
+    block_size: u32,
+) -> Result<(), VtlError> {
+    let fmt = match format.to_lowercase().as_str() {
+        "ansi" => label::LabelFormat::Ansi,
+        "ibm" => label::LabelFormat::Ibm,
+        other => return Err(VtlError::InvalidParameter(
+            format!("不支持的标签格式: {}（支持 ansi / ibm）", other)
+        )),
+    };
+
+    let conn = init_db()?;
+    let library_id = resolve_library_id(&conn, library)?;
+    let (tape_id, image_path, barcode): (i64, String, String) = conn
+        .query_row(
+            "SELECT id, image_path, COALESCE(barcode, '') FROM tapes WHERE library_id = ?1 AND name = ?2",
+            params![library_id, name],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(|_| VtlError::TapeNotFound(name.to_string()))?;
+
+    if tape_in_drive(&conn, library_id, tape_id)? {
+        return Err(VtlError::TapeInDrive);
+    }
+
+    // Determine volser: use provided value, or extract from barcode (last 6 chars)
+    let vs = match volser {
+        Some(ref v) if !v.trim().is_empty() => {
+            let s = v.trim().to_uppercase();
+            if s.len() > 6 {
+                s[..6].to_string()
+            } else {
+                s
+            }
+        }
+        _ => {
+            let bc = barcode.trim();
+            if bc.len() >= 6 {
+                bc[bc.len()-6..].to_uppercase()
+            } else if bc.is_empty() {
+                name.chars().filter(|c| c.is_alphanumeric()).take(6)
+                    .collect::<String>().to_uppercase()
+            } else {
+                bc.to_uppercase()
+            }
+        }
+    };
+
+    log_message(&format!(
+        "正在为磁带 '{}'（库 '{}'）写入 {} 标签 (卷号: {})...",
+        name, library, fmt.name(), vs,
+    ));
+
+    label::write_tape_labels(&image_path, fmt, &vs, owner, block_size)?;
+
+    // Update the database: mark tape as having content
+    let path = std::path::Path::new(&image_path);
+    if let Ok(meta) = std::fs::metadata(path) {
+        let new_used = meta.len() as i64;
+        conn.execute(
+            "UPDATE tapes SET used_bytes = ?1 WHERE id = ?2",
+            params![new_used, tape_id],
+        )?;
+    }
+
+    log_message(&format!(
+        "磁带 '{}'（卷号: {}）{} 标签写入完成",
+        name, vs, fmt.name(),
+    ));
+    Ok(())
+}
 pub(crate) fn delete_shelf_in_library(library: &str, shelf_name: &str) -> Result<(), VtlError> {
     let conn = init_db()?;
     let library_id = resolve_library_id(&conn, library)?;
@@ -6055,6 +6156,9 @@ fn main() -> Result<(), VtlError> {
         }
         Commands::DeleteTape { name } => delete_tape(name)?,
         Commands::InitTape { name } => init_tape_in_library(&current_library_name(), name)?,
+        Commands::Label { name, format, volser, owner, block_size } => {
+            label_tape_in_library(&current_library_name(), name, format, volser.clone(), &owner, *block_size)?
+        }
         Commands::ListTapes => list_tapes()?,
         Commands::Load { source, target } => {
             let slot = parse_slot(source)
