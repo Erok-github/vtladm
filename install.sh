@@ -241,14 +241,20 @@ if [ "$DO_BUILD" -eq 1 ]; then
   echo ">> userspace (cargo build --release)"
   (cd "$ROOT/userspace" && _vtl_cargo_build_release)
 
-  # Vue3 web UI (optional: requires npm/node)
+  # Vue3 web UI (optional: requires npm/node >= 18)
   _WEB_SRC="$ROOT/userspace/web"
+  _WEB_MIN_NODE=18
   if [ -f "$_WEB_SRC/package.json" ] && command -v npm >/dev/null 2>&1; then
-    echo ">> web UI (npm install && npm run build)"
-    if (cd "$_WEB_SRC" && npm install --no-audit --no-fund && npm run build); then
-      true
+    _node_ver=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)
+    if [ -z "$_node_ver" ] || [ "$_node_ver" -lt "$_WEB_MIN_NODE" ] 2>/dev/null; then
+      echo "WARN: Node.js >= $_WEB_MIN_NODE required for Vue3 web UI (have $(node -v 2>/dev/null || echo none)) — skipping, will use legacy HTML" >&2
     else
-      echo "WARN: Vue3 web UI build failed — will fall back to legacy HTML" >&2
+      echo ">> web UI (npm install && npm run build)"
+      if (cd "$_WEB_SRC" && npm install --no-audit --no-fund && npm run build); then
+        true
+      else
+        echo "WARN: Vue3 web UI build failed — will fall back to legacy HTML" >&2
+      fi
     fi
   elif [ -f "$_WEB_SRC/package.json" ]; then
     echo "WARN: npm not found — skipping Vue3 web UI build (legacy HTML will be used)" >&2
