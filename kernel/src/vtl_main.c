@@ -1247,8 +1247,9 @@ static int __init vtl_init(void)
 
     pr_info("VTL: Loading Virtual Tape Library v%s (kernel %d.%d.%d)\n",
             VTL_VERSION,
-            (int)LINUX_VERSION_MAJOR, (int)LINUX_VERSION_PATCHLEVEL,
-            (int)LINUX_VERSION_SUBLEVEL);
+            (int)((LINUX_VERSION_CODE >> 16) & 0xFF),
+            (int)((LINUX_VERSION_CODE >> 8) & 0xFF),
+            (int)(LINUX_VERSION_CODE & 0xFF));
 
     error = vtl_parse_instances_into();
     if (error)

@@ -1429,6 +1429,8 @@ static int vtl_handle_read_element_status(struct scsi_cmnd *cmd, struct vtl_host
     unsigned int req_len;
     unsigned int work_len;
     int start_elem, num_elems;
+    bool voltag;
+    bool voltag_std;
     int ret;
 
     buffer = vtl_xfer_buf_alloc(VTL_ELEMENT_STATUS_BUFLEN);
@@ -1436,9 +1438,6 @@ static int vtl_handle_read_element_status(struct scsi_cmnd *cmd, struct vtl_host
         vtl_scsi_staging_oom(cmd, &ch->sense);
         return SAM_STAT_CHECK_CONDITION;
     }
-
-    bool voltag;
-    bool voltag_std;
 
     req_len = vtl_res_alloc_len(cmd);
     vtl_detect_pvoltag(cmd, req_len, &voltag, &voltag_std);
