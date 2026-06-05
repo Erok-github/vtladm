@@ -1099,11 +1099,9 @@ static int vtl_handle_rewind(struct scsi_cmnd *cmd, struct vtl_drive *drv)
 {
     int ret = vtl_tape_rewind(drv);
 
-    if (ret == -ENODEV) {
-        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0);
-        vtl_build_sense_buffer(cmd, &drv->sense);
-        return SAM_STAT_CHECK_CONDITION;
-    }
+    /* Empty drive: no-op rewind like a real drive with no tape */
+    if (ret == -ENODEV)
+        return SAM_STAT_GOOD;
 
     return SAM_STAT_GOOD;
 }
@@ -1118,11 +1116,9 @@ static int vtl_handle_space(struct scsi_cmnd *cmd, struct vtl_drive *drv)
     count = vtl_get_s24(&cdb[2]);
 
     ret = vtl_tape_space(drv, code, count);
-    if (ret == -ENODEV) {
-        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0);
-        vtl_build_sense_buffer(cmd, &drv->sense);
-        return SAM_STAT_CHECK_CONDITION;
-    }
+    /* Empty drive: no-op space */
+    if (ret == -ENODEV)
+        return SAM_STAT_GOOD;
     if (ret < 0) {
         vtl_set_sense(&drv->sense, ILLEGAL_REQUEST, 0x24, 0);
         vtl_build_sense_buffer(cmd, &drv->sense);
@@ -1297,15 +1293,9 @@ static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv,
     load = cdb[4] & 0x01;
 
     if (load) {
-        if (!vtl_drive_has_tape(drv)) {
-            vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0);
-            vtl_build_sense_buffer(cmd, &drv->sense);
-            return SAM_STAT_CHECK_CONDITION;
-        }
-    } else {
-        int src_slot;
-        bool can_return;
-        int ret = 0;
+        /* Load on empty drive: no-op instead of NOT_READY */
+        if (!vtl_drive_has_tape(drv))
+            return SAM_STAT_GOOD;
 
         mutex_lock(&drv->lock);
         if (!drv->loaded_tape) {
