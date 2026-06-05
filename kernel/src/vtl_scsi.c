@@ -1166,6 +1166,7 @@ static int vtl_handle_read_capacity_10(struct scsi_cmnd *cmd, struct vtl_drive *
 			max_lba = 0xFFFFFFFFU;
 		else
 			max_lba = (u32)(num_blocks - 1ULL);
+		}
 
 
     memset(buf, 0, sizeof(buf));
