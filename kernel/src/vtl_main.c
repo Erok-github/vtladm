@@ -596,13 +596,11 @@ static void vtl_unregister_all_hosts(bool release_tape_cache)
 	if (vtl_pdev_tab) {
 		for (j = 0; j < vtl_ninstances; j++) {
 			struct platform_device *pdev = vtl_pdev_tab[j];
-			struct vtl_plat_data *plat;
 
 			if (!pdev)
 				continue;
-			plat = dev_get_platdata(&pdev->dev);
 			platform_device_unregister(pdev);
-			kfree(plat);
+			/* platform_device_release() already freed pdev->dev.platform_data */
 			vtl_pdev_tab[j] = NULL;
 		}
 		kfree(vtl_pdev_tab);
