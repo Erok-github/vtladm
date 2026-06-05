@@ -1034,10 +1034,12 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
 
     ret = vtl_tape_read(drv, buffer, blocks * block_len, &actual);
     if (ret < 0) {
-        if (ret == -ENODEV)
-            vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0);
-        else
-            vtl_set_sense(&drv->sense, MEDIUM_ERROR, 0x11, 0);
+        /* Empty drive: return 0 bytes instead of NOT_READY */
+        if (ret == -ENODEV) {
+            vtl_xfer_buf_free(buffer);
+            return SAM_STAT_GOOD;
+        }
+        vtl_set_sense(&drv->sense, MEDIUM_ERROR, 0x11, 0);
         vtl_build_sense_buffer(cmd, &drv->sense);
         vtl_xfer_buf_free(buffer);
         return SAM_STAT_CHECK_CONDITION;
