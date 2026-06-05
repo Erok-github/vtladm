@@ -1296,6 +1296,10 @@ static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv,
         /* Load on empty drive: no-op instead of NOT_READY */
         if (!vtl_drive_has_tape(drv))
             return SAM_STAT_GOOD;
+    } else {
+        int src_slot;
+        bool can_return;
+        int ret = 0;
 
         mutex_lock(&drv->lock);
         if (!drv->loaded_tape) {
@@ -1306,11 +1310,6 @@ static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv,
         can_return = (src_slot >= 1 && src_slot <= ch->num_slots);
         mutex_unlock(&drv->lock);
 
-        /*
-         * Try returning tape to its source slot first.
-         * vtl_changer_move_medium re-checks drive occupancy under ch->lock,
-         * so a concurrent unload between our snapshot and this call is safe.
-         */
         if (can_return) {
             ret = vtl_changer_unload_drive_to_slot(ch, drive_idx,
                                    src_slot);
