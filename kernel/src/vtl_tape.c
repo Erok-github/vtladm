@@ -851,8 +851,8 @@ int vtl_tape_space(struct vtl_drive *drv, int code, int count)
         drv->at_filemark = (count != 0);
         break;
     case 3:
-        tape->position = tape->meta.capacity;
-        drv->at_end = true;
+        tape->position = i_size_read(file_inode(tape->file));
+        drv->at_end = (tape->position >= tape->meta.capacity);
         break;
     case 4:
         drv->at_filemark = true;
