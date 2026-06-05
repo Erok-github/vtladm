@@ -1039,6 +1039,7 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 	        kref_get(&t->ref);
         dst_drv->source_slot = vtl_elem_is_storage(ch, src) ? src : saved_source_slot;
 	        t->loaded = true;
+	        t->position = 0;
 	        dst_drv->at_filemark = false;
 	        dst_drv->at_end = false;
 	        dst_drv->at_bot = true;
