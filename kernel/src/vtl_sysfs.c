@@ -16,7 +16,7 @@ static ssize_t vtl_create_tape_store(struct kobject *kobj, struct kobj_attribute
     unsigned int density = VTL_DEFAULT_DENSITY;
     int ret;
 
-    if (vtl_module_is_unloading())
+    if (vtl_reconfig_in_progress())
         return -ENODEV;
 
     if (sscanf(buf, "%63s %llu %x", name, &size, &density) >= 1) {

@@ -374,29 +374,37 @@ static int vtl_handle_test_unit_ready(struct scsi_cmnd *cmd, struct vtl_host *vh
 
 static int vtl_handle_request_sense(struct scsi_cmnd *cmd, struct vtl_host *vhost)
 {
-    u8 *cdb = cmd->cmnd;
-    u8 *buffer;
-    int len;
-    struct vtl_sense_data *src;
+	u8 *cdb = cmd->cmnd;
+	u8 *buffer;
+	int len;
+	struct vtl_sense_data *src;
 
-    buffer = vtl_xfer_buf_alloc(252);
-    if (!buffer) {
-        vtl_scsi_staging_oom(cmd, vtl_sense_ptr(cmd, vhost));
-        return SAM_STAT_CHECK_CONDITION;
-    }
+	/* SPC-5: zero allocation length means no data transferred */
+	if (cdb[4] == 0)
+		return SAM_STAT_GOOD;
 
-    src = vtl_sense_ptr(cmd, vhost);
-    vtl_build_sense_buffer(cmd, src);
-    len = min_t(int, cdb[4] ? cdb[4] : 252, 252);
-    len = min_t(int, len, 96);
-    memcpy(buffer, cmd->sense_buffer, len);
-    if (vtl_scsi_copy_to_sg(cmd, buffer, (unsigned int)len, vtl_sense_ptr(cmd, vhost))) {
-        vtl_xfer_buf_free(buffer);
-        return SAM_STAT_CHECK_CONDITION;
-    }
-    vtl_xfer_buf_free(buffer);
+	buffer = vtl_xfer_buf_alloc(252);
+	if (!buffer) {
+		vtl_scsi_staging_oom(cmd, vtl_sense_ptr(cmd, vhost));
+		return SAM_STAT_CHECK_CONDITION;
+	}
 
-    return SAM_STAT_GOOD;
+	src = vtl_sense_ptr(cmd, vhost);
+	vtl_build_sense_buffer(cmd, src);
+	len = min_t(int, cdb[4], 252);
+	len = min_t(int, len, 96);
+	memcpy(buffer, cmd->sense_buffer, len);
+
+	/* Clear persistent sense after reporting (SPC-5 section 5.9) */
+	memset(src, 0, sizeof(*src));
+
+	if (vtl_scsi_copy_to_sg(cmd, buffer, (unsigned int)len, vtl_sense_ptr(cmd, vhost))) {
+		vtl_xfer_buf_free(buffer);
+		return SAM_STAT_CHECK_CONDITION;
+	}
+	vtl_xfer_buf_free(buffer);
+
+	return SAM_STAT_GOOD;
 }
 
 static int vtl_handle_read_block_limits(struct scsi_cmnd *cmd, struct vtl_drive *drv)
@@ -1142,15 +1150,19 @@ static int vtl_handle_read_capacity_10(struct scsi_cmnd *cmd, struct vtl_drive *
     block_len = drv->block_size ? drv->block_size : 512U;
     mutex_unlock(&drv->lock);
 
-    if (capacity == 0 || block_len == 0) {
-        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
-        vtl_build_sense_buffer(cmd, &drv->sense);
-        return SAM_STAT_CHECK_CONDITION;
-    }
+	{
+		u64 num_blocks = capacity / (u64)block_len;
 
-    max_lba = (u32)((capacity / (u64)block_len) - 1ULL);
-    if (capacity / (u64)block_len > 0xFFFFFFFFULL)
-        max_lba = 0xFFFFFFFFU;
+		if (num_blocks == 0) {
+			vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
+			vtl_build_sense_buffer(cmd, &drv->sense);
+			return SAM_STAT_CHECK_CONDITION;
+		}
+		if (num_blocks > 0xFFFFFFFFULL)
+			max_lba = 0xFFFFFFFFU;
+		else
+			max_lba = (u32)(num_blocks - 1ULL);
+	}
 
     memset(buf, 0, sizeof(buf));
     vtl_put_be32(max_lba, &buf[0]);
@@ -1186,13 +1198,16 @@ static int vtl_handle_read_capacity_16(struct scsi_cmnd *cmd, struct vtl_drive *
     block_len = drv->block_size ? drv->block_size : 512U;
     mutex_unlock(&drv->lock);
 
-    if (capacity == 0 || block_len == 0) {
-        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
-        vtl_build_sense_buffer(cmd, &drv->sense);
-        return SAM_STAT_CHECK_CONDITION;
-    }
+	{
+		u64 num_blocks = capacity / (u64)block_len;
 
-    max_lba = (capacity / (u64)block_len) - 1ULL;
+		if (num_blocks == 0) {
+			vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
+			vtl_build_sense_buffer(cmd, &drv->sense);
+			return SAM_STAT_CHECK_CONDITION;
+		}
+		max_lba = num_blocks - 1ULL;
+	}
 
     memset(buf, 0, sizeof(buf));
     vtl_put_be64(max_lba, &buf[0]);
@@ -1281,25 +1296,30 @@ static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv,
             return SAM_STAT_CHECK_CONDITION;
         }
     } else {
-        bool has_tape;
         int src_slot;
+        bool can_return;
+        int ret = 0;
 
         mutex_lock(&drv->lock);
-        has_tape = drv->loaded_tape != NULL;
+        if (!drv->loaded_tape) {
+            mutex_unlock(&drv->lock);
+            return SAM_STAT_GOOD;
+        }
         src_slot = drv->source_slot;
+        can_return = (src_slot >= 1 && src_slot <= ch->num_slots);
         mutex_unlock(&drv->lock);
 
-        if (has_tape) {
-            if (src_slot >= 1 && src_slot <= ch->num_slots) {
-                int ret;
-
-                ret = vtl_changer_unload_drive_to_slot(ch, drive_idx,
-                                       src_slot);
-                if (ret == 0)
-                    return SAM_STAT_GOOD;
-            }
-            vtl_tape_unload(drv);
+        /*
+         * Try returning tape to its source slot first.
+         * vtl_changer_move_medium re-checks drive occupancy under ch->lock,
+         * so a concurrent unload between our snapshot and this call is safe.
+         */
+        if (can_return) {
+            ret = vtl_changer_unload_drive_to_slot(ch, drive_idx,
+                                   src_slot);
         }
+        if (ret != 0)
+            vtl_tape_unload(drv);
     }
 
     return SAM_STAT_GOOD;

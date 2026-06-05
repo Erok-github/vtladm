@@ -281,7 +281,7 @@ static long vtl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	void __user *uarg = (void __user *)arg;
 
-	if (vtl_module_is_unloading())
+	if (vtl_reconfig_in_progress())
 		return -ENODEV;
 
 	switch (cmd) {

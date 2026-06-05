@@ -842,7 +842,6 @@ static int vtl_apply_instances_spec_now(const char *spec)
 				vtl_hotgeom_bringup_wait_ms);
 	}
 
-	vtl_cancel_all_host_delayed_work();
 
 	if (vtl_hotgeom_require_no_sdevs) {
 		ndev = vtl_count_scsi_devices_on_hosts();
@@ -855,6 +854,7 @@ static int vtl_apply_instances_spec_now(const char *spec)
 		}
 	}
 
+	vtl_cancel_all_host_delayed_work();
 	atomic_set(&vtl_reconfig_active, 1);
 	synchronize_rcu();
 

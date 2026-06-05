@@ -54,7 +54,7 @@ static bool vtl_tape_name_valid(const char *name)
 	if (!name || !name[0])
 		return false;
 	for (i = 0; name[i] && i < 64; i++) {
-		if (name[i] == '/' || name[i] == '\\' || name[i] == '\0')
+		if (name[i] == '/' || name[i] == '\\')
 			return false;
 		if (name[i] < ' ' || name[i] > '~')
 			return false;
@@ -257,7 +257,7 @@ int vtl_tape_create(const char *name, u64 size, u8 density, u8 flags)
     ret = vtl_tape_table_insert(tape);
     if (ret < 0) {
         filp_close(filp, NULL);
-        kfree(tape);
+        vtl_tape_put(tape);
         return ret;
     }
 
@@ -580,10 +580,15 @@ int vtl_tape_unload(struct vtl_drive *drv)
 
     drv->loaded_tape = NULL;
     tape->loaded = false;
-    vtl_tape_put(tape);
 
     mutex_unlock(&tape->lock);
     mutex_unlock(&drv->lock);
+
+	/*
+	 * Drop drive ref outside both locks to avoid self-deadlock:
+	 * vtl_tape_put may trigger vtl_tape_release which acquires tape->lock.
+	 */
+	vtl_tape_put(tape);
 
     pr_info("VTL: Unloaded tape %s from drive %d\n", tape_name, drive_id);
     return 0;

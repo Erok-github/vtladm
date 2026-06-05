@@ -433,11 +433,31 @@ fn check_transport_links(pr: &mut PatrolRunner) {
 }
 
 fn command_exists(name: &str) -> bool {
-    Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {} >/dev/null 2>&1", name))
-        .status()
-        .map(|s| s.success())
+    // Validate name contains only safe characters before PATH lookup
+    if name.is_empty() || name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-') {
+        return false;
+    }
+    std::env::var_os("PATH")
+        .and_then(|path| {
+            std::env::split_paths(&path).find_map(|dir| {
+                let full = dir.join(name);
+                if full.is_file() {
+                    std::fs::metadata(&full).ok().map(|m| {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            m.permissions().mode() & 0o111 != 0
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            true
+                        }
+                    })
+                } else {
+                    None
+                }
+            })
+        })
         .unwrap_or(false)
 }
 

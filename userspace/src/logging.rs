@@ -1,11 +1,15 @@
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
+use std::sync::Mutex;
 
 use crate::get_config;
 
 /// 日志轮转深度：`name.1` … `name.5`
 const LOG_ROTATE_DEPTH: u32 = 5;
+
+/// Global lock serialises log rotation + append to prevent interleaving / TOCTOU.
+static LOG_LOCK: Mutex<()> = Mutex::new(());
 
 fn maybe_rotate_log_file(
     log_dir: &Path,
@@ -63,6 +67,7 @@ fn try_append_log_line_in(
 }
 
 pub(crate) fn log_message(msg: &str) {
+    let _guard = LOG_LOCK.lock().unwrap();
     let config = get_config();
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
     let line = format!("[{}] {}", timestamp, msg);
@@ -74,6 +79,7 @@ pub(crate) fn log_message(msg: &str) {
 }
 
 pub(crate) fn log_error(msg: &str, error: &str) {
+    let _guard = LOG_LOCK.lock().unwrap();
     let config = get_config();
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
     let log_entry = format!("[{}] ERROR: {} - {}", timestamp, msg, error);
