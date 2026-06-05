@@ -2031,6 +2031,10 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
     else
         result = vtl_tape_scsi(cmd, vhost, lun - 1, cdb);
 
+	if (lun > 0 && result != SAM_STAT_GOOD) {
+		pr_info_ratelimited("VTL: tape LUN%u op=0x%02x result=0x%x\n",
+			lun, cdb[0], result);
+	}
 out:
     vtl_set_cmd_result(cmd, result);
     up_read(&vhost->io_sem);
@@ -2050,16 +2054,6 @@ void vtl_slave_destroy(struct scsi_device *sdev)
 
 int vtl_slave_configure(struct scsi_device *sdev)
 {
-    /*
-     * Mask the device type so st (SCSI tape ULD) does not attach.
-     * st on Kylin 4.19 offlines virtual tape drives after repeated
-     * NOT_READY responses — even on commands unrelated to TUR.
-     * Backup software accesses tapes through SG passthrough (/dev/sgN)
-     * and the changer, so st is not needed. INQUIRY still reports the
-     * correct peripheral device type (0x01) at the SCSI command level.
-     */
-    if (sdev->type == TYPE_TAPE)
-        sdev->type = TYPE_UNKNOWN;
     return 0;
 }
 
