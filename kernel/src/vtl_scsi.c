@@ -47,6 +47,9 @@
 #ifndef SERVICE_ACTION_READ_CAPACITY_16
 #define SERVICE_ACTION_READ_CAPACITY_16 0x10
 #endif
+#ifndef SYNCHRONIZE_CACHE
+#define SYNCHRONIZE_CACHE 0x35
+#endif
 
 /*
  * Compose cmd->result for SG_IO / sg3_utils: status in bits 0..7 is SAM status << 1;
@@ -1223,6 +1226,46 @@ static int vtl_handle_write_filemarks(struct scsi_cmnd *cmd, struct vtl_drive *d
     return SAM_STAT_GOOD;
 }
 
+/*
+ * SYNCHRONIZE CACHE (SSC): the st driver translates fsync/fdatasync into
+ * this CDB.  With a backing file the data is already durable after each
+ * kernel_write, but we still call vfs_fsync so that userspace sees a
+ * successful fsync(2) instead of EINVAL.
+ *
+ * kref_get pins the tape across the drv->lock release so that a concurrent
+ * UNLOAD cannot trigger vtl_tape_release -> filp_close before vfs_fsync.
+ */
+static int vtl_handle_synchronize_cache(struct scsi_cmnd *cmd, struct vtl_drive *drv)
+{
+    struct vtl_tape *tape;
+    struct file *filp;
+    int ret = 0;
+
+    mutex_lock(&drv->lock);
+    tape = drv->loaded_tape;
+    if (!tape) {
+        mutex_unlock(&drv->lock);
+        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0);
+        vtl_build_sense_buffer(cmd, &drv->sense);
+        return SAM_STAT_CHECK_CONDITION;
+    }
+    kref_get(&tape->ref);
+    filp = tape->file;
+    mutex_unlock(&drv->lock);
+
+    if (filp && !IS_ERR(filp))
+        ret = vfs_fsync(filp, 0);
+
+    vtl_tape_put(tape);
+
+    if (ret < 0) {
+        vtl_set_sense(&drv->sense, MEDIUM_ERROR, 0x03, 0);
+        vtl_build_sense_buffer(cmd, &drv->sense);
+        return SAM_STAT_CHECK_CONDITION;
+    }
+    return SAM_STAT_GOOD;
+}
+
 static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv,
                    struct vtl_changer *ch, unsigned int drive_idx)
 {
@@ -1920,6 +1963,8 @@ static int vtl_tape_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost,
         return vtl_handle_report_density_support(cmd, drv);
     case READ_CAPACITY:
         return vtl_handle_read_capacity_10(cmd, drv);
+    case SYNCHRONIZE_CACHE:
+        return vtl_handle_synchronize_cache(cmd, drv);
     case SERVICE_ACTION_IN:
         if (cdb[1] == SERVICE_ACTION_READ_CAPACITY_16)
             return vtl_handle_read_capacity_16(cmd, drv);

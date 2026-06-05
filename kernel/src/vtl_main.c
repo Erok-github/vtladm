@@ -338,16 +338,20 @@ static void vtl_unregister_all_hosts(bool release_tape_cache);
 static void vtl_destroy_all_pdevs(void);
 
 /*
- * Before unregistering any platform device: stop deferred bringup/scan on every
- * host and scsi_remove_host all. Unregistering host 0 while host 5 still scans
- * caused Kylin/slab panics in insmod/rmmod stress tests.
+ * Stop all in-flight and deferred operations on every host before teardown.
+ * Sets reconfig/rmmod flags so queuecommand + ioctl/sysfs reject new work,
+ * cancels all deferred bringup/scan work, and waits for outstanding bringup
+ * to complete.  Does NOT call scsi_remove_host or free changer/data — that
+ * is done by vtl_remove when platform_device_unregister is called.
  *
- * @for_module_exit: when true (`rmmod`), sets vtl_module_unloading and extra msleep.
+ * Unregistering host 0 while host 5 still scans caused Kylin/slab panics in
+ * insmod/rmmod stress tests, so callers must invoke this BEFORE the
+ * platform_device_unregister loop.
+ *
+ * @for_module_exit: when true (`rmmod`), sets vtl_module_unloading.
  */
 static void vtl_quiesce_all_hosts(bool for_module_exit)
 {
-    struct vtl_host *vhost;
-
     if (for_module_exit)
         atomic_set(&vtl_module_unloading, 1);
     atomic_set(&vtl_reconfig_active, 1);
@@ -355,44 +359,8 @@ static void vtl_quiesce_all_hosts(bool for_module_exit)
 
     vtl_cancel_all_host_delayed_work();
     if (vtl_wait_all_hosts_bringup_idle(vtl_compute_bringup_drain_ms()) != 0)
-        pr_warn("VTL: deferred bringup/scan still active after %u ms — extra delay before scsi_remove_host\n",
+        pr_warn("VTL: deferred bringup/scan still active after %u ms — extra delay before teardown\n",
                 vtl_compute_bringup_drain_ms());
-
-    mutex_lock(&vtl_list_lock);
-    list_for_each_entry(vhost, &vtl_host_list, list) {
-        struct vtl_changer *ch;
-
-        if (!vhost->scsi_registered || !vhost->shost)
-            continue;
-        scsi_remove_host(vhost->shost);
-        vhost->scsi_registered = false;
-        down_write(&vhost->io_sem);
-        ch = vhost->changer;
-        vhost->changer = NULL;
-        smp_wmb();
-        if (ch) {
-            vtl_changer_clear_media(ch);
-            vtl_changer_free(ch);
-        }
-        up_write(&vhost->io_sem);
-    }
-    mutex_unlock(&vtl_list_lock);
-
-    if (for_module_exit) {
-        unsigned int q;
-
-        /*
-         * Upper layers (st/ch) may still detach after scsi_remove_host; give
-         * the block/SCSI stack time before platform unregister / slab teardown.
-         */
-        msleep(2000);
-        synchronize_rcu();
-        q = (unsigned int)max_t(int, 0, vtl_rmmod_quiesce_ms);
-        if (q > 60000U)
-            q = 60000U;
-        if (q > 0)
-            msleep(q);
-    }
 }
 
 static int vtl_wait_all_hosts_bringup_idle(unsigned int max_ms)
@@ -640,6 +608,24 @@ static void vtl_unregister_all_hosts(bool release_tape_cache)
 		kfree(vtl_pdev_tab);
 		vtl_pdev_tab = NULL;
 		vtl_ninstances = 0;
+	}
+
+	/*
+	 * In the module-exit path, upper layers (st/ch) may still be detaching
+	 * after scsi_remove_host was called by each vtl_remove above.  Give the
+	 * block/SCSI stack time to quiesce before freeing tape files and
+	 * workqueues below.
+	 */
+	if (release_tape_cache) {
+		unsigned int q;
+
+		msleep(2000);
+		synchronize_rcu();
+		q = (unsigned int)max_t(int, 0, vtl_rmmod_quiesce_ms);
+		if (q > 60000U)
+			q = 60000U;
+		if (q > 0)
+			msleep(q);
 	}
 
 	if (release_tape_cache)
@@ -1370,22 +1356,11 @@ static void __exit vtl_exit(void)
     synchronize_rcu();
 
     /*
-     * Drain in-flight ioctl / sysfs operations that may have passed the
-     * vtl_module_is_unloading() gate before we set the flag.  We also
-     * cancel all pending bringup work and flush that queue so no deferred
-     * scsi_add_host / scsi_scan_host work races with the teardown below.
-     *
-     * vtl_cancel_all_host_delayed_work (called by vtl_quiesce_all_hosts
-     * inside vtl_destroy_all_pdevs) is still the authoritative sync point
-     * for host-specific works, but an extra flush here ensures nothing was
-     * queued between the early-exit gate and the cancel.
+     * Tear down SCSI hosts, changers, platform devices, and tape cache.
+     * Each host's scsi_remove_host + scsi_host_put is called exactly once
+     * by vtl_remove when platform_device_unregister fires.  The quiesce
+     * step inside vtl_unregister_all_hosts stops new operations first.
      */
-    if (vtl_bringup_wq) {
-        vtl_cancel_all_host_delayed_work();
-        flush_workqueue(vtl_bringup_wq);
-    }
-
-    /* Now it is safe to tear down SCSI hosts, changers, and platform devices. */
     vtl_destroy_all_pdevs();
     platform_driver_unregister(&vtl_platform_driver);
     if (vtl_bringup_wq) {
