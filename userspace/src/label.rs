@@ -191,26 +191,3 @@ pub fn write_tape_labels(
     ));
     Ok(())
 }
-
-/// Reset the tape file to empty capacity (factory-init state).
-/// Keeps the same code path as InitTape: truncate to capacity, zero used_bytes.
-pub fn reset_tape_to_empty(
-    image_path: &str,
-    capacity: u64,
-) -> Result<(), VtlError> {
-    let path = Path::new(image_path);
-    let file = OpenOptions::new()
-        .write(true)
-        .open(path)
-        .map_err(|e| VtlError::IoError(std::io::Error::new(
-            e.kind(),
-            format!("打开磁带镜像 {}: {}", image_path, e),
-        )))?;
-
-    file.set_len(capacity)
-        .map_err(|e| VtlError::IoError(e))?;
-    file.sync_all()
-        .map_err(VtlError::from)?;
-    log_message(&format!("磁带已重置为空 (容量 {} 字节)", capacity));
-    Ok(())
-}
