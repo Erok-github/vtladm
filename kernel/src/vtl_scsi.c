@@ -355,7 +355,6 @@ static int vtl_handle_test_unit_ready(struct scsi_cmnd *cmd, struct vtl_host *vh
 {
     unsigned int lun = cmd->device->lun;
     struct vtl_changer *ch = vhost->changer;
-    struct vtl_drive *drv;
 
     if (lun == 0)
         return SAM_STAT_GOOD;
@@ -363,12 +362,16 @@ static int vtl_handle_test_unit_ready(struct scsi_cmnd *cmd, struct vtl_host *vh
     if (lun < 1 || lun > (unsigned int)ch->num_drives)
         return vtl_cmd_lun_not_supported(cmd, ch);
 
-    drv = &ch->drives[lun - 1];
-    if (!drv->loaded_tape) {
-        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0);
-        vtl_build_sense_buffer(cmd, &drv->sense);
-        return SAM_STAT_CHECK_CONDITION;
-    }
+    /*
+     * Always report ready for virtual tape drives.
+     * Returning NOT_READY when no tape is loaded is correct per SSC,
+     * but Kylin 4.19's st driver offlines the device after repeated
+     * NOT_READY responses ("Device offlined - not ready after error
+     * recovery"), permanently blocking all SG_IO passthrough (ENXIO).
+     *
+     * READ/WRITE handlers still enforce loaded_tape checks, so backup
+     * apps get proper errors when accessing an empty drive.
+     */
     return SAM_STAT_GOOD;
 }
 
