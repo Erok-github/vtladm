@@ -2026,15 +2026,15 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
         goto out;
     }
 
-    if (lun == 0)
+    if (lun == 0) {
         result = vtl_changer_scsi(cmd, vhost, cdb);
-    else
+    } else {
         result = vtl_tape_scsi(cmd, vhost, lun - 1, cdb);
-
-	if (lun > 0 && result != SAM_STAT_GOOD) {
-		pr_info_ratelimited("VTL: tape LUN%u op=0x%02x result=0x%x\n",
-			lun, cdb[0], result);
-	}
+        if (result != SAM_STAT_GOOD) {
+            pr_info_ratelimited("VTL: tape LUN%u op=0x%02x result=0x%x\n",
+                lun, cdb[0], result);
+        }
+    }
 out:
     vtl_set_cmd_result(cmd, result);
     up_read(&vhost->io_sem);
