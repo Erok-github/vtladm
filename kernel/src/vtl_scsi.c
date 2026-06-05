@@ -1653,29 +1653,21 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
     u8 *cdb = cmd->cmnd;
     u8 *buf;
     u16 alloc;
-    u8 svc = (cdb[1] & 0x1f);
     bool loaded;
     bool at_bot = false;
     bool at_end = false;
     bool at_filemark = false;
     loff_t position = 0;
 
-    if (svc != 0x00 && svc != 0x01) {
-        vtl_set_sense(&drv->sense, ILLEGAL_REQUEST, 0x24, 0);
-        vtl_build_sense_buffer(cmd, &drv->sense);
-        return SAM_STAT_CHECK_CONDITION;
-    }
 
     if (cmd->cmd_len >= 10)
         alloc = (cdb[7] << 8) | cdb[8];
     else
         alloc = cdb[4];
 
-    if (alloc < 20) {
-        vtl_set_sense(&drv->sense, ILLEGAL_REQUEST, 0x24, 0);
-        vtl_build_sense_buffer(cmd, &drv->sense);
-        return SAM_STAT_CHECK_CONDITION;
-    }
+    /* accept any alloc; floor to 20 (minimum useful response length) */
+    if (alloc == 0)
+        alloc = 20;
 
     buf = vtl_xfer_buf_alloc(20);
     if (!buf) {
@@ -1709,7 +1701,7 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
         buf[1] |= 0x10;
     }
 
-    if (vtl_scsi_copy_to_sg(cmd, buf, 20, &drv->sense)) {
+    if (vtl_scsi_copy_to_sg(cmd, buf, min_t(unsigned int, alloc, 20), &drv->sense)) {
         vtl_xfer_buf_free(buf);
         return SAM_STAT_CHECK_CONDITION;
     }
