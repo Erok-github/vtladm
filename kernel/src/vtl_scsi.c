@@ -1647,12 +1647,13 @@ static int vtl_handle_log_sense(struct scsi_cmnd *cmd, struct vtl_drive *drv)
 }
 
 
-/* SSC READ POSITION — long form service action 0x00 or 0x01 */
+/* SSC READ POSITION — short/long form, tolerant of non-standard CDB params */
 static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv)
 {
     u8 *cdb = cmd->cmnd;
     u8 *buf;
     u16 alloc;
+    u8 svc;
     bool loaded;
     bool at_bot = false;
     bool at_end = false;
@@ -1665,7 +1666,11 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
     else
         alloc = cdb[4];
 
-    /* accept any alloc; floor to 20 (minimum useful response length) */
+    svc = (cdb[1] & 0x1f);
+    if (svc != 0x00)
+        pr_info_ratelimited("VTL: READ POSITION svc=0x%02x (using short-form 20B response)\n", svc);
+
+    /* accept any alloc; floor to 20 below */
     if (alloc == 0)
         alloc = 20;
 
