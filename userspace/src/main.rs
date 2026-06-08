@@ -4409,11 +4409,11 @@ pub(crate) fn label_tape_in_library(
 
     let conn = init_db()?;
     let library_id = resolve_library_id(&conn, library)?;
-    let (tape_id, image_path, barcode, slot, shelf_id): (i64, String, String, Option<i32>, Option<i64>) = conn
+    let (tape_id, image_path, barcode, slot, shelf_id, density_code): (i64, String, String, Option<i32>, Option<i64>, u8) = conn
         .query_row(
-            "SELECT id, image_path, COALESCE(barcode, ''), slot, shelf_id FROM tapes WHERE library_id = ?1 AND name = ?2",
+            "SELECT id, image_path, COALESCE(barcode, ''), slot, shelf_id, COALESCE(density_code, 64) FROM tapes WHERE library_id = ?1 AND name = ?2",
             params![library_id, name],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .map_err(|_| VtlError::TapeNotFound(name.to_string()))?;
 
@@ -4455,7 +4455,7 @@ pub(crate) fn label_tape_in_library(
         name, library, fmt.name(), vs,
     ));
 
-    label::write_tape_labels(&image_path, fmt, &vs, owner, block_size)?;
+    label::write_tape_labels(&image_path, fmt, &vs, owner, block_size, density_code)?;
 
     // Update the database: mark tape as having content
     let path = std::path::Path::new(&image_path);

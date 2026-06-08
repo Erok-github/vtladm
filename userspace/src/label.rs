@@ -96,7 +96,7 @@ fn build_hdr1(file_id: &str) -> [u8; LABEL_LEN] {
 
 /// Build an ANSI/IBM HDR2 label (80 bytes).
 /// HDR2: second file header label.
-fn build_hdr2(block_size: u32) -> [u8; LABEL_LEN] {
+fn build_hdr2(block_size: u32, density_code: u8) -> [u8; LABEL_LEN] {
     let mut buf = [b' '; LABEL_LEN];
     buf[0..4].copy_from_slice(b"HDR2");
     buf[4] = b'1'; // label number
@@ -112,7 +112,9 @@ fn build_hdr2(block_size: u32) -> [u8; LABEL_LEN] {
     buf[11..16].copy_from_slice(bs.as_bytes());
     // bytes 16-31: reserved
     // bytes 32-34: tape density (0x40 = 64 decimal)
-    buf[32..35].copy_from_slice(b"064"); // LTO
+    // tape density (3-digit decimal, e.g. 0x40=64 → "064")
+    let ds = format!("{:03}", density_code);
+    buf[32..35].copy_from_slice(ds.as_bytes());
     // bytes 37-42: reserved/offset
     // bytes 43-79: reserved
     buf
@@ -120,14 +122,14 @@ fn build_hdr2(block_size: u32) -> [u8; LABEL_LEN] {
 
 /// Build a complete ANSI/IBM label set: VOL1 + HDR1 + HDR2.
 /// Returns a Vec of blocks (each 80 bytes).
-fn build_label_set(format: LabelFormat, volser: &str, owner: &str, block_size: u32) -> Vec<[u8; LABEL_LEN]> {
+fn build_label_set(format: LabelFormat, volser: &str, owner: &str, block_size: u32, density_code: u8) -> Vec<[u8; LABEL_LEN]> {
     let vol1 = build_vol1(volser, owner);
     let file_id = match format {
         LabelFormat::Ansi => "VTLADM.TAPE",
         LabelFormat::Ibm => "VTLADM.TAPE",
     };
     let hdr1 = build_hdr1(file_id);
-    let hdr2 = build_hdr2(block_size);
+    let hdr2 = build_hdr2(block_size, density_code);
     vec![vol1, hdr1, hdr2]
 }
 
@@ -158,6 +160,7 @@ pub fn write_tape_labels(
     volser: &str,
     owner: &str,
     block_size: u32,
+    density_code: u8,
 ) -> Result<(), VtlError> {
     let path = Path::new(image_path);
     let mut file = OpenOptions::new()
@@ -171,7 +174,7 @@ pub fn write_tape_labels(
     // Truncate: clear existing data, then write labels at offset 0.
     file.set_len(0).map_err(|e| VtlError::IoError(e))?;
 
-    let blocks = build_label_set(format, volser, owner, block_size);
+    let blocks = build_label_set(format, volser, owner, block_size, density_code);
     for (i, block) in blocks.iter().enumerate() {
         write_label_block(&mut file, block)?;
         log_message(&format!(

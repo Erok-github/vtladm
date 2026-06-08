@@ -14,10 +14,7 @@ static void vtl_tape_release(struct kref *ref)
 	struct vtl_tape *t = container_of(ref, struct vtl_tape, ref);
 
 	mutex_lock(&t->lock);
-	vfree(t->filemark_offsets);
-	t->meta.filemarks = NULL;
-	t->filemark_offsets = NULL;
-	t->meta.num_filemarks = 0;
+	vtl_tape_free_metadata(t);
 	if (t->file && !IS_ERR(t->file)) {
 		filp_close(t->file, NULL);
 		t->file = NULL;
@@ -244,11 +241,9 @@ int vtl_tape_create(const char *name, u64 size, u8 density, u8 flags)
     tape->meta.capacity = size;
     tape->meta.used = 0;
     tape->meta.block_size = VTL_DEFAULT_BLOCK_SIZE;
-    tape->meta.num_filemarks = 0;
     tape->meta.created = ktime_get_real_seconds();
     tape->meta.accessed = tape->meta.created;
     tape->meta.num_snapshots = 0;
-    tape->meta.filemarks = NULL;
     tape->meta.density = density;
     tape->meta.meta_flags = flags;
     kref_init(&tape->ref);
@@ -521,9 +516,15 @@ void vtl_tapes_release_all(void)
 
 
 /* Build sidecar path by appending "meta" to the tape file path. */
+/* Build sidecar path by replacing ".vtltape" suffix with ".vtlfm". */
 static void vtl_tape_meta_path(const char *tape_path, char *meta_path, size_t sz)
 {
-    snprintf(meta_path, sz, "%smeta", tape_path);
+	size_t plen;
+
+	strlcpy(meta_path, tape_path, sz);
+	plen = strnlen(meta_path, sz);
+	if (plen > 8 && !strcmp(meta_path + plen - 8, ".vtltape"))
+		snprintf(meta_path + plen - 8, sz - (plen - 8), ".vtlfm");
 }
 
 /* Load filemark offsets from sidecar.  On success *out_loaded is true.
@@ -558,7 +559,7 @@ int vtl_tape_load_metadata(struct vtl_tape *tape, bool *out_loaded)
     if (n == 0)
         goto out_close;
     if (n > VTL_MAX_FILEMARKS) {
-        pr_warn("VTL: %s meta filemarks %u exceeds limit %u — ignoring\n",
+        pr_warn("VTL: %s filemarks %u exceeds limit %u — ignoring\n",
             tape->name, n, VTL_MAX_FILEMARKS);
         goto out_close;
     }

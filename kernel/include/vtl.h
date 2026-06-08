@@ -169,10 +169,6 @@ struct vtl_sense_data {
     u8 ascq;
 };
 
-struct vtl_filemark {
-    loff_t position;
-    u32 index;
-};
 
 struct vtl_tape_metadata {
     char serial[32];
@@ -180,8 +176,6 @@ struct vtl_tape_metadata {
     u64 capacity;
     u64 used;
     u32 block_size;
-    u32 num_filemarks;
-    struct vtl_filemark *filemarks;
     time64_t created;
     time64_t accessed;
     u32 num_snapshots;
