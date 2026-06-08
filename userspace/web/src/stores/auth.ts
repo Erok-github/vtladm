@@ -37,12 +37,13 @@ export const useAuthStore = defineStore('auth', () => {
     return false;
   }
 
-  async function getCaptcha() {
+  async function getCaptcha(clearError = true) {
     try {
       const data = await fetchCaptcha();
       captchaId.value = data.captcha_id;
       captchaQuestion.value = data.question;
-      loginError.value = null;
+      if (clearError)
+        loginError.value = null;
     } catch {
       loginError.value = '无法获取验证码，请检查服务是否正常';
     }
@@ -61,7 +62,7 @@ export const useAuthStore = defineStore('auth', () => {
       }
     } catch (e: unknown) {
       loginError.value = e instanceof Error ? e.message : '登录失败';
-      await getCaptcha(); // refresh captcha on failure
+      await getCaptcha(false); // refresh captcha without clearing error
     }
     return false;
   }
