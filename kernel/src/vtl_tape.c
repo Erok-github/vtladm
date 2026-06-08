@@ -718,17 +718,18 @@ int vtl_tape_load(struct vtl_drive *drv, struct vtl_tape *tape)
         if (drv->compression_algorithm == 0)
             drv->compression_algorithm = VTL_COMP_LZO;
 
-    /* Restore filemark offsets from sidecar */
-    {
-        bool fm_loaded;
-        vtl_tape_load_metadata(tape, &fm_loaded);
-    }
     } else {
         drv->compression_enabled = false;
         drv->compression_algorithm = VTL_COMP_NONE;
     }
 
     tape->meta.accessed = ktime_get_real_seconds();
+
+	/* Restore filemark offsets from sidecar (unconditional) */
+	{
+		bool fm_loaded;
+		vtl_tape_load_metadata(tape, &fm_loaded);
+	}
     tape->meta.mount_count++;
 
     mutex_unlock(&tape->lock);
@@ -1055,7 +1056,7 @@ int vtl_tape_space(struct vtl_drive *drv, int code, int count)
                         if (idx > 0)
                             tape->position = tape->filemark_offsets[idx];
                         else
-                            tape->position = 0;
+                            tape->position = tape->filemark_offsets[0];
                         break;
                     }
                 }
@@ -1286,14 +1287,15 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 	            if (dst_drv->compression_algorithm == 0)
 	                dst_drv->compression_algorithm = VTL_COMP_LZO;
 
-    /* Restore filemark offsets from sidecar */
-    {
-        bool fm_loaded;
-        vtl_tape_load_metadata(t, &fm_loaded);
-    }
 	        } else {
 	            dst_drv->compression_enabled = false;
 	            dst_drv->compression_algorithm = VTL_COMP_NONE;
+
+	/* Restore filemark offsets from sidecar (unconditional) */
+	{
+		bool fm_loaded;
+		vtl_tape_load_metadata(t, &fm_loaded);
+	}
 	        }
 	        mutex_unlock(&dst_drv->lock);
     } else if (vtl_elem_is_ie(ch, dst)) {

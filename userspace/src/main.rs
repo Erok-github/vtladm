@@ -3504,7 +3504,7 @@ fn validate_tape_name(name: &str) -> Result<(), VtlError> {
             "Tape name too long (max 255 characters)".to_string(),
         ));
     }
-    let invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'];
+    let invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0', '@'];
     for c in name.chars() {
         if invalid_chars.contains(&c) || c.is_control() {
             return Err(VtlError::InvalidTapeName(format!(
@@ -3652,12 +3652,22 @@ fn create_tape(name: &str, size: u64, shelf_name: Option<&str>, density: u8,
             zpool,
         ],
     ) {
-        let _ = fs::remove_file(&image_path);
+        if backend == "zvol" {
+            let pool = zpool.as_deref().unwrap_or("unknown");
+            let _ = zvol::zvol_destroy(pool, &lib_name, name);
+        } else {
+            let _ = fs::remove_file(&image_path);
+        }
         return Err(VtlError::from(e));
     }
 
     if let Err(e) = tx.commit() {
-        let _ = fs::remove_file(&image_path);
+        if backend == "zvol" {
+            let pool = zpool.as_deref().unwrap_or("unknown");
+            let _ = zvol::zvol_destroy(pool, &lib_name, name);
+        } else {
+            let _ = fs::remove_file(&image_path);
+        }
         return Err(VtlError::from(e));
     }
 
@@ -4282,7 +4292,10 @@ pub(crate) fn delete_tape_in_library(
         let pool = zpool.as_deref().unwrap_or("unknown");
         log_message(&format!("Destroying zvol: pool={} tape={}", pool, name));
         if let Err(e) = zvol::zvol_destroy(pool, library, name) {
-            log_error("delete_tape_in_library", &format!("zvol destroy failed: {}", e));
+            return Err(VtlError::InvalidParameter(format!(
+                "无法删除 zvol {}/vtladm/{}/{}: {}（磁带记录未删除）",
+                pool, library, name, e
+            )));
         }
     }
     let deleted_path =
@@ -4478,11 +4491,11 @@ pub(crate) fn label_tape_in_library(
 
     let conn = init_db()?;
     let library_id = resolve_library_id(&conn, library)?;
-    let (tape_id, image_path, barcode, slot, shelf_id, density_code): (i64, String, String, Option<i32>, Option<i64>, u8) = conn
+    let (tape_id, image_path, barcode, slot, shelf_id, density_code, backend_type): (i64, String, String, Option<i32>, Option<i64>, u8, String) = conn
         .query_row(
-            "SELECT id, image_path, COALESCE(barcode, ''), slot, shelf_id, COALESCE(density_code, 64) FROM tapes WHERE library_id = ?1 AND name = ?2",
+            "SELECT id, image_path, COALESCE(barcode, ''), slot, shelf_id, COALESCE(density_code, 64), backend_type FROM tapes WHERE library_id = ?1 AND name = ?2",
             params![library_id, name],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
         )
         .map_err(|_| VtlError::TapeNotFound(name.to_string()))?;
 
@@ -4526,10 +4539,18 @@ pub(crate) fn label_tape_in_library(
 
     label::write_tape_labels(&image_path, fmt, &vs, owner, block_size, density_code)?;
 
-    // Update the database: mark tape as having content
+    // Update the database: mark tape as having content.
+    // Block devices (zvol) report st_size=0 via stat, so use label payload size instead.
     let path = std::path::Path::new(&image_path);
-    if let Ok(meta) = std::fs::metadata(path) {
-        let new_used = meta.len() as i64;
+    let new_used: i64 = if backend_type == "zvol" {
+        // 3 label blocks * (16-byte header + 80-byte data) = 288 bytes
+        288
+    } else if let Ok(meta) = std::fs::metadata(path) {
+        meta.len() as i64
+    } else {
+        0
+    };
+    if new_used > 0 {
         conn.execute(
             "UPDATE tapes SET used_bytes = ?1 WHERE id = ?2",
             params![new_used, tape_id],
