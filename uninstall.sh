@@ -103,6 +103,38 @@ if [ -f "$PREFIX/scripts/vtl-kernel-safe.sh" ]; then
   else
     echo "vtl: not loaded"
   fi
+
+# --- zvol cleanup: destroy ZFS datasets created by vtladm ---
+_vtl_zvol_cleanup() {
+  if [ -x "$PREFIX/bin/vtladm" ] && [ -f "$PREFIX/var/vtl.db" ] && command -v zfs >/dev/null 2>&1; then
+    echo ">> zvol cleanup: checking for ZFS datasets"
+    _zvols=$("$PREFIX/bin/vtladm" list-zvols 2>/dev/null || true)
+    if [ -n "$_zvols" ]; then
+      echo "$_zvols" | while IFS='|' read -r _pool _lib _name; do
+        _zv="$_pool/vtladm/$_lib/$_name"
+        echo "  destroying zvol: $_zv"
+        zfs destroy -f "$_zv" 2>/dev/null || echo "WARN: failed to destroy zvol $_zv" >&2
+        # destroy snapshots too
+        zfs list -H -o name -t snapshot -r "$_zv" 2>/dev/null | while read -r _snap; do
+          zfs destroy "$_snap" 2>/dev/null || true
+        done
+      done
+      # also clean parent datasets (recursive if empty)
+      _parents=$(echo "$_zvols" | while IFS='|' read -r _pool _lib _name; do echo "$_pool/vtladm/$_lib"; done | sort -u)
+      for _pd in $_parents; do
+        zfs destroy "$_pd" 2>/dev/null || true
+      done
+      # clean the vtladm root dataset too
+      echo "$_zvols" | while IFS='|' read -r _pool _lib _name; do echo "$_pool/vtladm"; done | sort -u | while read -r _root; do
+        zfs destroy "$_root" 2>/dev/null || true
+      done
+    fi
+  fi
+}
+
+if [ "$PURGE_DATA" -eq 1 ]; then
+  _vtl_zvol_cleanup
+fi
 elif [ -x "$PREFIX/sbin/vtl-kernelctl" ]; then
   if ! "$PREFIX/sbin/vtl-kernelctl" stop; then
     _vtl_uninstall_abort "vtl-kernelctl stop failed"

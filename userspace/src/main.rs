@@ -3092,6 +3092,8 @@ enum Commands {
         tape: String,
         snapshot: String,
     },
+    /// 列出所有 zvol 磁带（供 uninstall.sh 清理使用，格式: pool|library|name）
+    ListZvols,
     Import {
         path: String,
         slot: String,
@@ -6404,6 +6406,22 @@ fn main() -> Result<(), VtlError> {
         Commands::ListSnapshots { tape } => list_snapshots_tape(tape)?,
         Commands::Rollback { tape, snapshot } => rollback_tape(tape, snapshot)?,
         Commands::DeleteSnapshot { tape, snapshot } => delete_snapshot_tape(tape, snapshot)?,
+        Commands::ListZvols => {
+            let conn = init_db()?;
+            let mut stmt = conn.prepare(
+                "SELECT zpool, library.name, tapes.name FROM tapes JOIN vtl_libraries library ON tapes.library_id = library.id WHERE backend_type = 'zvol' AND zpool IS NOT NULL"
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let pool: String = row.get(0)?;
+                let lib: String = row.get(1)?;
+                let name: String = row.get(2)?;
+                Ok((pool, lib, name))
+            })?;
+            for row in rows {
+                let (pool, lib, name) = row?;
+                println!("{}|{}|{}", pool, lib, name);
+            }
+        }
         Commands::Import { path, slot } => {
             let slot_num = parse_slot(slot)
                 .ok_or_else(|| VtlError::InvalidParameter(format!("Invalid slot: {}", slot)))?;
