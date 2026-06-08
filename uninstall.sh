@@ -131,8 +131,6 @@ if [ -f "$PREFIX/scripts/vtl-kernel-safe.sh" ]; then
     echo "vtl: not loaded"
   fi
 
-# --- zvol cleanup: destroy ZFS datasets created by vtladm ---
-fi
 elif [ -x "$PREFIX/sbin/vtl-kernelctl" ]; then
   if ! "$PREFIX/sbin/vtl-kernelctl" stop; then
     _vtl_uninstall_abort "vtl-kernelctl stop failed"
