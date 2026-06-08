@@ -1148,8 +1148,6 @@ static int vtl_handle_read_capacity_10(struct scsi_cmnd *cmd, struct vtl_drive *
     block_len = drv->block_size ? drv->block_size : 512U;
     mutex_unlock(&drv->lock);
 
-	{
-		u64 num_blocks = capacity / (u64)block_len;
     {
         u64 num_blocks = capacity / (u64)block_len;
 
@@ -1698,6 +1696,22 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
         if (at_filemark)
             buf[1] |= 0x20;
         vtl_put_be64((u64)position, &buf[4]);
+
+        /* Compute file number: count filemarks before current position */
+        {
+            struct vtl_tape *tp = drv->loaded_tape;
+            u32 lo = 0, hi = tp->num_filemarks;
+            /* Binary search for first filemark > position */
+            while (lo < hi) {
+                u32 mid = lo + (hi - lo) / 2;
+                if (tp->filemark_offsets[mid] <= position)
+                    lo = mid + 1;
+                else
+                    hi = mid;
+            }
+            /* lo = number of filemarks before or at position = current file number */
+            vtl_put_be32(lo, &buf[12]);
+        }
     } else {
         buf[1] |= 0x10;
     }

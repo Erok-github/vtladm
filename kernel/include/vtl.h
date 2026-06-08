@@ -125,6 +125,21 @@ struct vtl_block_header {
 	u8     reserved[3];
 } __packed;
 
+/*
+ * Filemark sidecar (.vtlmeta): separate from the tape-data format.
+ */
+#define VTL_FM_MAGIC   0x564C5446  /* "VTLF" */
+#define VTL_FM_VERSION 1
+struct vtl_fm_header {
+	__be32 magic;
+	__be32 version;
+	__be32 num_filemarks;
+	__be32 reserved;
+	/* Followed by: __be64 filemark_offsets[num_filemarks] */
+} __packed;
+
+#define VTL_MAX_FILEMARKS (4 * 1024 * 1024)
+
 #define VTL_MIN_TAPE_SIZE (10 * 1024 * 1024)
 #define VTL_MAX_TAPE_SIZE (10ULL * 1024 * 1024 * 1024 * 1024)
 
@@ -186,6 +201,13 @@ struct vtl_tape {
     loff_t position;
     bool loaded;
     bool write_protected;
+
+    /* Filemark offset persistence (.vtlmeta sidecar) */
+    u64  *filemark_offsets;   /* byte offsets, dynamically allocated */
+    u32   num_filemarks;
+    u32   filemark_capacity;
+    bool  meta_dirty;
+
     struct mutex lock;
     struct kref ref;
 };
@@ -331,6 +353,11 @@ void vtl_changer_clear_media(struct vtl_changer *ch);
 void vtl_tapes_release_all(void);
 /** Drop one reference; frees tape when last ref (module unload / table remove). */
 void vtl_tape_put(struct vtl_tape *tape);
+
+/* Filemark metadata sidecar (.vtlmeta) */
+int  vtl_tape_load_metadata(struct vtl_tape *tape, bool *was_loaded);
+int  vtl_tape_save_metadata(struct vtl_tape *tape);
+void vtl_tape_free_metadata(struct vtl_tape *tape);
 
 int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst);
 /** Remove medium from changer element without placing elsewhere (shelf / off-line). */

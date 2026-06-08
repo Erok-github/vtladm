@@ -234,6 +234,7 @@ int vtl_tape_create(const char *name, u64 size, u8 density, u8 flags)
     tape->file = filp;
     tape->position = 0;
     tape->loaded = false;
+
     tape->write_protected = false;
     mutex_init(&tape->lock);
 
@@ -321,6 +322,7 @@ struct vtl_tape *vtl_tape_open_existing(const char *name)
     tape->file = filp;
     tape->position = 0;
     tape->loaded = false;
+
     tape->write_protected = false;
     mutex_init(&tape->lock);
     memset(&tape->meta, 0, sizeof(tape->meta));
@@ -516,6 +518,167 @@ void vtl_tapes_release_all(void)
     mutex_unlock(&vtl_tape_lock);
 }
 
+
+/* Build sidecar path by appending "meta" to the tape file path. */
+static void vtl_tape_meta_path(const char *tape_path, char *meta_path, size_t sz)
+{
+    snprintf(meta_path, sz, "%smeta", tape_path);
+}
+
+/* Load filemark offsets from sidecar.  On success *out_loaded is true.
+ * If the sidecar doesn't exist the array is left empty (no error). */
+int vtl_tape_load_metadata(struct vtl_tape *tape, bool *out_loaded)
+{
+    char meta_path[272];
+    struct file *f;
+    struct vtl_fm_header hdr;
+    loff_t pos = 0;
+    ssize_t ret;
+    u32 i, n;
+    u64 *arr = NULL;
+
+    *out_loaded = false;
+
+    vtl_tape_meta_path(tape->path, meta_path, sizeof(meta_path));
+    f = filp_open(meta_path, O_RDONLY, 0);
+    if (IS_ERR(f)) {
+        /* No sidecar yet — not an error */
+        return 0;
+    }
+
+    ret = kernel_read(f, &hdr, sizeof(hdr), &pos);
+    if (ret < (ssize_t)sizeof(hdr))
+        goto out_close;
+    if (be32_to_cpu(hdr.magic) != VTL_FM_MAGIC ||
+        be32_to_cpu(hdr.version) != VTL_FM_VERSION)
+        goto out_close;
+
+    n = be32_to_cpu(hdr.num_filemarks);
+    if (n == 0)
+        goto out_close;
+    if (n > VTL_MAX_FILEMARKS) {
+        pr_warn("VTL: %s meta filemarks %u exceeds limit %u — ignoring\n",
+            tape->name, n, VTL_MAX_FILEMARKS);
+        goto out_close;
+    }
+
+    arr = vmalloc(n * sizeof(u64));
+    if (!arr)
+        goto out_close;
+
+    pos = sizeof(hdr);
+    for (i = 0; i < n; i++) {
+        __be64 val;
+        ret = kernel_read(f, &val, sizeof(val), &pos);
+        if (ret < (ssize_t)sizeof(val)) {
+            vfree(arr);
+            goto out_close;
+        }
+        arr[i] = be64_to_cpu(val);
+    }
+
+    tape->filemark_offsets = arr;
+    tape->num_filemarks = n;
+    tape->filemark_capacity = n;
+    tape->meta_dirty = false;
+    *out_loaded = true;
+
+out_close:
+    filp_close(f, NULL);
+    return 0;
+}
+
+/* Persist filemark offsets to sidecar. */
+int vtl_tape_save_metadata(struct vtl_tape *tape)
+{
+    char meta_path[272];
+    struct file *f;
+    struct vtl_fm_header hdr;
+    loff_t pos = 0;
+    ssize_t ret;
+    u32 i;
+    int err = 0;
+
+    if (!tape->meta_dirty)
+        return 0;
+
+    vtl_tape_meta_path(tape->path, meta_path, sizeof(meta_path));
+    f = filp_open(meta_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (IS_ERR(f))
+        return PTR_ERR(f);
+
+    hdr.magic = cpu_to_be32(VTL_FM_MAGIC);
+    hdr.version = cpu_to_be32(VTL_FM_VERSION);
+    hdr.num_filemarks = cpu_to_be32(tape->num_filemarks);
+    hdr.reserved = 0;
+
+    ret = kernel_write(f, &hdr, sizeof(hdr), &pos);
+    if (ret < (ssize_t)sizeof(hdr)) {
+        err = -EIO;
+        goto out_close;
+    }
+
+    for (i = 0; i < tape->num_filemarks; i++) {
+        __be64 val = cpu_to_be64(tape->filemark_offsets[i]);
+        ret = kernel_write(f, &val, sizeof(val), &pos);
+        if (ret < (ssize_t)sizeof(val)) {
+            err = -EIO;
+            goto out_close;
+        }
+    }
+
+    ret = vfs_fsync(f, 0);
+    if (ret < 0 && err == 0)
+        err = ret;
+    if (err == 0)
+        tape->meta_dirty = false;
+
+out_close:
+    filp_close(f, NULL);
+    return err;
+}
+
+/* Release filemark offset array. */
+void vtl_tape_free_metadata(struct vtl_tape *tape)
+{
+    if (tape->filemark_offsets) {
+        vfree(tape->filemark_offsets);
+        tape->filemark_offsets = NULL;
+    }
+    tape->num_filemarks = 0;
+    tape->filemark_capacity = 0;
+    tape->meta_dirty = false;
+}
+
+/* Internal: append a filemark at the current position. */
+static int vtl_tape_append_filemark(struct vtl_tape *tape)
+{
+    if (tape->num_filemarks >= VTL_MAX_FILEMARKS)
+        return -ENOSPC;
+
+    if (tape->num_filemarks >= tape->filemark_capacity) {
+        u32 new_cap = tape->filemark_capacity ? tape->filemark_capacity * 2 : 256;
+        u64 *new_arr;
+
+        if (new_cap > VTL_MAX_FILEMARKS)
+            new_cap = VTL_MAX_FILEMARKS;
+        new_arr = vmalloc(new_cap * sizeof(u64));
+        if (!new_arr)
+            return -ENOMEM;
+        if (tape->filemark_offsets) {
+            memcpy(new_arr, tape->filemark_offsets,
+                   tape->num_filemarks * sizeof(u64));
+            vfree(tape->filemark_offsets);
+        }
+        tape->filemark_offsets = new_arr;
+        tape->filemark_capacity = new_cap;
+    }
+
+    tape->filemark_offsets[tape->num_filemarks] = tape->position;
+    tape->num_filemarks++;
+    tape->meta_dirty = true;
+    return 0;
+}
 int vtl_tape_load(struct vtl_drive *drv, struct vtl_tape *tape)
 {
     mutex_lock(&drv->lock);
@@ -545,6 +708,12 @@ int vtl_tape_load(struct vtl_drive *drv, struct vtl_tape *tape)
              VTL_META_FLAG_ALGO_SHIFT;
         if (drv->compression_algorithm == 0)
             drv->compression_algorithm = VTL_COMP_LZO;
+
+    /* Restore filemark offsets from sidecar */
+    {
+        bool fm_loaded;
+        vtl_tape_load_metadata(tape, &fm_loaded);
+    }
     } else {
         drv->compression_enabled = false;
         drv->compression_algorithm = VTL_COMP_NONE;
@@ -580,6 +749,10 @@ int vtl_tape_unload(struct vtl_drive *drv)
 
     drv->loaded_tape = NULL;
     tape->loaded = false;
+
+    /* Persist filemark metadata before unloading */
+    if (vtl_tape_save_metadata(tape) < 0)
+        pr_warn("VTL: failed to save metadata for %s\n", tape->name);
 
     mutex_unlock(&tape->lock);
     mutex_unlock(&drv->lock);
@@ -675,7 +848,6 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
             drv->at_bot = (pos == 0);
             drv->at_end = (pos >= tape->meta.capacity);
 
-                        (long long)(pos - block_total), uncomp_sz, (long long)pos);
             tape->meta.accessed = ktime_get_real_seconds();
             drv->comp_bytes_read += uncomp_sz;
             tape->meta.log_bytes_read += (u64)uncomp_sz;
@@ -843,12 +1015,49 @@ int vtl_tape_space(struct vtl_drive *drv, int code, int count)
         new_pos = tape->position + delta;
         tape->position = new_pos;
         break;
-    case 1:
+    case 1: {
+        /* Forward over filemarks: skip past the N-th filemark after current pos */
+        u32 i;
+        int found = 0;
+
+        for (i = 0; i < tape->num_filemarks; i++) {
+            if (tape->filemark_offsets[i] >= tape->position) {
+                if (++found == count) {
+                    tape->position = tape->filemark_offsets[i];
+                    break;
+                }
+            }
+        }
+        if (found < count)
+            tape->position = tape->meta.capacity;
         drv->at_filemark = (count != 0);
         break;
-    case 2:
+    }
+    case 2: {
+        /* Backward over filemarks: move before the N-th filemark before current pos */
+        int remaining = (count < 0) ? -count : count;
+        int matched = 0;
+
+        if (tape->num_filemarks > 0) {
+            s32 idx = (s32)tape->num_filemarks - 1;
+            while (idx >= 0) {
+                if (tape->filemark_offsets[idx] < tape->position) {
+                    if (++matched == remaining) {
+                        if (idx > 0)
+                            tape->position = tape->filemark_offsets[idx - 1];
+                        else
+                            tape->position = 0;
+                        break;
+                    }
+                }
+                idx--;
+            }
+            if (matched < remaining)
+                tape->position = 0;
+        }
         drv->at_filemark = (count != 0);
         break;
+    }
     case 3:
         tape->position = i_size_read(file_inode(tape->file));
         drv->at_end = (tape->position >= tape->meta.capacity);
@@ -886,6 +1095,7 @@ int vtl_tape_space(struct vtl_drive *drv, int code, int count)
 int vtl_tape_write_filemarks(struct vtl_drive *drv, int count)
 {
     struct vtl_tape *tape;
+    int i, ret = 0;
 
     mutex_lock(&drv->lock);
     tape = drv->loaded_tape;
@@ -893,19 +1103,23 @@ int vtl_tape_write_filemarks(struct vtl_drive *drv, int count)
         mutex_unlock(&drv->lock);
         return -ENODEV;
     }
-
     if (tape->write_protected) {
         mutex_unlock(&drv->lock);
         return -EROFS;
     }
 
     mutex_lock(&tape->lock);
+    for (i = 0; i < count; i++) {
+        ret = vtl_tape_append_filemark(tape);
+        if (ret < 0)
+            break;
+    }
     drv->at_filemark = true;
     tape->meta.accessed = ktime_get_real_seconds();
     mutex_unlock(&tape->lock);
     mutex_unlock(&drv->lock);
 
-    return 0;
+    return ret;
 }
 
 int vtl_tape_rewind(struct vtl_drive *drv)
@@ -1058,6 +1272,12 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 	                 VTL_META_FLAG_ALGO_SHIFT;
 	            if (dst_drv->compression_algorithm == 0)
 	                dst_drv->compression_algorithm = VTL_COMP_LZO;
+
+    /* Restore filemark offsets from sidecar */
+    {
+        bool fm_loaded;
+        vtl_tape_load_metadata(t, &fm_loaded);
+    }
 	        } else {
 	            dst_drv->compression_enabled = false;
 	            dst_drv->compression_algorithm = VTL_COMP_NONE;
@@ -1171,6 +1391,10 @@ int vtl_changer_remove_medium(struct vtl_changer *ch, int elem)
 	        }
 	        t = d->loaded_tape;
 	        d->loaded_tape->loaded = false;
+
+    /* Persist filemark metadata before unloading */
+    if (vtl_tape_save_metadata(t) < 0)
+        pr_warn("VTL: failed to save metadata for %s\n", t->name);
 	        d->loaded_tape = NULL;
 	        d->at_filemark = false;
 	        d->at_end = false;
