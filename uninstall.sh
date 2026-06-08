@@ -80,31 +80,6 @@ if command -v systemctl >/dev/null 2>&1; then
   echo "systemd units stopped and disabled"
 fi
 
-if [ -f "$PREFIX/scripts/vtl-kernel-safe.sh" ]; then
-  # shellcheck source=/dev/null
-  . "$PREFIX/scripts/vtl-kernel-safe.sh"
-  _VTL_SAFE_SOURCED=1
-  vtl_vtladm_timers_stop
-  if lsmod 2>/dev/null | awk '{print $1}' | grep -qx vtl; then
-    [ "$REBOOT_AFTER_KERNEL" -eq 1 ] && export VTL_SKIP_POST_RMMOD_WAIT=1
-    echo ">> safe vtl.ko unload$([ "$REBOOT_AFTER_KERNEL" -eq 1 ] && echo '; host will reboot')"
-    if ! vtl_safe_rmmod "$PREFIX/sbin/vtl-kernelctl"; then
-      _VTL_RMMOD_FAILED=1
-      if [ "$REBOOT_AFTER_KERNEL" -eq 0 ] \
-        && [ "${VTL_UNINSTALL_CONTINUE_ON_RMMOD_FAIL:-}" = "1" ]; then
-        echo "WARN: vtl safe rmmod failed — continuing file removal (VTL_UNINSTALL_CONTINUE_ON_RMMOD_FAIL=1)" >&2
-        echo "WARN: vtl.ko still loaded; reboot or fix holders then: rmmod vtl" >&2
-      else
-        _vtl_uninstall_abort "vtl safe rmmod failed"
-      fi
-    else
-      _VTL_DID_RMMOD=1
-    fi
-  else
-    echo "vtl: not loaded"
-  fi
-
-# --- zvol cleanup: destroy ZFS datasets created by vtladm ---
 _vtl_zvol_cleanup() {
   if [ -x "$PREFIX/bin/vtladm" ] && [ -f "$PREFIX/var/vtl.db" ] && command -v zfs >/dev/null 2>&1; then
     echo ">> zvol cleanup: checking for ZFS datasets"
@@ -132,8 +107,31 @@ _vtl_zvol_cleanup() {
   fi
 }
 
-if [ "$PURGE_DATA" -eq 1 ]; then
-  _vtl_zvol_cleanup
+if [ -f "$PREFIX/scripts/vtl-kernel-safe.sh" ]; then
+  # shellcheck source=/dev/null
+  . "$PREFIX/scripts/vtl-kernel-safe.sh"
+  _VTL_SAFE_SOURCED=1
+  vtl_vtladm_timers_stop
+  if lsmod 2>/dev/null | awk '{print $1}' | grep -qx vtl; then
+    [ "$REBOOT_AFTER_KERNEL" -eq 1 ] && export VTL_SKIP_POST_RMMOD_WAIT=1
+    echo ">> safe vtl.ko unload$([ "$REBOOT_AFTER_KERNEL" -eq 1 ] && echo '; host will reboot')"
+    if ! vtl_safe_rmmod "$PREFIX/sbin/vtl-kernelctl"; then
+      _VTL_RMMOD_FAILED=1
+      if [ "$REBOOT_AFTER_KERNEL" -eq 0 ] \
+        && [ "${VTL_UNINSTALL_CONTINUE_ON_RMMOD_FAIL:-}" = "1" ]; then
+        echo "WARN: vtl safe rmmod failed — continuing file removal (VTL_UNINSTALL_CONTINUE_ON_RMMOD_FAIL=1)" >&2
+        echo "WARN: vtl.ko still loaded; reboot or fix holders then: rmmod vtl" >&2
+      else
+        _vtl_uninstall_abort "vtl safe rmmod failed"
+      fi
+    else
+      _VTL_DID_RMMOD=1
+    fi
+  else
+    echo "vtl: not loaded"
+  fi
+
+# --- zvol cleanup: destroy ZFS datasets created by vtladm ---
 fi
 elif [ -x "$PREFIX/sbin/vtl-kernelctl" ]; then
   if ! "$PREFIX/sbin/vtl-kernelctl" stop; then
@@ -162,6 +160,13 @@ elif command -v rmmod >/dev/null 2>&1; then
   fi
 else
   echo "WARN: no vtl-kernelctl — assuming vtl.ko not loaded" >&2
+fi
+
+# --- zvol cleanup ---
+if [ -x "$PREFIX/bin/vtladm" ] && [ -f "$PREFIX/var/vtl.db" ] && command -v zfs >/dev/null 2>&1; then
+  if [ "$PURGE_DATA" -eq 1 ]; then
+    _vtl_zvol_cleanup
+  fi
 fi
 
 _krel=$(uname -r 2>/dev/null || echo "")

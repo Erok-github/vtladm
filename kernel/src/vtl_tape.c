@@ -564,16 +564,17 @@ int vtl_tape_load_metadata(struct vtl_tape *tape, bool *out_loaded)
         goto out_close;
     }
 
-	/* Free previous allocation if reloading */
-	if (tape->filemark_offsets) {
-		vfree(tape->filemark_offsets);
-		tape->filemark_offsets = NULL;
-		tape->num_filemarks = 0;
-		tape->filemark_capacity = 0;
-	}
     arr = vmalloc(n * sizeof(u64));
     if (!arr)
         goto out_close;
+
+    /* Free previous allocation now that new one succeeded */
+    if (tape->filemark_offsets) {
+        vfree(tape->filemark_offsets);
+        tape->filemark_offsets = NULL;
+        tape->num_filemarks = 0;
+        tape->filemark_capacity = 0;
+    }
 
     pos = sizeof(hdr);
     for (i = 0; i < n; i++) {
@@ -1291,12 +1292,13 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 	            dst_drv->compression_enabled = false;
 	            dst_drv->compression_algorithm = VTL_COMP_NONE;
 
-	/* Restore filemark offsets from sidecar (unconditional) */
-	{
-		bool fm_loaded;
-		vtl_tape_load_metadata(t, &fm_loaded);
-	}
 	        }
+
+		/* Restore filemark offsets from sidecar (unconditional) */
+		{
+			bool fm_loaded;
+			vtl_tape_load_metadata(t, &fm_loaded);
+		}
 	        mutex_unlock(&dst_drv->lock);
     } else if (vtl_elem_is_ie(ch, dst)) {
         struct vtl_slot *ms;
