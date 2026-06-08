@@ -1465,7 +1465,7 @@ async fn api_manage_tape_create(
             .and_then(super::parse_density)
             .unwrap_or(super::DENSITY_DEFAULT);
         let _guard = LibraryGuard::new(&lib);
-        super::create_tape(&name, size, shelf.as_deref(), density_code, false, None)
+        super::create_tape(&name, size, shelf.as_deref(), density_code, false, None, "file", None)
             .map_err(|e| e.to_string())
     })
     .await

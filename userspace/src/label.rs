@@ -172,7 +172,8 @@ pub fn write_tape_labels(
         )))?;
 
     // Truncate: clear existing data, then write labels at offset 0.
-    file.set_len(0).map_err(|e| VtlError::IoError(e))?;
+    // Block devices (zvol) don't support truncate — just overwrite from offset 0.
+    let _ = file.set_len(0);
 
     let blocks = build_label_set(format, volser, owner, block_size, density_code);
     for (i, block) in blocks.iter().enumerate() {
