@@ -3073,7 +3073,22 @@ enum Commands {
     },
     Inventory,
     Status,
+    /// 创建磁带快照（file 后端：文件拷贝；zvol 后端：ZFS 原生快照）
     Snapshot {
+        tape: String,
+        snapshot: String,
+    },
+    /// 列出磁带的所有快照
+    ListSnapshots {
+        tape: String,
+    },
+    /// 回滚磁带到指定快照（仅 zvol 支持；file 后端报错）
+    Rollback {
+        tape: String,
+        snapshot: String,
+    },
+    /// 删除磁带快照（仅 zvol 支持；file 后端报错）
+    DeleteSnapshot {
         tape: String,
         snapshot: String,
     },
@@ -5471,36 +5486,129 @@ fn snapshot_tape(tape: &str, snapshot: &str) -> Result<(), VtlError> {
 
     let conn = init_db()?;
     let library_id = resolve_library_id(&conn, &current_library_name())?;
+    let lib_name = current_library_name();
 
-    let (image_path, capacity): (String, u64) = conn
+    let (image_path, capacity, backend_type, zpool): (String, u64, String, Option<String>) = conn
         .query_row(
-            "SELECT image_path, capacity_bytes FROM tapes WHERE library_id = ?1 AND name = ?2",
+            "SELECT image_path, capacity_bytes, backend_type, zpool FROM tapes WHERE library_id = ?1 AND name = ?2",
             params![library_id, tape],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .map_err(|_| {
             log_error("snapshot_tape", &format!("未找到磁带: {}", tape));
             VtlError::TapeNotFound(tape.to_string())
         })?;
 
-    let lib_dir = get_tape_dir().join(sanitize_lib_dir_component(&current_library_name()));
-    let snapshot_path = lib_dir.join(format!("{}_{}.vtltape", tape, snapshot));
+    if backend_type == "zvol" {
+        let pool = zpool.as_deref().unwrap_or("unknown");
+        zvol::zvol_snapshot(pool, &lib_name, tape, snapshot)?;
+        println!("Created ZFS snapshot '{}' for tape '{}'", snapshot, tape);
+    } else {
+        let lib_dir = get_tape_dir().join(sanitize_lib_dir_component(&lib_name));
+        let snapshot_path = lib_dir.join(format!("{}_{}.vtltape", tape, snapshot));
 
-    let mut src = File::open(&image_path)?;
-    let mut dst = File::create(&snapshot_path)?;
-    std::io::copy(&mut src, &mut dst)?;
-    dst.sync_all()?;
+        let mut src = File::open(&image_path)?;
+        let mut dst = File::create(&snapshot_path)?;
+        std::io::copy(&mut src, &mut dst)?;
+        dst.sync_all()?;
 
-    log_message(&format!(
-        "Successfully created snapshot '{}' for tape '{}' at {}",
-        snapshot,
-        tape,
-        snapshot_path.display()
-    ));
-    println!("Created snapshot '{}' for tape '{}'", snapshot, tape);
-    println!("Snapshot location: {}", snapshot_path.display());
-    println!("Snapshot size: {}", format_size(capacity));
+        log_message(&format!(
+            "Snapshot created at {} ({} bytes)",
+            snapshot_path.display(), capacity
+        ));
+        println!("Created snapshot '{}' for tape '{}'", snapshot, tape);
+        println!("Snapshot location: {}", snapshot_path.display());
+        println!("Snapshot size: {}", format_size(capacity));
+    }
 
+    Ok(())
+}
+
+/// List snapshots for a tape. For zvol, uses ZFS native listing.
+/// For file, returns an error (not supported without sidecar tracking).
+fn list_snapshots_tape(tape: &str) -> Result<(), VtlError> {
+    let conn = init_db()?;
+    let library_id = resolve_library_id(&conn, &current_library_name())?;
+    let lib_name = current_library_name();
+
+    let (backend_type, zpool): (String, Option<String>) = conn
+        .query_row(
+            "SELECT backend_type, zpool FROM tapes WHERE library_id = ?1 AND name = ?2",
+            params![library_id, tape],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| VtlError::TapeNotFound(tape.to_string()))?;
+
+    if backend_type != "zvol" {
+        println!("File 后端不支持列出快照。快照文件存放在 tape_dir/<lib>/ 下，格式为 <tape>_<name>.vtltape");
+        return Ok(());
+    }
+
+    let pool = zpool.as_deref().unwrap_or("unknown");
+    let snaps = zvol::zvol_list_snapshots(pool, &lib_name, tape)?;
+    if snaps.is_empty() {
+        println!("磁带 '{}' 没有快照", tape);
+    } else {
+        println!("磁带 '{}' 的快照:", tape);
+        for s in &snaps {
+            println!("  @{}", s);
+        }
+    }
+    Ok(())
+}
+
+/// Rollback a tape to a named snapshot. Zvol only.
+fn rollback_tape(tape: &str, snapshot: &str) -> Result<(), VtlError> {
+    let conn = init_db()?;
+    let library_id = resolve_library_id(&conn, &current_library_name())?;
+    let lib_name = current_library_name();
+
+    let (backend_type, zpool): (String, Option<String>) = conn
+        .query_row(
+            "SELECT backend_type, zpool FROM tapes WHERE library_id = ?1 AND name = ?2",
+            params![library_id, tape],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| VtlError::TapeNotFound(tape.to_string()))?;
+
+    if backend_type != "zvol" {
+        return Err(VtlError::InvalidParameter(
+            "回滚快照仅支持 zvol 后端。file 后端请直接恢复快照拷贝文件。".into()
+        ));
+    }
+
+    let pool = zpool.as_deref().unwrap_or("unknown");
+    zvol::zvol_rollback(pool, &lib_name, tape, snapshot)?;
+    println!("已回滚磁带 '{}' 到快照 @{}", tape, snapshot);
+    Ok(())
+}
+
+/// Delete a snapshot. Zvol only.
+fn delete_snapshot_tape(tape: &str, snapshot: &str) -> Result<(), VtlError> {
+    let conn = init_db()?;
+    let library_id = resolve_library_id(&conn, &current_library_name())?;
+    let lib_name = current_library_name();
+
+    let (backend_type, zpool): (String, Option<String>) = conn
+        .query_row(
+            "SELECT backend_type, zpool FROM tapes WHERE library_id = ?1 AND name = ?2",
+            params![library_id, tape],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| VtlError::TapeNotFound(tape.to_string()))?;
+
+    if backend_type != "zvol" {
+        return Err(VtlError::InvalidParameter(
+            "删除快照仅支持 zvol 后端。file 后端请直接删除快照拷贝文件。".into()
+        ));
+    }
+
+    let pool = zpool.as_deref().unwrap_or("unknown");
+    let zvol_full = format!("{}/vtladm/{}/{}", pool, lib_name, tape);
+    let snap_full = format!("{}@{}", zvol_full, snapshot);
+    log_message(&format!("销毁快照: {}", snap_full));
+    zvol::zfs(&["destroy", &snap_full])?;
+    println!("已删除快照 @{}", snapshot);
     Ok(())
 }
 
@@ -6293,6 +6401,9 @@ fn main() -> Result<(), VtlError> {
         Commands::Inventory => inventory()?,
         Commands::Status => status()?,
         Commands::Snapshot { tape, snapshot } => snapshot_tape(tape, snapshot)?,
+        Commands::ListSnapshots { tape } => list_snapshots_tape(tape)?,
+        Commands::Rollback { tape, snapshot } => rollback_tape(tape, snapshot)?,
+        Commands::DeleteSnapshot { tape, snapshot } => delete_snapshot_tape(tape, snapshot)?,
         Commands::Import { path, slot } => {
             let slot_num = parse_slot(slot)
                 .ok_or_else(|| VtlError::InvalidParameter(format!("Invalid slot: {}", slot)))?;

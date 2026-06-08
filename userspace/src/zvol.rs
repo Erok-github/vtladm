@@ -8,12 +8,12 @@
 //! zvol naming convention: `<pool>/vtladm/<library>/<tape_name>`
 //! The zvol device path is: `/dev/zvol/<pool>/vtladm/<library>/<tape_name>`
 
-use crate::{log_message, log_error, VtlError};
+use crate::{log_message, VtlError};
 use std::path::PathBuf;
 use std::process::Command;
 
 /// Runs `zfs` command, returns (stdout, stderr) or error.
-fn zfs(args: &[&str]) -> Result<(String, String), VtlError> {
+pub fn zfs(args: &[&str]) -> Result<(String, String), VtlError> {
     let output = Command::new("zfs")
         .args(args)
         .output()
@@ -97,6 +97,7 @@ pub fn zvol_destroy(pool: &str, library: &str, name: &str) -> Result<(), VtlErro
 }
 
 /// Resize a zvol to a new size in bytes.
+#[allow(dead_code)]
 pub fn zvol_resize(pool: &str, library: &str, name: &str, new_size: u64) -> Result<(), VtlError> {
     let zvol_full = format!("{}/vtladm/{}/{}", pool, library, name);
     let size_str = format!("{}", new_size);
@@ -106,6 +107,7 @@ pub fn zvol_resize(pool: &str, library: &str, name: &str, new_size: u64) -> Resu
 }
 
 /// Get the current size of a zvol in bytes.
+#[allow(dead_code)]
 pub fn zvol_get_size(pool: &str, library: &str, name: &str) -> Result<u64, VtlError> {
     let zvol_full = format!("{}/vtladm/{}/{}", pool, library, name);
     let (stdout, _) = zfs(&["get", "-Hp", "-o", "value", "volsize", &zvol_full])?;
@@ -152,12 +154,14 @@ pub fn zvol_rollback(
 
 /// Return the device path for a zvol.
 /// Format: /dev/zvol/<pool>/vtladm/<library>/<name>
+#[allow(dead_code)]
 pub fn zvol_device_path(pool: &str, library: &str, name: &str) -> PathBuf {
     PathBuf::from(format!("/dev/zvol/{}/vtladm/{}/{}", pool, library, name))
 }
 
 /// Initialize a zvol tape with zeroed content to a given size.
 /// Writes zeros to the beginning to ensure proper block allocation.
+#[allow(dead_code)]
 pub fn zvol_zero_first_block(dev_path: &std::path::Path, block_size: u64) -> Result<(), VtlError> {
     use std::fs::OpenOptions;
     use std::io::Write;
