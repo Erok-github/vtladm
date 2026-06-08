@@ -1097,12 +1097,9 @@ static int vtl_handle_write(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
 
 static int vtl_handle_rewind(struct scsi_cmnd *cmd, struct vtl_drive *drv)
 {
-    int ret = vtl_tape_rewind(drv);
-
-    /* Empty drive: no-op rewind like a real drive with no tape */
-    if (ret == -ENODEV)
-        return SAM_STAT_GOOD;
-
+    /* No-op on empty drive; vtl_tape_rewind only returns 0 or -ENODEV */
+    (void)cmd;
+    (void)vtl_tape_rewind(drv);
     return SAM_STAT_GOOD;
 }
 
@@ -1153,19 +1150,17 @@ static int vtl_handle_read_capacity_10(struct scsi_cmnd *cmd, struct vtl_drive *
 
 	{
 		u64 num_blocks = capacity / (u64)block_len;
+    {
+        u64 num_blocks = capacity / (u64)block_len;
 
-		/*
-		 * Empty tape (capacity 0) is a valid ready state — return
-		 * max_lba=0 so backup apps see a blank tape, not an error.
-		 */
-		if (num_blocks == 0)
-			max_lba = 0;
-		else if (num_blocks > 0xFFFFFFFFULL)
-			max_lba = 0xFFFFFFFFU;
-		else
-			max_lba = (u32)(num_blocks - 1ULL);
-		}
-
+        /* Empty tape is valid — return max_lba=0 */
+        if (num_blocks == 0)
+            max_lba = 0;
+        else if (num_blocks > 0xFFFFFFFFULL)
+            max_lba = 0xFFFFFFFFU;
+        else
+            max_lba = (u32)(num_blocks - 1ULL);
+    }
 
     memset(buf, 0, sizeof(buf));
     vtl_put_be32(max_lba, &buf[0]);
@@ -1201,16 +1196,17 @@ static int vtl_handle_read_capacity_16(struct scsi_cmnd *cmd, struct vtl_drive *
     block_len = drv->block_size ? drv->block_size : 512U;
     mutex_unlock(&drv->lock);
 
-	{
-		u64 num_blocks = capacity / (u64)block_len;
+    {
+        u64 num_blocks = capacity / (u64)block_len;
 
-		if (num_blocks == 0) {
-			vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
-			vtl_build_sense_buffer(cmd, &drv->sense);
-			return SAM_STAT_CHECK_CONDITION;
-		}
-		max_lba = num_blocks - 1ULL;
-	}
+        /* Empty tape is valid — return max_lba=0 (consistent with READ CAPACITY 10) */
+        if (num_blocks == 0)
+            max_lba = 0;
+        else if (num_blocks > 0xFFFFFFFFULL)
+            max_lba = 0xFFFFFFFFULL;
+        else
+            max_lba = num_blocks - 1ULL;
+    }
 
     memset(buf, 0, sizeof(buf));
     vtl_put_be64(max_lba, &buf[0]);

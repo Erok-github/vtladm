@@ -101,14 +101,18 @@ fn build_hdr2(block_size: u32) -> [u8; LABEL_LEN] {
     buf[0..4].copy_from_slice(b"HDR2");
     buf[4] = b'1'; // label number
     buf[5] = b'D'; // record format (D=variable, F=fixed, U=undefined)
-    // block length (5): decimal
-    let bs = format!("{:05}", block_size);
+    // block length (5): decimal, clamp to 5-digit max
+    let bs = if block_size > 99999 {
+        "99999".to_string()
+    } else {
+        format!("{:05}", block_size)
+    };
     buf[6..11].copy_from_slice(bs.as_bytes());
     // record length (5): same as block for variable
     buf[11..16].copy_from_slice(bs.as_bytes());
     // bytes 16-31: reserved
-    // bytes 32-34: tape density
-    buf[32..35].copy_from_slice(b"040"); // LTO
+    // bytes 32-34: tape density (0x40 = 64 decimal)
+    buf[32..35].copy_from_slice(b"064"); // LTO
     // bytes 37-42: reserved/offset
     // bytes 43-79: reserved
     buf

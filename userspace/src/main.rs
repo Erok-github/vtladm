@@ -4409,16 +4409,22 @@ pub(crate) fn label_tape_in_library(
 
     let conn = init_db()?;
     let library_id = resolve_library_id(&conn, library)?;
-    let (tape_id, image_path, barcode): (i64, String, String) = conn
+    let (tape_id, image_path, barcode, slot, shelf_id): (i64, String, String, Option<i32>, Option<i64>) = conn
         .query_row(
-            "SELECT id, image_path, COALESCE(barcode, '') FROM tapes WHERE library_id = ?1 AND name = ?2",
+            "SELECT id, image_path, COALESCE(barcode, ''), slot, shelf_id FROM tapes WHERE library_id = ?1 AND name = ?2",
             params![library_id, name],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .map_err(|_| VtlError::TapeNotFound(name.to_string()))?;
 
     if tape_in_drive(&conn, library_id, tape_id)? {
         return Err(VtlError::TapeInDrive);
+    }
+    if slot.is_some() {
+        return Err(VtlError::TapeNotOnShelf);
+    }
+    if shelf_id.is_none() {
+        return Err(VtlError::TapeNotOnShelf);
     }
 
     // Determine volser: use provided value, or extract from barcode (last 6 chars)
