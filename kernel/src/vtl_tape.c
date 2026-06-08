@@ -14,8 +14,9 @@ static void vtl_tape_release(struct kref *ref)
 	struct vtl_tape *t = container_of(ref, struct vtl_tape, ref);
 
 	mutex_lock(&t->lock);
-	kfree(t->meta.filemarks);
+	vfree(t->filemark_offsets);
 	t->meta.filemarks = NULL;
+	t->filemark_offsets = NULL;
 	t->meta.num_filemarks = 0;
 	if (t->file && !IS_ERR(t->file)) {
 		filp_close(t->file, NULL);
@@ -562,6 +563,13 @@ int vtl_tape_load_metadata(struct vtl_tape *tape, bool *out_loaded)
         goto out_close;
     }
 
+	/* Free previous allocation if reloading */
+	if (tape->filemark_offsets) {
+		vfree(tape->filemark_offsets);
+		tape->filemark_offsets = NULL;
+		tape->num_filemarks = 0;
+		tape->filemark_capacity = 0;
+	}
     arr = vmalloc(n * sizeof(u64));
     if (!arr)
         goto out_close;
@@ -1044,7 +1052,7 @@ int vtl_tape_space(struct vtl_drive *drv, int code, int count)
                 if (tape->filemark_offsets[idx] < tape->position) {
                     if (++matched == remaining) {
                         if (idx > 0)
-                            tape->position = tape->filemark_offsets[idx - 1];
+                            tape->position = tape->filemark_offsets[idx];
                         else
                             tape->position = 0;
                         break;
@@ -1114,7 +1122,9 @@ int vtl_tape_write_filemarks(struct vtl_drive *drv, int count)
         if (ret < 0)
             break;
     }
-    drv->at_filemark = true;
+	/* Advance position past filemark(s) so subsequent writes append */
+	tape->position = i_size_read(file_inode(tape->file));
+    drv->at_filemark = false;
     tape->meta.accessed = ktime_get_real_seconds();
     mutex_unlock(&tape->lock);
     mutex_unlock(&drv->lock);
@@ -1189,6 +1199,8 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
         saved_source_slot = src_drv->source_slot;
 	        src_drv->loaded_tape = NULL;
         src_drv->source_slot = -1;
+		/* Persist filemark metadata when unloading from drive */
+		vtl_tape_save_metadata(t);
 	        mutex_lock(&t->lock);
 	        t->loaded = false;
 	        mutex_unlock(&t->lock);
