@@ -1045,7 +1045,8 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         return SAM_STAT_CHECK_CONDITION;
     }
 
-    /* End of data: return BLANK CHECK per SSC-3, so st driver stops reading */
+    /* End of data: BLANK CHECK per SSC-3 tells st driver to stop reading.
+     * Kylin 4.19 st may offline the device after — queuecommand auto-restores it. */
     if (actual == 0) {
         vtl_set_sense(&drv->sense, BLANK_CHECK, 0x00, 5);
         vtl_build_sense_buffer(cmd, &drv->sense);
@@ -2010,6 +2011,12 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
     u8 *cdb = cmd->cmnd;
     unsigned int lun = cmd->device->lun;
     struct vtl_changer *ch;
+
+    /* Auto-restore devices that Kylin st driver offlined after BLANK_CHECK */
+    if (unlikely(cmd->device->sdev_state == SDEV_OFFLINE)) {
+        scsi_device_set_state(cmd->device, SDEV_RUNNING);
+        pr_info_ratelimited("VTL: auto-restored LUN%u from OFFLINE to RUNNING\n", lun);
+    }
     int result;
 
     if (vtl_reconfig_in_progress()) {
