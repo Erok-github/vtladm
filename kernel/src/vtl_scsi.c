@@ -1045,6 +1045,14 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         return SAM_STAT_CHECK_CONDITION;
     }
 
+    /* End of data: return BLANK CHECK per SSC-3, so st driver stops reading */
+    if (actual == 0) {
+        vtl_set_sense(&drv->sense, BLANK_CHECK, 0x00, 5);
+        vtl_build_sense_buffer(cmd, &drv->sense);
+        vtl_xfer_buf_free(buffer);
+        return SAM_STAT_CHECK_CONDITION;
+    }
+
     if (vtl_scsi_copy_to_sg(cmd, buffer, actual, &drv->sense)) {
         vtl_xfer_buf_free(buffer);
         return SAM_STAT_CHECK_CONDITION;
