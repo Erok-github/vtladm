@@ -2009,6 +2009,7 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
     u8 *cdb = cmd->cmnd;
     unsigned int lun = cmd->device->lun;
     struct vtl_changer *ch;
+    int result;
 
     /* Auto-restore VTL devices that Kylin st driver offlines */
     {
@@ -2018,8 +2019,6 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
                 scsi_device_set_state(sdev, SDEV_RUNNING);
         }
     }
-
-    int result;
 
     if (vtl_reconfig_in_progress()) {
         cmd->result = (DID_NO_CONNECT << 16);
