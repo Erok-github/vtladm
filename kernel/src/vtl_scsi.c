@@ -2012,10 +2012,14 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
     unsigned int lun = cmd->device->lun;
     struct vtl_changer *ch;
 
-    /* Auto-restore devices that Kylin st driver offlined after BLANK_CHECK */
-    if (unlikely(cmd->device->sdev_state == SDEV_OFFLINE)) {
-        scsi_device_set_state(cmd->device, SDEV_RUNNING);
-        pr_info_ratelimited("VTL: auto-restored LUN%u from OFFLINE to RUNNING\n", lun);
+    /* Auto-restore VTL devices that Kylin st driver offlines (BLANK_CHECK, etc.) */
+    {
+        struct scsi_device *sdev;
+        int i;
+        shost_for_each_device(sdev, shost) {
+            if (sdev->sdev_state == SDEV_OFFLINE)
+                scsi_device_set_state(sdev, SDEV_RUNNING);
+        }
     }
     int result;
 
