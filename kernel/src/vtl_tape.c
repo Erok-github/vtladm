@@ -801,7 +801,6 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
     }
 
     pos = tape->position;
-	pr_warn("VTL: READ pos=%lld used=%llu cap=%llu\n", tape->position, tape->meta.used, tape->meta.capacity);
     if (pos >= tape->meta.used) {
         drv->at_end = true;
         *actual = 0;
