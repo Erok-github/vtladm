@@ -801,7 +801,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
     }
 
     pos = tape->position;
-    if (pos >= tape->meta.capacity) {
+    if (pos >= tape->meta.used) {
         drv->at_end = true;
         *actual = 0;
         mutex_unlock(&tape->lock);
@@ -857,7 +857,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
             tape->position = pos;
             *actual = uncomp_sz;
             drv->at_bot = (pos == 0);
-            drv->at_end = (pos >= tape->meta.capacity);
+            drv->at_end = (pos >= tape->meta.used);
 
             tape->meta.accessed = ktime_get_real_seconds();
             drv->comp_bytes_read += uncomp_sz;
@@ -871,8 +871,8 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
 
     /* Fallback: raw block read (uncompressed or old-format tape) */
     pos = tape->position;
-    if (pos + len > tape->meta.capacity)
-        len = tape->meta.capacity - pos;
+    if (pos + len > tape->meta.used)
+        len = tape->meta.used - pos;
 
     ret = kernel_read(tape->file, buffer, len, &pos);
     if (ret < 0) {
@@ -884,7 +884,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
     tape->position = pos;
     *actual = ret;
     drv->at_bot = (pos == 0);
-    drv->at_end = (pos >= tape->meta.capacity);
+    drv->at_end = (pos >= tape->meta.used);
     tape->meta.accessed = ktime_get_real_seconds();
     tape->meta.log_bytes_read += (u64)ret;
 
