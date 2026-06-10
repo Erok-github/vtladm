@@ -802,7 +802,6 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
 
     pos = tape->position;
     if (pos >= tape->meta.used) {
-	pr_info_ratelimited("VTL: read EOD check used=%llu pos=%llu\n", tape->meta.used, pos);
         drv->at_end = true;
         *actual = 0;
         mutex_unlock(&tape->lock);
@@ -980,7 +979,6 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
 
     if (pos > tape->meta.used)
         tape->meta.used = pos;
-	pr_info_ratelimited("VTL: write used=%llu pos=%llu\n", tape->meta.used, pos);
     drv->at_bot = (pos == 0);
     drv->at_end = (pos >= tape->meta.capacity);
     drv->at_filemark = false;
