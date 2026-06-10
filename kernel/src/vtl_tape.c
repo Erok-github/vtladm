@@ -801,6 +801,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
     }
 
     pos = tape->position;
+	pr_info_ratelimited("VTL: READ start used=%llu pos=%llu\n", tape->meta.used, tape->position);
     if (pos >= tape->meta.used) {
         drv->at_end = true;
         *actual = 0;
@@ -978,6 +979,7 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
     }
 
     if (pos > tape->meta.used)
+	pr_info_ratelimited("VTL: WRITE done used=%llu pos=%llu\n", tape->meta.used, pos);
         tape->meta.used = pos;
     drv->at_bot = (pos == 0);
     drv->at_end = (pos >= tape->meta.capacity);
