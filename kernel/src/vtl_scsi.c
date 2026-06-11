@@ -1297,6 +1297,10 @@ static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv,
         /* Load on empty drive: no-op instead of NOT_READY */
         if (!vtl_drive_has_tape(drv))
             return SAM_STAT_GOOD;
+    } else if (cdb[4] & 0x02) {
+        /* LOAD_UNLOAD with Load=0 + Re-Ten=1 → REWIND */
+        (void)vtl_tape_rewind(drv);
+        return SAM_STAT_GOOD;
     } else {
         int src_slot;
         bool can_return;
