@@ -687,14 +687,10 @@ if [ "$ENABLE_SYSTEMD" -eq 1 ]; then
     if lsmod 2>/dev/null | awk '{print $1}' | grep -qx st; then
       rmmod st 2>/dev/null && modprobe st 2>/dev/null && echo "  st reloaded with vtl-st.conf" || true
     fi
-    # st may offline devices during background probing up to 180s after load.
-    # Fork a background guard that restores states for up to 4 minutes.
-    ( for _try in $(seq 1 8); do
-        sleep 30
-        for _sd in /sys/class/scsi_device/*/device/state; do
-          [ -f "$_sd" ] && echo running > "$_sd" 2>/dev/null || true
-        done
-      done ) &
+    # One-shot restore after st reload (kernel offline_guard_work handles ongoing)
+    for _sd in /sys/class/scsi_device/*/device/state; do
+      [ -f "$_sd" ] && echo running > "$_sd" 2>/dev/null || true
+    done
   fi
 fi
 

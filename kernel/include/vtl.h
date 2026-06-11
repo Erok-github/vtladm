@@ -315,6 +315,8 @@ struct vtl_host {
     struct delayed_work post_add_scan_work;
     /** Set after scsi_scan_host (+ quiesce) completes or bringup aborted. */
     bool scan_done;
+    /** Periodic restore of devices that st driver offlines during background probing. */
+    struct delayed_work offline_guard_work;
 };
 
 int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd);

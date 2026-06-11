@@ -324,6 +324,7 @@ static void vtl_cancel_all_host_delayed_work(void)
     list_for_each_entry(vhost, &vtl_host_list, list) {
         cancel_delayed_work_sync(&vhost->scan_work);
         cancel_delayed_work_sync(&vhost->post_add_scan_work);
+        cancel_delayed_work_sync(&vhost->offline_guard_work);
     }
     mutex_unlock(&vtl_list_lock);
 
@@ -1026,6 +1027,33 @@ static void vtl_host_scan_handler(struct work_struct *work)
     vhost->scan_done = true;
 }
 
+/*
+ * Periodic offline-device guard: st driver may offline tape devices during
+ * background probing on some kernels (Kylin 4.19, etc.).  Restore them every
+ * 30 seconds so backup software always finds running devices.
+ */
+static void vtl_offline_guard_work_fn(struct work_struct *work)
+{
+    struct delayed_work *dw = to_delayed_work(work);
+    struct vtl_host *vhost = container_of(dw, struct vtl_host, offline_guard_work);
+    struct Scsi_Host *sh = vhost->shost;
+
+    if (!sh || !vhost->changer)
+        goto reschedule;
+
+    {
+        struct scsi_device *sdev;
+        shost_for_each_device(sdev, sh) {
+            if (sdev->sdev_state == SDEV_OFFLINE)
+                scsi_device_set_state(sdev, SDEV_RUNNING);
+        }
+    }
+
+reschedule:
+    if (!atomic_read(&vtl_module_unloading))
+        schedule_delayed_work(&vhost->offline_guard_work, 30 * HZ);
+}
+
 static void vtl_host_run_scsi_scan(struct vtl_host *vhost)
 {
     struct Scsi_Host *sh = vhost->shost;
@@ -1163,6 +1191,9 @@ static int vtl_probe(struct platform_device *pdev)
 
     INIT_DELAYED_WORK(&vhost->scan_work, vtl_host_bringup_handler);
     INIT_DELAYED_WORK(&vhost->post_add_scan_work, vtl_host_scan_handler);
+    INIT_DELAYED_WORK(&vhost->offline_guard_work, vtl_offline_guard_work_fn);
+    /* Start guard after scan completes (deferred ~60s); works alongside queuecommand auto-restore */
+    schedule_delayed_work(&vhost->offline_guard_work, 60 * HZ);
     {
         unsigned int base = (unsigned int)max_t(int, 0, vtl_scan_delay_ms);
         unsigned int stagger = (unsigned int)max_t(int, 0, vtl_bringup_stagger_ms);
@@ -1206,6 +1237,7 @@ static int vtl_remove(struct platform_device *pdev)
 
     cancel_delayed_work_sync(&vhost->scan_work);
     cancel_delayed_work_sync(&vhost->post_add_scan_work);
+        cancel_delayed_work_sync(&vhost->offline_guard_work);
 
     mutex_lock(&vtl_list_lock);
     list_del(&vhost->list);
