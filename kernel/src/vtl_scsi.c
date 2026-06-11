@@ -1298,30 +1298,11 @@ static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv,
         /* Load on empty drive: no-op instead of NOT_READY */
         if (!vtl_drive_has_tape(drv))
             return SAM_STAT_GOOD;
-    } else if (cdb[4] & 0x02) {
-        /* LOAD_UNLOAD with Load=0 + Re-Ten=1 → REWIND */
+    } else {
+        /* Load=0 -> REWIND to BOT (SSC-3: cdb[4]=0x00 or Re-Ten=0x02).
+         * Real UNLOAD is SMC MOVE_MEDIUM from drive to slot, not LOAD_UNLOAD. */
         (void)vtl_tape_rewind(drv);
         return SAM_STAT_GOOD;
-    } else {
-        int src_slot;
-        bool can_return;
-        int ret = 0;
-
-        mutex_lock(&drv->lock);
-        if (!drv->loaded_tape) {
-            mutex_unlock(&drv->lock);
-            return SAM_STAT_GOOD;
-        }
-        src_slot = drv->source_slot;
-        can_return = (src_slot >= 1 && src_slot <= ch->num_slots);
-        mutex_unlock(&drv->lock);
-
-        if (can_return) {
-            ret = vtl_changer_unload_drive_to_slot(ch, drive_idx,
-                                   src_slot);
-        }
-        if (ret != 0)
-            vtl_tape_unload(drv);
     }
 
     return SAM_STAT_GOOD;
