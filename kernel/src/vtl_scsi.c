@@ -1347,6 +1347,27 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
     src = (cdb[4] << 8) | cdb[5];
     dst = (cdb[6] << 8) | cdb[7];
 
+    /* Pre-validate so empty/missing source returns MEDIUM NOT PRESENT
+     * instead of ILLEGAL REQUEST, which avoids Kylin st offline cascade. */
+    if (vtl_elem_is_storage(ch, src)) {
+        int si = src - 1;
+        if (si >= 0 && si < ch->num_slots &&
+            (!ch->slots[si].occupied || !ch->slots[si].tape)) {
+            vtl_set_sense(&ch->sense, NOT_READY, 0x3a, 0x00);
+            vtl_build_sense_buffer(cmd, &ch->sense);
+            return SAM_STAT_CHECK_CONDITION;
+        }
+    }
+    if (vtl_elem_is_drive(ch, src)) {
+        int di = src - vtl_elem_drive_base(ch);
+        if (di >= 0 && di < ch->num_drives &&
+            !ch->drives[di].loaded_tape) {
+            vtl_set_sense(&ch->sense, NOT_READY, 0x3a, 0x00);
+            vtl_build_sense_buffer(cmd, &ch->sense);
+            return SAM_STAT_CHECK_CONDITION;
+        }
+    }
+
     ret = vtl_changer_move_medium(ch, src, dst);
     if (ret < 0) {
         vtl_set_sense(&ch->sense, ILLEGAL_REQUEST, 0x21, 0);
