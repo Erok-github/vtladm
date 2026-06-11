@@ -778,6 +778,7 @@ int vtl_tape_unload(struct vtl_drive *drv)
 	 * vtl_tape_put may trigger vtl_tape_release which acquires tape->lock.
 	 */
 	vtl_tape_put(tape);
+	pr_warn("VTL: tape_read called pos=%lld\n", tape->position);
 
     pr_info("VTL: Unloaded tape %s from drive %d\n", tape_name, drive_id);
     return 0;

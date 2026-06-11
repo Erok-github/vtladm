@@ -1024,6 +1024,7 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
 
     vtl_parse_rw_blocks(cdb, op, &blocks, &block_len, drv);
     if (vtl_rw_prepare_xfer(cmd, &blocks, &block_len, &drv->sense) < 0)
+	pr_warn("VTL: handle_read op=0x%02x blocks=%u blen=%u\n", op, blocks, block_len);
         return SAM_STAT_CHECK_CONDITION;
 
     buffer = vtl_xfer_buf_alloc(blocks * block_len);
