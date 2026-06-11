@@ -387,13 +387,19 @@ if [ -f "$ROOT/packaging/udev/59-vtl-scsi.rules" ]; then
   echo "installed /etc/udev/rules.d/59-vtl-scsi.rules (ID_SCSI=skip for VTL vendor)"
 fi
 
-# st driver: disable direct I/O for VTL devices to prevent offline
-_ST_CONF_SRC="$ROOT/packaging/etc/modprobe.d/vtl-st.conf"
-if [ -f "$_ST_CONF_SRC" ]; then
-  mkdir -p /etc/modprobe.d
-  install -m 0644 "$_ST_CONF_SRC" /etc/modprobe.d/vtl-st.conf
+# st driver: apply direct I/O setting from vtl.conf
+mkdir -p /etc/modprobe.d
+_ST_DIO=true
+if [ -f "$PREFIX/var/vtl.conf" ]; then
+  _st_val=$(grep -E '^[[:space:]]*st_direct_io[[:space:]]*=' "$PREFIX/var/vtl.conf" 2>/dev/null | tail -1 | sed 's/.*=//;s/[[:space:]]//g')
+  case "$_st_val" in false|0|no|off) _ST_DIO=false ;; esac
+fi
+if [ "$_ST_DIO" = false ]; then
+  cat > /etc/modprobe.d/vtl-st.conf <<'STEOF'
+# Managed by vtladm install.sh — source of truth: /opt/vtladm/var/vtl.conf (st_direct_io)
+options st try_direct_io=0 try_rdio=0 try_wdio=0 buffer_kbs=32
+STEOF
   echo "installed /etc/modprobe.d/vtl-st.conf (st try_direct_io=0)"
-  # Reload st if already loaded so the new config takes effect
   if lsmod 2>/dev/null | awk '{print $1}' | grep -qx st; then
     rmmod st 2>/dev/null && modprobe st 2>/dev/null && echo "reloaded st with new config" || true
   fi
