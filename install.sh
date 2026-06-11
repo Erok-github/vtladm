@@ -681,14 +681,20 @@ if [ "$ENABLE_SYSTEMD" -eq 1 ]; then
     fi
     echo "enabled (--now): vtl-kernel, vtl-patrol.timer$([ "$_web_enabled" -eq 1 ] && echo ', vtladm-web' || echo ' (vtladm-web FAILED — see above)')"
     echo "  robot defaults in vtl.conf: robot_sync=true, auto_sync_db_from_kernel=true"
+    # Stop backup agents that probe devices during install
+    systemctl stop bakvtl-agent bakvtl-server 2>/dev/null || true
     # Reload st with vtl-st.conf params (udev may have loaded it before config was in place)
     if lsmod 2>/dev/null | awk '{print $1}' | grep -qx st; then
       rmmod st 2>/dev/null && modprobe st 2>/dev/null && echo "  st reloaded with vtl-st.conf" || true
     fi
-    # Restore any devices that st offlined during initial probe
-    for _sd in /sys/class/scsi_device/*/device/state; do
-      [ -f "$_sd" ] && echo running > "$_sd" 2>/dev/null || true
-    done
+    # st may offline devices during background probing up to 180s after load.
+    # Fork a background guard that restores states for up to 4 minutes.
+    ( for _try in $(seq 1 8); do
+        sleep 30
+        for _sd in /sys/class/scsi_device/*/device/state; do
+          [ -f "$_sd" ] && echo running > "$_sd" 2>/dev/null || true
+        done
+      done ) &
   fi
 fi
 
