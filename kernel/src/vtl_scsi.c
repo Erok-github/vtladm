@@ -1389,6 +1389,11 @@ static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv,
             ret = vtl_changer_unload_drive_to_slot(ch, drive_idx, src_slot);
         if (ret != 0)
             vtl_tape_unload(drv);
+
+        /* Unit Attention: medium may have changed */
+        drv->ua_pending = true;
+        drv->ua_asc = 0x28;
+        drv->ua_ascq = 0x00;
     }
 
     return SAM_STAT_GOOD;
