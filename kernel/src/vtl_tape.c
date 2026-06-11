@@ -1153,7 +1153,7 @@ int vtl_tape_rewind(struct vtl_drive *drv)
 
     mutex_lock(&tape->lock);
     tape->position = 0;
-    tape->meta.used = 0;  /* reset EOD: subsequent writes redefine data boundary */
+    /* Keep meta.used so reads of existing data work; writes redefine it */
     drv->at_bot = true;
     drv->at_end = false;
     drv->at_filemark = false;

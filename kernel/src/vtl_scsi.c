@@ -1050,13 +1050,11 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         return SAM_STAT_CHECK_CONDITION;
     }
 
-    /* End of data: BLANK CHECK tells st driver to stop.  Auto-restore in
-     * queuecommand recovers from Kylin st offline after the sense response. */
+    /* End of data: return 0 bytes. meta.used tracks write boundary so
+     * reads stop at the natural data end, not immediately at BOT. */
     if (actual == 0) {
-        vtl_set_sense(&drv->sense, BLANK_CHECK, 0x00, 5);
-        vtl_build_sense_buffer(cmd, &drv->sense);
         vtl_xfer_buf_free(buffer);
-        return SAM_STAT_CHECK_CONDITION;
+        return SAM_STAT_GOOD;
     }
 
     if (vtl_scsi_copy_to_sg(cmd, buffer, actual, &drv->sense)) {
@@ -1187,7 +1185,7 @@ static int vtl_handle_erase(struct scsi_cmnd *cmd, struct vtl_drive *drv)
      * LONG bit (cdb[1] & 0x20) for thorough erase — same outcome in VTL. */
     mutex_lock(&tape->lock);
     tape->position = 0;
-    tape->meta.used = 0;
+    /* meta.used tracks written data */
     drv->at_bot = true;
     drv->at_end = false;
     drv->at_filemark = false;
@@ -1376,7 +1374,7 @@ static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv,
         mutex_lock(&drv->lock);
         if (drv->loaded_tape) {
             drv->loaded_tape->position = 0;
-            drv->loaded_tape->meta.used = 0;
+            /* meta.used tracks written data, reset on rewind or erase */
             drv->at_bot = true;
             drv->at_end = false;
             drv->at_filemark = false;
