@@ -256,13 +256,27 @@ static int vtl_handle_inquiry_evpd(struct scsi_cmnd *cmd, struct vtl_host *vhost
         break;
     case 0x80: {
         /*
-         * Unit Serial Number (IBM/TSM/Mars 清单常探测；缺此页会 ILLEGAL REQUEST)。
+         * Unit Serial Number.  For tape drives, report the loaded tape's
+         * barcode so backup software sees a unique serial per tape.
+         * For the changer or empty drives, use host+LUN as fallback.
          */
         struct Scsi_Host *shost = vhost->shost;
         char serial[32];
 
-        snprintf(serial, sizeof(serial), "VTL%05uL%02u",
-                 shost ? (unsigned int)shost->host_no : 0U, lun);
+        if (lun >= 1 && lun <= (unsigned int)vhost->changer->num_drives) {
+            struct vtl_drive *drv = &vhost->changer->drives[lun - 1];
+            mutex_lock(&drv->lock);
+            if (drv->loaded_tape && drv->loaded_tape->meta.barcode[0])
+                snprintf(serial, sizeof(serial), "%.16s",
+                         drv->loaded_tape->meta.barcode);
+            else
+                snprintf(serial, sizeof(serial), "VTL%05uL%02u",
+                         shost ? (unsigned int)shost->host_no : 0U, lun);
+            mutex_unlock(&drv->lock);
+        } else {
+            snprintf(serial, sizeof(serial), "VTL%05uCHG",
+                     shost ? (unsigned int)shost->host_no : 0U);
+        }
         out_len = 4 + (unsigned int)strnlen(serial, 20U);
         if (out_len > buflen)
             out_len = buflen;
