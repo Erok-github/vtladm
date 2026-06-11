@@ -1321,7 +1321,6 @@ static int vtl_handle_synchronize_cache(struct scsi_cmnd *cmd, struct vtl_drive 
 {
     struct vtl_tape *tape;
     struct file *filp;
-    int ret = 0;
 
     mutex_lock(&drv->lock);
     tape = drv->loaded_tape;
@@ -1354,9 +1353,6 @@ static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv,
     u8 *cdb = cmd->cmnd;
     u8 load;
     bool immed;
-    int src_slot;
-    bool can_return;
-    int ret = 0;
 
     load = cdb[4] & 0x01;
     immed = (cdb[4] & 0x04) != 0;
