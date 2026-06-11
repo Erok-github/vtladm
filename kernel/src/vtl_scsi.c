@@ -1320,6 +1320,7 @@ static int vtl_handle_write_filemarks(struct scsi_cmnd *cmd, struct vtl_drive *d
 static int vtl_handle_synchronize_cache(struct scsi_cmnd *cmd, struct vtl_drive *drv)
 {
     struct vtl_tape *tape;
+    int ret = 0;
     struct file *filp;
 
     mutex_lock(&drv->lock);
