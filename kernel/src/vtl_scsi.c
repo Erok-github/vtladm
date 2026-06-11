@@ -659,6 +659,8 @@ static int vtl_mode_page_0f(u8 *buf, bool compression_enabled, u8 algorithm)
 static int vtl_mode_page_10(u8 *buf, u8 density)
 {
     buf[0] = 0x10; buf[1] = 0x0e;  /* Device Configuration, 14 bytes */
+    /* Buffered mode 1: drive has a buffer; prevents st direct I/O bypass */
+    buf[2] = 0x01;
     buf[9] = density;
     buf[14] = 0x02;  /* CAP = supports CAP */
     return 16;
