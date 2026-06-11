@@ -681,6 +681,10 @@ if [ "$ENABLE_SYSTEMD" -eq 1 ]; then
     fi
     echo "enabled (--now): vtl-kernel, vtl-patrol.timer$([ "$_web_enabled" -eq 1 ] && echo ', vtladm-web' || echo ' (vtladm-web FAILED — see above)')"
     echo "  robot defaults in vtl.conf: robot_sync=true, auto_sync_db_from_kernel=true"
+    # Reload st with vtl-st.conf params (udev may have loaded it before config was in place)
+    if lsmod 2>/dev/null | awk '{print $1}' | grep -qx st; then
+      rmmod st 2>/dev/null && modprobe st 2>/dev/null && echo "  st reloaded with vtl-st.conf" || true
+    fi
   fi
 fi
 
