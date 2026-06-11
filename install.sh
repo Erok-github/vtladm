@@ -685,6 +685,10 @@ if [ "$ENABLE_SYSTEMD" -eq 1 ]; then
     if lsmod 2>/dev/null | awk '{print $1}' | grep -qx st; then
       rmmod st 2>/dev/null && modprobe st 2>/dev/null && echo "  st reloaded with vtl-st.conf" || true
     fi
+    # Restore any devices that st offlined during initial probe
+    for _sd in /sys/class/scsi_device/*/device/state; do
+      [ -f "$_sd" ] && echo running > "$_sd" 2>/dev/null || true
+    done
   fi
 fi
 
