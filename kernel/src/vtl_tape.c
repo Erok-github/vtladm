@@ -808,6 +808,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
     pos = tape->position;
     if (pos >= tape->meta.used) {
         drv->at_end = true;
+	pr_warn("VTL: EOD triggered pos=%lld used=%llu\n", pos, tape->meta.used);
         *actual = 0;
         mutex_unlock(&tape->lock);
         mutex_unlock(&drv->lock);
