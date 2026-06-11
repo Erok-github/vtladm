@@ -328,8 +328,8 @@ int vtl_change_queue_depth(struct scsi_device *sdev, int depth);
 int vtl_tape_create(const char *name, u64 size, u8 density, u8 flags);
 
 /* Sidecar metadata (VTLMETA) I/O */
-int vtl_meta_write(const char *tape_path, u8 density, u8 flags);
-int vtl_meta_read(const char *tape_path, u8 *density_out, u8 *flags_out);
+int vtl_meta_write(const char *tape_path, u8 density, u8 flags, u64 used);
+int vtl_meta_read(const char *tape_path, u8 *density_out, u8 *flags_out, u64 *used_out);
 
 /* Compression engine (compression.c) */
 void vtl_block_header_fill(struct vtl_block_header *hdr, u32 uncomp_sz, u32 comp_sz, u8 algo);

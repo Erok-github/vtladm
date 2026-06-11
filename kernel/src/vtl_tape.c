@@ -92,20 +92,22 @@ static void vtl_generate_barcode(char *buf, int len)
 
 /* Sidecar metadata file format (24 bytes, little-endian):
  *   u32: magic 0x564C544D ("VTML")
- *   u16: version 1
+ *   u16: version 2
  *   u8:  density code
- *   u8:  flags (reserved)
- *   u8[16]: reserved
+ *   u8:  flags (compression algorithm etc.)
+ *   u64: used (end-of-data offset in bytes)
+ *   u8[8]: reserved
  */
 #define VTL_META_MAGIC   0x564C544D
-#define VTL_META_VERSION 1
+#define VTL_META_VERSION 2
 
 struct vtl_meta_header {
     __le32 magic;
     __le16 version;
     u8     density;
     u8     flags;
-    u8     reserved[16];
+    __le64 used;
+    u8     reserved[8];
 } __packed;
 
 void vtl_format_meta_path(char *buf, size_t len, const char *tape_path)
@@ -118,7 +120,7 @@ void vtl_format_meta_path(char *buf, size_t len, const char *tape_path)
         snprintf(buf + plen - 8, len - (plen - 8), ".vtlmeta");
 }
 
-int vtl_meta_write(const char *tape_path, u8 density, u8 flags)
+int vtl_meta_write(const char *tape_path, u8 density, u8 flags, u64 used)
 {
     struct vtl_meta_header hdr;
     struct file *filp;
@@ -131,6 +133,7 @@ int vtl_meta_write(const char *tape_path, u8 density, u8 flags)
     hdr.version = cpu_to_le16(VTL_META_VERSION);
     hdr.density = density;
     hdr.flags = flags;
+    hdr.used = cpu_to_le64(used);
 
     vtl_format_meta_path(meta_path, sizeof(meta_path), tape_path);
 
@@ -154,13 +157,16 @@ int vtl_meta_write(const char *tape_path, u8 density, u8 flags)
     return 0;
 }
 
-int vtl_meta_read(const char *tape_path, u8 *density_out, u8 *flags_out)
+int vtl_meta_read(const char *tape_path, u8 *density_out, u8 *flags_out, u64 *used_out)
 {
     struct vtl_meta_header hdr;
     struct file *filp;
     char meta_path[256];
     loff_t pos = 0;
     ssize_t n;
+
+    if (used_out)
+        *used_out = 0;
 
     vtl_format_meta_path(meta_path, sizeof(meta_path), tape_path);
 
@@ -181,6 +187,13 @@ int vtl_meta_read(const char *tape_path, u8 *density_out, u8 *flags_out)
         return -EINVAL;
     }
     if (le16_to_cpu(hdr.version) != VTL_META_VERSION) {
+        /* version 1: density/flags only, no used field */
+        if (le16_to_cpu(hdr.version) == 1) {
+            *density_out = hdr.density;
+            if (flags_out)
+                *flags_out = hdr.flags;
+            return 0;
+        }
         pr_warn("VTL: Unsupported meta version %u in %s\n",
             le16_to_cpu(hdr.version), meta_path);
         return -EINVAL;
@@ -189,6 +202,8 @@ int vtl_meta_read(const char *tape_path, u8 *density_out, u8 *flags_out)
     *density_out = hdr.density;
     if (flags_out)
         *flags_out = hdr.flags;
+    if (used_out)
+        *used_out = le64_to_cpu(hdr.used);
     return 0;
 }
 
@@ -249,7 +264,7 @@ int vtl_tape_create(const char *name, u64 size, u8 density, u8 flags)
     kref_init(&tape->ref);
 
     /* Write sidecar metadata file (non-fatal on failure) */
-    vtl_meta_write(path, density, flags);
+    vtl_meta_write(path, density, flags, 0);
 
     ret = vtl_tape_table_insert(tape);
     if (ret < 0) {
@@ -344,9 +359,11 @@ struct vtl_tape *vtl_tape_open_existing(const char *name)
     {
         u8 d = VTL_DEFAULT_DENSITY;
         u8 f = 0;
-        if (vtl_meta_read(path, &d, &f) == 0) {
+        u64 used = 0;
+        if (vtl_meta_read(path, &d, &f, &used) == 0) {
             tape->meta.density = d;
             tape->meta.meta_flags = f;
+            tape->meta.used = used;
         } else {
             tape->meta.density = VTL_DEFAULT_DENSITY;
             tape->meta.meta_flags = 0;
@@ -479,6 +496,10 @@ void vtl_changer_clear_media(struct vtl_changer *ch)
             mutex_lock(&t->lock);
             d->loaded_tape = NULL;
             t->loaded = false;
+            /* Persist filemark offsets and EOD position before clearing */
+            vtl_tape_save_metadata(t);
+            vtl_meta_write(t->path, t->meta.density,
+                       t->meta.meta_flags, t->meta.used);
             mutex_unlock(&t->lock);
             vtl_tape_put(t);
         }
@@ -764,9 +785,11 @@ int vtl_tape_unload(struct vtl_drive *drv)
     drv->loaded_tape = NULL;
     tape->loaded = false;
 
-    /* Persist filemark metadata before unloading */
+    /* Persist filemark metadata and EOD position before unloading */
     if (vtl_tape_save_metadata(tape) < 0)
         pr_warn("VTL: failed to save metadata for %s\n", tape->name);
+    vtl_meta_write(tape->path, tape->meta.density,
+               tape->meta.meta_flags, tape->meta.used);
 
     mutex_unlock(&tape->lock);
     mutex_unlock(&drv->lock);
@@ -1206,8 +1229,10 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
         saved_source_slot = src_drv->source_slot;
 	        src_drv->loaded_tape = NULL;
         src_drv->source_slot = -1;
-		/* Persist filemark metadata when unloading from drive */
+		/* Persist filemark metadata and EOD position when unloading from drive */
 		vtl_tape_save_metadata(t);
+		vtl_meta_write(t->path, t->meta.density,
+		           t->meta.meta_flags, t->meta.used);
 	        mutex_lock(&t->lock);
 	        t->loaded = false;
 	        mutex_unlock(&t->lock);
@@ -1416,6 +1441,8 @@ int vtl_changer_remove_medium(struct vtl_changer *ch, int elem)
     /* Persist filemark metadata before unloading */
     if (vtl_tape_save_metadata(t) < 0)
         pr_warn("VTL: failed to save metadata for %s\n", t->name);
+    vtl_meta_write(t->path, t->meta.density,
+               t->meta.meta_flags, t->meta.used);
 	        d->loaded_tape = NULL;
 	        d->at_filemark = false;
 	        d->at_end = false;
