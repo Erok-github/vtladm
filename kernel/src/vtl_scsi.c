@@ -1075,13 +1075,11 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
 
     /* End of data: return 0 bytes. meta.used tracks write boundary so
      * reads stop at the natural data end, not immediately at BOT. */
-    /* EOD: BLANK_CHECK tells st driver to stop reading.
-     * Kernel offline_guard_work restores any offline within 30s. */
+    /* End of data: return 0 bytes. meta.used tracks write boundary.
+     * st driver buffer interference is handled by mt status warm-up in install.sh. */
     if (actual == 0) {
-        vtl_set_sense(&drv->sense, BLANK_CHECK, 0x00, 5);
-        vtl_build_sense_buffer(cmd, &drv->sense);
         vtl_xfer_buf_free(buffer);
-        return SAM_STAT_CHECK_CONDITION;
+        return SAM_STAT_GOOD;
     }
 
     if (vtl_scsi_copy_to_sg(cmd, buffer, actual, &drv->sense)) {
