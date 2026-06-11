@@ -1298,6 +1298,7 @@ static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv,
 
     load = cdb[4] & 0x01;
     immed = (cdb[4] & 0x04) != 0;
+    (void)immed;  /* VTL ops always complete synchronously */
 
     if (load) {
         /* Load: no-op for VTL — tapes are loaded via MOVE_MEDIUM */
@@ -1362,6 +1363,15 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         int di = src - vtl_elem_drive_base(ch);
         if (di >= 0 && di < ch->num_drives &&
             !ch->drives[di].loaded_tape) {
+            vtl_set_sense(&ch->sense, NOT_READY, 0x3a, 0x00);
+            vtl_build_sense_buffer(cmd, &ch->sense);
+            return SAM_STAT_CHECK_CONDITION;
+        }
+    }
+    if (vtl_elem_is_ie(ch, src)) {
+        int mi = src - vtl_elem_ie_base(ch);
+        if (mi >= 0 && mi < ch->num_mailslots &&
+            !ch->mailslots[mi].occupied) {
             vtl_set_sense(&ch->sense, NOT_READY, 0x3a, 0x00);
             vtl_build_sense_buffer(cmd, &ch->sense);
             return SAM_STAT_CHECK_CONDITION;
