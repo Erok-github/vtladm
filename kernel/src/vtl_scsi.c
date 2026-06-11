@@ -1291,18 +1291,41 @@ static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv,
 {
     u8 *cdb = cmd->cmnd;
     u8 load;
+    bool immed;
+    int src_slot;
+    bool can_return;
+    int ret = 0;
 
     load = cdb[4] & 0x01;
+    immed = (cdb[4] & 0x04) != 0;
 
     if (load) {
-        /* Load on empty drive: no-op instead of NOT_READY */
+        /* Load: no-op for VTL — tapes are loaded via MOVE_MEDIUM */
         if (!vtl_drive_has_tape(drv))
             return SAM_STAT_GOOD;
     } else {
-        /* Load=0 -> REWIND to BOT (SSC-3: cdb[4]=0x00 or Re-Ten=0x02).
-         * Real UNLOAD is SMC MOVE_MEDIUM from drive to slot, not LOAD_UNLOAD. */
-        (void)vtl_tape_rewind(drv);
-        return SAM_STAT_GOOD;
+        /* SSC-3 unload sequence:
+         * 1. Flush pending filemarks — done by save_metadata in
+         *    vtl_tape_unload / vtl_changer_unload_drive_to_slot below.
+         * 2. Rewind to BOT. */
+        mutex_lock(&drv->lock);
+        if (drv->loaded_tape) {
+            drv->loaded_tape->position = 0;
+            drv->loaded_tape->meta.used = 0;
+            drv->at_bot = true;
+            drv->at_end = false;
+            drv->at_filemark = false;
+        }
+        src_slot = drv->source_slot;
+        can_return = (drv->loaded_tape && src_slot >= 1 &&
+                      src_slot <= ch->num_slots);
+        mutex_unlock(&drv->lock);
+
+        /* 3. Eject tape from drive. */
+        if (can_return)
+            ret = vtl_changer_unload_drive_to_slot(ch, drive_idx, src_slot);
+        if (ret != 0)
+            vtl_tape_unload(drv);
     }
 
     return SAM_STAT_GOOD;
