@@ -1115,9 +1115,10 @@ static int vtl_handle_write(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
     vtl_xfer_buf_free(buffer);
 
     if (ret < 0) {
+        /* Empty drive: no-op instead of NOT_READY */
         if (ret == -ENODEV)
-            vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0);
-        else if (ret == -EROFS)
+            return SAM_STAT_GOOD;
+        if (ret == -EROFS)
             vtl_set_sense(&drv->sense, DATA_PROTECT, 0x27, 0);
         else if (ret == -ENOSPC)
             vtl_set_sense(&drv->sense, VOLUME_OVERFLOW, 0x00, 0);
@@ -1319,12 +1320,12 @@ static int vtl_handle_write_filemarks(struct scsi_cmnd *cmd, struct vtl_drive *d
     count = vtl_get_u24(&cdb[2]);
     ret = vtl_tape_write_filemarks(drv, count);
     if (ret < 0) {
+        /* Empty drive: st_close sends WRITE_FILEMARKS - no-op */
         if (ret == -ENODEV)
-            vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0);
-        else if (ret == -EROFS)
-            vtl_set_sense(&drv->sense, DATA_PROTECT, 0x27, 0);
-        else
-            vtl_set_sense(&drv->sense, MEDIUM_ERROR, 0x03, 0);
+            return SAM_STAT_GOOD;
+
+
+
         vtl_build_sense_buffer(cmd, &drv->sense);
         return SAM_STAT_CHECK_CONDITION;
     }
