@@ -911,6 +911,7 @@ mode_pages:
 }
 
 static void vtl_parse_rw_blocks(const u8 *cdb, u8 op, u32 *blocks, u32 *block_len,
+    pr_warn("VTL: READ parsed blocks=%u blen=%u\n", blocks, block_len);
                                 struct vtl_drive *drv)
 {
     bool fixed;
@@ -1023,11 +1024,14 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
     int ret;
 
     vtl_parse_rw_blocks(cdb, op, &blocks, &block_len, drv);
+    pr_warn("VTL: READ parsed blocks=%u blen=%u\n", blocks, block_len);
     if (vtl_rw_prepare_xfer(cmd, &blocks, &block_len, &drv->sense) < 0)
+    pr_warn("VTL: READ prepare_xfer failed\n");
 	pr_warn("VTL: handle_read op=0x%02x blocks=%u blen=%u\n", op, blocks, block_len);
         return SAM_STAT_CHECK_CONDITION;
 
     buffer = vtl_xfer_buf_alloc(blocks * block_len);
+    if (!buffer) pr_warn("VTL: READ OOM alloc=%u\n", blocks * block_len);
     if (!buffer) {
         vtl_scsi_staging_oom(cmd, &drv->sense);
         return SAM_STAT_CHECK_CONDITION;
@@ -1071,10 +1075,13 @@ static int vtl_handle_write(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
     int ret;
 
     vtl_parse_rw_blocks(cdb, op, &blocks, &block_len, drv);
+    pr_warn("VTL: READ parsed blocks=%u blen=%u\n", blocks, block_len);
     if (vtl_rw_prepare_xfer(cmd, &blocks, &block_len, &drv->sense) < 0)
+    pr_warn("VTL: READ prepare_xfer failed\n");
         return SAM_STAT_CHECK_CONDITION;
 
     buffer = vtl_xfer_buf_alloc(blocks * block_len);
+    if (!buffer) pr_warn("VTL: READ OOM alloc=%u\n", blocks * block_len);
     if (!buffer) {
         vtl_scsi_staging_oom(cmd, &drv->sense);
         return SAM_STAT_CHECK_CONDITION;
