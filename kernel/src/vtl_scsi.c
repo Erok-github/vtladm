@@ -895,11 +895,9 @@ static int vtl_handle_mode_select(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         else if (new_block_size == 0)
             drv->block_size = 0;
         else
-            pr_info("VTL: MODE SELECT block_size %u out of range, ignored\n",
                 new_block_size);
         mutex_unlock(&drv->lock);
 
-        pr_info("VTL: MODE SELECT drive %d density=0x%02x block_size=%u\n",
             drv->id, new_density, new_block_size);
     }
 
@@ -923,7 +921,6 @@ mode_pages:
             if (pg_code == 0x0f && pg_len >= 1) {
                 /* Data Compression page: byte 2 bit 1 = DCE */
                 bool new_dce = (pbuf[parsed + 2] & 0x02) != 0;
-                pr_info("VTL: MODE SELECT page 0x0F DCE=%d drive %d\n",
                     new_dce, drv->id);
                 mutex_lock(&drv->lock);
                 drv->compression_enabled = new_dce;
