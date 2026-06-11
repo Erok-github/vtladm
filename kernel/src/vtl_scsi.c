@@ -2075,6 +2075,7 @@ static int vtl_changer_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost, u8 *c
     case REPORT_LUNS:
         return vtl_handle_report_luns(cmd, vhost);
     default:
+            pr_warn("VTL: unhandled tape op=0x%02x\n", cdb[0]);
         return vtl_cmd_illegal(cmd, &ch->sense);
     }
 }
@@ -2140,6 +2141,7 @@ static int vtl_tape_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost,
             return vtl_handle_read_capacity_16(cmd, drv);
         return vtl_cmd_illegal(cmd, &drv->sense);
     default:
+            pr_warn("VTL: unhandled tape op=0x%02x\n", cdb[0]);
         return vtl_cmd_illegal(cmd, &drv->sense);
     }
 }
