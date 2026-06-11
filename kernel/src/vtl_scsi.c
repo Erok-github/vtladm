@@ -1473,8 +1473,9 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         /* UA if destination drive already had a tape (replacement) */
         if (di >= 0 && di < ch->num_drives &&
             !vtl_elem_is_drive(ch, src)) {  /* src is slot/IE, not another drive */
+            bool had_tape;
             mutex_lock(&ch->drives[di].lock);
-            bool had_tape = (ch->drives[di].loaded_tape != NULL);
+            had_tape = (ch->drives[di].loaded_tape != NULL);
             mutex_unlock(&ch->drives[di].lock);
             if (had_tape) {
                 ch->drives[di].ua_pending = true;
