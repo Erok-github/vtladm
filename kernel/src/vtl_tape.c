@@ -805,6 +805,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
 
     pos = tape->position;
     if (pos >= tape->meta.used) {
+	pr_warn("VTL: EOD pos=%lld used=%llu\n", tape->position, tape->meta.used);
         drv->at_end = true;
         *actual = 0;
         mutex_unlock(&tape->lock);
