@@ -1154,6 +1154,7 @@ int vtl_tape_rewind(struct vtl_drive *drv)
     mutex_lock(&tape->lock);
     tape->position = 0;
     tape->meta.used = 0;  /* reset EOD: subsequent writes redefine data boundary */
+	pr_warn("VTL: REWIND reset meta.used=0\n");
     drv->at_bot = true;
     drv->at_end = false;
     drv->at_filemark = false;
