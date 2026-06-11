@@ -1456,6 +1456,16 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         return SAM_STAT_CHECK_CONDITION;
     }
 
+    /* After successful tape load, ensure all drives are online.
+     * Kylin st may offline drives during background probing. */
+    {
+        struct scsi_device *sdev;
+        shost_for_each_device(sdev, cmd->device->host) {
+            if (sdev->sdev_state == SDEV_OFFLINE)
+                scsi_device_set_state(sdev, SDEV_RUNNING);
+        }
+    }
+
     /* Unit Attention: only on media REPLACEMENT (not initial load or final empty).
      * Over-aggressive UA triggers Kylin st offline. */
     if (vtl_elem_is_drive(ch, dst)) {
@@ -2049,6 +2059,8 @@ static int vtl_changer_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost, u8 *c
     struct vtl_changer *ch = vhost->changer;
 
     switch (cdb[0]) {
+	pr_info_ratelimited("VTL: tape cmd op=0x%02x\n", cdb[0]);
+	pr_info_ratelimited("VTL: tape cmd op=0x%02x result=0x%x\n", cdb[0], __builtin_return_address(0));
     case INQUIRY:
         return vtl_handle_inquiry(cmd, vhost);
     case TEST_UNIT_READY:
@@ -2092,6 +2104,8 @@ static int vtl_tape_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost,
     drv = &ch->drives[drive_idx];
 
     switch (cdb[0]) {
+	pr_info_ratelimited("VTL: tape cmd op=0x%02x\n", cdb[0]);
+	pr_info_ratelimited("VTL: tape cmd op=0x%02x result=0x%x\n", cdb[0], __builtin_return_address(0));
     case INQUIRY:
         return vtl_handle_inquiry(cmd, vhost);
     case TEST_UNIT_READY:
