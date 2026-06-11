@@ -1390,10 +1390,12 @@ static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv,
         if (ret != 0)
             vtl_tape_unload(drv);
 
-        /* Unit Attention: medium may have changed */
-        drv->ua_pending = true;
-        drv->ua_asc = 0x28;
-        drv->ua_ascq = 0x00;
+        /* Unit Attention: only if drive was occupied (media was removed) */
+        if (ret == 0 || ret == -EINVAL) { /* eject succeeded */
+            drv->ua_pending = true;
+            drv->ua_asc = 0x28;
+            drv->ua_ascq = 0x00;
+        }
     }
 
     return SAM_STAT_GOOD;
@@ -1452,18 +1454,28 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         return SAM_STAT_CHECK_CONDITION;
     }
 
-    /* Unit Attention: medium may have changed in source/destination drives */
+    /* Unit Attention: only on media REPLACEMENT (not initial load or final empty).
+     * Over-aggressive UA triggers Kylin st offline. */
     if (vtl_elem_is_drive(ch, dst)) {
         int di = dst - vtl_elem_drive_base(ch);
-        if (di >= 0 && di < ch->num_drives) {
-            ch->drives[di].ua_pending = true;
-            ch->drives[di].ua_asc = 0x28;  /* MEDIUM MAY HAVE CHANGED */
-            ch->drives[di].ua_ascq = 0x00;
+        /* UA if destination drive already had a tape (replacement) */
+        if (di >= 0 && di < ch->num_drives &&
+            !vtl_elem_is_drive(ch, src)) {  /* src is slot/IE, not another drive */
+            mutex_lock(&ch->drives[di].lock);
+            bool had_tape = (ch->drives[di].loaded_tape != NULL);
+            mutex_unlock(&ch->drives[di].lock);
+            if (had_tape) {
+                ch->drives[di].ua_pending = true;
+                ch->drives[di].ua_asc = 0x28;
+                ch->drives[di].ua_ascq = 0x00;
+            }
         }
     }
     if (vtl_elem_is_drive(ch, src)) {
         int di = src - vtl_elem_drive_base(ch);
-        if (di >= 0 && di < ch->num_drives) {
+        /* UA if drive becomes empty (tape removed) and DST is not a drive */
+        if (di >= 0 && di < ch->num_drives &&
+            !vtl_elem_is_drive(ch, dst)) {
             ch->drives[di].ua_pending = true;
             ch->drives[di].ua_asc = 0x28;
             ch->drives[di].ua_ascq = 0x00;
