@@ -1193,7 +1193,7 @@ static int vtl_probe(struct platform_device *pdev)
     INIT_DELAYED_WORK(&vhost->post_add_scan_work, vtl_host_scan_handler);
     INIT_DELAYED_WORK(&vhost->offline_guard_work, vtl_offline_guard_work_fn);
     /* Start guard after scan completes (deferred ~60s); works alongside queuecommand auto-restore */
-    schedule_delayed_work(&vhost->offline_guard_work, 60 * HZ);
+    schedule_delayed_work(&vhost->offline_guard_work, 10 * HZ);
     {
         unsigned int base = (unsigned int)max_t(int, 0, vtl_scan_delay_ms);
         unsigned int stagger = (unsigned int)max_t(int, 0, vtl_bringup_stagger_ms);
