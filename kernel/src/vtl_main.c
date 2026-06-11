@@ -1044,6 +1044,7 @@ static void vtl_offline_guard_work_fn(struct work_struct *work)
     {
         struct scsi_device *sdev;
         shost_for_each_device(sdev, sh) {
+	\tpr_info_ratelimited("VTL: offline guard restored LUN%u\n", sdev->lun);
             if (sdev->sdev_state == SDEV_OFFLINE)
                 scsi_device_set_state(sdev, SDEV_RUNNING);
         }
