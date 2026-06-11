@@ -1367,35 +1367,16 @@ static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv,
         if (!vtl_drive_has_tape(drv))
             return SAM_STAT_GOOD;
     } else {
-        /* SSC-3 unload sequence:
-         * 1. Flush pending filemarks — done by save_metadata in
-         *    vtl_tape_unload / vtl_changer_unload_drive_to_slot below.
-         * 2. Rewind to BOT. */
+        /* Load=0: REWIND only (SSC-3 Position to BOP semantics).
+         * Physical unload is SMC MOVE_MEDIUM, not LOAD_UNLOAD. */
         mutex_lock(&drv->lock);
         if (drv->loaded_tape) {
             drv->loaded_tape->position = 0;
-            /* meta.used tracks written data, reset on rewind or erase */
             drv->at_bot = true;
             drv->at_end = false;
             drv->at_filemark = false;
         }
-        src_slot = drv->source_slot;
-        can_return = (drv->loaded_tape && src_slot >= 1 &&
-                      src_slot <= ch->num_slots);
         mutex_unlock(&drv->lock);
-
-        /* 3. Eject tape from drive. */
-        if (can_return)
-            ret = vtl_changer_unload_drive_to_slot(ch, drive_idx, src_slot);
-        if (ret != 0)
-            vtl_tape_unload(drv);
-
-        /* Unit Attention: only if drive was occupied (media was removed) */
-        if (ret == 0 || ret == -EINVAL) { /* eject succeeded */
-            drv->ua_pending = true;
-            drv->ua_asc = 0x28;
-            drv->ua_ascq = 0x00;
-        }
     }
 
     return SAM_STAT_GOOD;
