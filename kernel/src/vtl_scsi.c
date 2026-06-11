@@ -53,6 +53,15 @@
 #ifndef ERASE
 #define ERASE 0x19
 #endif
+#ifndef ALLOW_OVERWRITE
+#define ALLOW_OVERWRITE 0x1c
+#endif
+#ifndef VERIFY_6
+#define VERIFY_6 0x13
+#endif
+#ifndef POSITION_TO_ELEMENT
+#define POSITION_TO_ELEMENT 0x2b
+#endif
 
 /*
  * Compose cmd->result for SG_IO / sg3_utils: status in bits 0..7 is SAM status << 1;
@@ -1333,8 +1342,8 @@ static int vtl_handle_write_filemarks(struct scsi_cmnd *cmd, struct vtl_drive *d
  */
 static int vtl_handle_synchronize_cache(struct scsi_cmnd *cmd, struct vtl_drive *drv)
 {
-    struct vtl_tape *tape;
     int ret = 0;
+    struct vtl_tape *tape;
     struct file *filp;
 
     mutex_lock(&drv->lock);
@@ -2049,8 +2058,6 @@ static int vtl_changer_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost, u8 *c
     struct vtl_changer *ch = vhost->changer;
 
     switch (cdb[0]) {
-	pr_info_ratelimited("VTL: tape cmd op=0x%02x\n", cdb[0]);
-	pr_info_ratelimited("VTL: tape cmd op=0x%02x result=0x%x\n", cdb[0], __builtin_return_address(0));
     case INQUIRY:
         return vtl_handle_inquiry(cmd, vhost);
     case TEST_UNIT_READY:
@@ -2077,7 +2084,6 @@ static int vtl_changer_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost, u8 *c
     case REPORT_LUNS:
         return vtl_handle_report_luns(cmd, vhost);
     default:
-            pr_warn("VTL: unhandled tape op=0x%02x\n", cdb[0]);
         return vtl_cmd_illegal(cmd, &ch->sense);
     }
 }
@@ -2094,8 +2100,6 @@ static int vtl_tape_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost,
     drv = &ch->drives[drive_idx];
 
     switch (cdb[0]) {
-	pr_info_ratelimited("VTL: tape cmd op=0x%02x\n", cdb[0]);
-	pr_info_ratelimited("VTL: tape cmd op=0x%02x result=0x%x\n", cdb[0], __builtin_return_address(0));
     case INQUIRY:
         return vtl_handle_inquiry(cmd, vhost);
     case TEST_UNIT_READY:
@@ -2136,6 +2140,10 @@ static int vtl_tape_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost,
         return vtl_handle_report_density_support(cmd, drv);
     case READ_CAPACITY:
         return vtl_handle_read_capacity_10(cmd, drv);
+    case ALLOW_OVERWRITE:
+        return SAM_STAT_GOOD;
+    case VERIFY_6:
+        return SAM_STAT_GOOD;
     case SYNCHRONIZE_CACHE:
         return vtl_handle_synchronize_cache(cmd, drv);
     case ERASE:
@@ -2144,8 +2152,9 @@ static int vtl_tape_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost,
         if (cdb[1] == SERVICE_ACTION_READ_CAPACITY_16)
             return vtl_handle_read_capacity_16(cmd, drv);
         return vtl_cmd_illegal(cmd, &drv->sense);
+    case POSITION_TO_ELEMENT:
+        return SAM_STAT_GOOD;
     default:
-            pr_warn("VTL: unhandled tape op=0x%02x\n", cdb[0]);
         return vtl_cmd_illegal(cmd, &drv->sense);
     }
 }
