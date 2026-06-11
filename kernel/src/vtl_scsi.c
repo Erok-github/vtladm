@@ -1323,9 +1323,10 @@ static int vtl_handle_write_filemarks(struct scsi_cmnd *cmd, struct vtl_drive *d
         /* Empty drive: st_close sends WRITE_FILEMARKS - no-op */
         if (ret == -ENODEV)
             return SAM_STAT_GOOD;
-
-
-
+        if (ret == -EROFS)
+            vtl_set_sense(&drv->sense, DATA_PROTECT, 0x27, 0);
+        else
+            vtl_set_sense(&drv->sense, MEDIUM_ERROR, 0x03, 0);
         vtl_build_sense_buffer(cmd, &drv->sense);
         return SAM_STAT_CHECK_CONDITION;
     }

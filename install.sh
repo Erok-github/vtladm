@@ -298,7 +298,7 @@ options st try_direct_io=0 try_rdio=0 try_wdio=0 buffer_kbs=32
 STEOF
 echo "installed /etc/modprobe.d/vtl-st.conf (st try_direct_io=0)"
 if lsmod 2>/dev/null | awk '{print $1}' | grep -qx st; then
-  rmmod st 2>/dev/null && echo "reloaded st with new config" || true
+  rmmod st 2>/dev/null && modprobe st 2>/dev/null && echo "reloaded st with new config" || true
 fi
 
 mkdir -p "$PREFIX"/{bin,ko,sbin,scripts,docs,lib/systemd/system}
@@ -687,9 +687,10 @@ if [ "$ENABLE_SYSTEMD" -eq 1 ]; then
     if lsmod 2>/dev/null | awk '{print $1}' | grep -qx st; then
       rmmod st 2>/dev/null && modprobe st 2>/dev/null && echo "  st reloaded with vtl-st.conf" || true
     fi
-    # One-shot restore after st reload (kernel offline_guard_work handles ongoing)
-    for _sd in /sys/class/scsi_device/*/device/state; do
-      [ -f "$_sd" ] && echo running > "$_sd" 2>/dev/null || true
+    # One-shot restore of VTL tape devices after st reload (kernel guard handles ongoing)
+    for _sd in /sys/class/scsi_device/*/device; do
+      _t=$(cat "$_sd/type" 2>/dev/null) || continue
+      [ "$_t" = "1" ] && echo running > "$_sd/state" 2>/dev/null || true
     done
   fi
 fi
