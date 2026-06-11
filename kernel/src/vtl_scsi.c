@@ -1084,6 +1084,7 @@ static int vtl_handle_write(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         return SAM_STAT_CHECK_CONDITION;
     }
     ret = vtl_tape_write(drv, buffer, blocks * block_len, NULL);
+    if (ret < 0) pr_warn("VTL: WRITE err ret=%d at pos=%lld\n", ret, (drv->loaded_tape ? drv->loaded_tape->position : -1LL));
     vtl_xfer_buf_free(buffer);
 
     if (ret < 0) {
