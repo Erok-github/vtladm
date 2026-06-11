@@ -159,6 +159,9 @@ static struct scsi_host_template vtl_sht = {
     .slave_destroy = vtl_slave_destroy,
     .slave_configure = vtl_slave_configure,
     .change_queue_depth = vtl_change_queue_depth,
+    .eh_abort_handler = vtl_eh_abort,
+    .eh_device_reset_handler = vtl_eh_device_reset,
+    .eh_host_reset_handler = vtl_eh_host_reset,
     .cmd_per_lun = 8,
     .can_queue = 32,
     .sg_tablesize = 256,
@@ -1487,3 +1490,21 @@ static const struct kernel_param_ops vtl_pvoltag_ops = {
 module_param_cb(pvoltag_format, &vtl_pvoltag_ops, &vtl_pvoltag_format, 0644);
 MODULE_PARM_DESC(pvoltag_format,
     "PVolTag barcode format: 0=auto (heuristic, default), 1=standard SMC-3, 2=mtx");
+
+
+/* SCSI EH handlers: return SUCCESS to prevent mid-layer escalation to bus reset
+ * which triggers Kylin 4.19 st driver offline ("not ready after error recovery"). */
+int vtl_eh_abort(struct scsi_cmnd *cmd)
+{
+    return SUCCESS;
+}
+
+int vtl_eh_device_reset(struct scsi_cmnd *cmd)
+{
+    return SUCCESS;
+}
+
+int vtl_eh_host_reset(struct scsi_cmnd *cmd)
+{
+    return SUCCESS;
+}

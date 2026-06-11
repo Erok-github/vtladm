@@ -319,6 +319,10 @@ struct vtl_host {
     struct delayed_work offline_guard_work;
 };
 
+int vtl_eh_abort(struct scsi_cmnd *cmd);
+int vtl_eh_device_reset(struct scsi_cmnd *cmd);
+int vtl_eh_host_reset(struct scsi_cmnd *cmd);
+
 int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd);
 int vtl_slave_alloc(struct scsi_device *sdev);
 void vtl_slave_destroy(struct scsi_device *sdev);
