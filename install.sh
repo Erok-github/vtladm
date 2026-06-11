@@ -387,6 +387,14 @@ if [ -f "$ROOT/packaging/udev/59-vtl-scsi.rules" ]; then
   echo "installed /etc/udev/rules.d/59-vtl-scsi.rules (ID_SCSI=skip for VTL vendor)"
 fi
 
+# st driver: disable direct I/O for VTL devices to prevent offline
+_ST_CONF_SRC="$ROOT/packaging/etc/modprobe.d/vtl-st.conf"
+if [ -f "$_ST_CONF_SRC" ]; then
+  mkdir -p /etc/modprobe.d
+  install -m 0644 "$_ST_CONF_SRC" /etc/modprobe.d/vtl-st.conf
+  echo "installed /etc/modprobe.d/vtl-st.conf (st try_direct_io=0)"
+fi
+
 # systemd
 if command -v systemctl >/dev/null 2>&1; then
   for _u in vtl-kernel.service vtladm-web.service vtl-patrol.service vtl-patrol.timer vtl-robot-sync.service vtl-robot-sync.timer; do
