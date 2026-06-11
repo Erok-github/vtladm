@@ -323,11 +323,9 @@ struct vtl_tape *vtl_tape_open_existing(const char *name)
     mutex_init(&tape->lock);
     memset(&tape->meta, 0, sizeof(tape->meta));
     tape->meta.capacity = i_size_read(file_inode(filp));
-    /* Init used from actual allocated blocks so EOD reflects real data end,
-     * not the 10 GB sparse-file capacity.  Writes advance it further. */
-    tape->meta.used = (u64)file_inode(filp)->i_blocks * 512;
-    if (tape->meta.used > tape->meta.capacity)
-        tape->meta.used = tape->meta.capacity;
+    /* meta.used starts at 0 and is advanced by writes.
+     * REWIND resets position to 0 but keeps meta.used so
+     * existing data can be read back. */
     if (tape->meta.capacity < VTL_MIN_TAPE_SIZE) {
         pr_warn("VTL: tape %s file size %llu below minimum, clamping to %llu\n",
             name, tape->meta.capacity, (u64)VTL_MIN_TAPE_SIZE);
