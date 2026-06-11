@@ -687,14 +687,16 @@ if [ "$ENABLE_SYSTEMD" -eq 1 ]; then
     if lsmod 2>/dev/null | awk '{print $1}' | grep -qx st; then
       rmmod st 2>/dev/null && modprobe st 2>/dev/null && echo "  st reloaded with vtl-st.conf" || true
     fi
-    # Warm up st driver to flush any internal buffers (prevents stale-data reads)
-    for _st in /dev/st[0-9]* /dev/nst[0-9]*; do
-      [ -c "$_st" ] && mt -f "$_st" status > /dev/null 2>&1 || true
-    done
     # One-shot restore of VTL tape devices after st reload (kernel guard handles ongoing)
     for _sd in /sys/class/scsi_device/*/device; do
       _t=$(cat "$_sd/type" 2>/dev/null) || continue
       [ "$_t" = "1" ] && echo running > "$_sd/state" 2>/dev/null || true
+    done
+    # Warm up st driver to flush any internal buffers (prevents stale-data reads)
+    # Must run AFTER device state restore so devices are online
+    sleep 1
+    for _st in /dev/st[0-9]* /dev/nst[0-9]*; do
+      [ -c "$_st" ] && mt -f "$_st" status > /dev/null 2>&1 || true
     done
   fi
 fi
