@@ -50,6 +50,9 @@
 #ifndef SYNCHRONIZE_CACHE
 #define SYNCHRONIZE_CACHE 0x35
 #endif
+#ifndef ERASE
+#define ERASE 0x19
+#endif
 
 /*
  * Compose cmd->result for SG_IO / sg3_utils: status in bits 0..7 is SAM status << 1;
@@ -1102,6 +1105,21 @@ static int vtl_handle_write(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         return SAM_STAT_CHECK_CONDITION;
     }
 
+    /* Early Warning EOM: tape nearing end of capacity */
+    {
+        struct vtl_tape *tp;
+        mutex_lock(&drv->lock);
+        tp = drv->loaded_tape;
+        if (tp && tp->meta.capacity > VTL_EARLY_WARN_MARGIN &&
+            tp->position >= tp->meta.capacity - VTL_EARLY_WARN_MARGIN) {
+            mutex_unlock(&drv->lock);
+            vtl_set_sense(&drv->sense, NO_SENSE, 0x00, 0x02);
+            vtl_build_sense_buffer(cmd, &drv->sense);
+            return SAM_STAT_CHECK_CONDITION;
+        }
+        mutex_unlock(&drv->lock);
+    }
+
     return SAM_STAT_GOOD;
 }
 
@@ -1138,6 +1156,48 @@ static int vtl_handle_space(struct scsi_cmnd *cmd, struct vtl_drive *drv)
  * READ CAPACITY (10): returns tape file capacity as LBA + block length.
  * Uses 512-byte logical blocks when drive is in variable block mode.
  */
+/*
+ * ERASE (0x19): short erase resets position/meta.used so reads return EOD;
+ * long erase (LONG bit) does the same for VTL (no physical medium to sanitize).
+ * IMMED=1 returns immediately; IMMED=0 waits (identical for VTL).
+ */
+static int vtl_handle_erase(struct scsi_cmnd *cmd, struct vtl_drive *drv)
+{
+    u8 *cdb = cmd->cmnd;
+    struct vtl_tape *tape;
+
+    mutex_lock(&drv->lock);
+    tape = drv->loaded_tape;
+    if (!tape) {
+        mutex_unlock(&drv->lock);
+        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0);
+        vtl_build_sense_buffer(cmd, &drv->sense);
+        return SAM_STAT_CHECK_CONDITION;
+    }
+    if (tape->write_protected) {
+        mutex_unlock(&drv->lock);
+        vtl_set_sense(&drv->sense, DATA_PROTECT, 0x27, 0);
+        vtl_build_sense_buffer(cmd, &drv->sense);
+        return SAM_STAT_CHECK_CONDITION;
+    }
+
+    /* Short/long erase: reset data boundary.
+     * LONG bit (cdb[1] & 0x20) for thorough erase — same outcome in VTL. */
+    mutex_lock(&tape->lock);
+    tape->position = 0;
+    tape->meta.used = 0;
+    drv->at_bot = true;
+    drv->at_end = false;
+    drv->at_filemark = false;
+    /* Clear filemarks */
+    vtl_tape_free_metadata(tape);
+    tape->meta.accessed = ktime_get_real_seconds();
+    mutex_unlock(&tape->lock);
+    mutex_unlock(&drv->lock);
+
+    return SAM_STAT_GOOD;
+}
+
 static int vtl_handle_read_capacity_10(struct scsi_cmnd *cmd, struct vtl_drive *drv)
 {
     struct vtl_tape *tape;
@@ -1385,6 +1445,24 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         vtl_set_sense(&ch->sense, ILLEGAL_REQUEST, 0x21, 0);
         vtl_build_sense_buffer(cmd, &ch->sense);
         return SAM_STAT_CHECK_CONDITION;
+    }
+
+    /* Unit Attention: medium may have changed in source/destination drives */
+    if (vtl_elem_is_drive(ch, dst)) {
+        int di = dst - vtl_elem_drive_base(ch);
+        if (di >= 0 && di < ch->num_drives) {
+            ch->drives[di].ua_pending = true;
+            ch->drives[di].ua_asc = 0x28;  /* MEDIUM MAY HAVE CHANGED */
+            ch->drives[di].ua_ascq = 0x00;
+        }
+    }
+    if (vtl_elem_is_drive(ch, src)) {
+        int di = src - vtl_elem_drive_base(ch);
+        if (di >= 0 && di < ch->num_drives) {
+            ch->drives[di].ua_pending = true;
+            ch->drives[di].ua_asc = 0x28;
+            ch->drives[di].ua_ascq = 0x00;
+        }
     }
 
     return SAM_STAT_GOOD;
@@ -2036,6 +2114,8 @@ static int vtl_tape_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost,
         return vtl_handle_read_capacity_10(cmd, drv);
     case SYNCHRONIZE_CACHE:
         return vtl_handle_synchronize_cache(cmd, drv);
+    case ERASE:
+        return vtl_handle_erase(cmd, drv);
     case SERVICE_ACTION_IN:
         if (cdb[1] == SERVICE_ACTION_READ_CAPACITY_16)
             return vtl_handle_read_capacity_16(cmd, drv);
@@ -2059,6 +2139,20 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
         shost_for_each_device(sdev, shost) {
             if (sdev->sdev_state == SDEV_OFFLINE)
                 scsi_device_set_state(sdev, SDEV_RUNNING);
+        }
+    }
+
+    /* Unit Attention: report pending UA before processing command.
+     * INQUIRY / REQUEST_SENSE do NOT clear UA (per SPC-3). */
+    if (lun >= 1 && lun <= (unsigned int)vhost->changer->num_drives) {
+        struct vtl_drive *drv = &vhost->changer->drives[lun - 1];
+        if (drv->ua_pending && cdb[0] != INQUIRY && cdb[0] != REQUEST_SENSE) {
+            drv->ua_pending = false;
+            vtl_set_sense(&drv->sense, UNIT_ATTENTION, drv->ua_asc, drv->ua_ascq);
+            vtl_build_sense_buffer(cmd, &drv->sense);
+            cmd->result = (DID_OK << 16) | (DRIVER_SENSE << 8) | (SAM_STAT_CHECK_CONDITION << 1);
+            vtl_scsi_done(cmd);
+            return 0;
         }
     }
 

@@ -224,10 +224,17 @@ struct vtl_drive {
     u8   compression_algorithm; /* VTL_COMP_ZLIB or VTL_COMP_LZO */
     u64  comp_bytes_written;   /* uncompressed bytes written (LOG SENSE stats) */
     u64  comp_bytes_read;      /* uncompressed bytes read    (LOG SENSE stats) */
+    /* Unit Attention: set on media-change / reset, cleared by REQUEST SENSE */
+    bool ua_pending;
+    u8   ua_asc;
+    u8   ua_ascq;
+
     struct vtl_sense_data sense;
     struct mutex lock;
     struct work_struct work;
 };
+
+#define VTL_EARLY_WARN_MARGIN (512ULL * 1024 * 1024)  /* 512 MiB */
 
 struct vtl_slot {
     int id;
