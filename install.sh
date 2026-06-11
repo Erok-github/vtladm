@@ -393,6 +393,10 @@ if [ -f "$_ST_CONF_SRC" ]; then
   mkdir -p /etc/modprobe.d
   install -m 0644 "$_ST_CONF_SRC" /etc/modprobe.d/vtl-st.conf
   echo "installed /etc/modprobe.d/vtl-st.conf (st try_direct_io=0)"
+  # Reload st if already loaded so the new config takes effect
+  if lsmod 2>/dev/null | awk '{print $1}' | grep -qx st; then
+    rmmod st 2>/dev/null && modprobe st 2>/dev/null && echo "reloaded st with new config" || true
+  fi
 fi
 
 # systemd
