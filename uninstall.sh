@@ -80,6 +80,8 @@ if command -v systemctl >/dev/null 2>&1; then
   echo "systemd units stopped and disabled"
 fi
 
+rm -f /etc/modprobe.d/vtl-st.conf /etc/udev/rules.d/59-vtl-scsi.rules 2>/dev/null || true
+
 _vtl_zvol_cleanup() {
   if [ -x "$PREFIX/bin/vtladm" ] && [ -f "$PREFIX/var/vtl.db" ] && command -v zfs >/dev/null 2>&1; then
     echo ">> zvol cleanup: checking for ZFS datasets"
