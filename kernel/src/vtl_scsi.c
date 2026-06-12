@@ -1086,11 +1086,29 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         vtl_xfer_buf_free(buffer);
         return SAM_STAT_CHECK_CONDITION;
     }
-    /* Notify initiator of short read: variable-length blocks may be smaller
-     * than the requested transfer length. Without this, st driver pads the
-     * last partial block to full block size, corrupting data. */
-    if (actual < blocks * block_len)
-        scsi_set_resid(cmd, (int)(blocks * block_len - actual));
+    /* SSC-3 §5.2.15: when actual block size < requested and SILI=0, return
+     * CHECK CONDITION with ILI and INFORMATION field. st driver reads
+     * INFORMATION to determine true block size, avoiding padding. */
+    if (actual < blocks * block_len) {
+        u32 diff = blocks * block_len - actual;
+        bool sili = ((cdb[1] & 0x02) != 0); /* SILI bit for all READ variants */
+        if (!sili) {
+            u8 *sb = cmd->sense_buffer;
+            memset(sb, 0, SCSI_SENSE_BUFFERSIZE);
+            sb[0] = 0xf0;
+            sb[2] = NO_SENSE;
+            sb[3] = (u8)(diff >> 24);
+            sb[4] = (u8)(diff >> 16);
+            sb[5] = (u8)(diff >> 8);
+            sb[6] = (u8)diff;
+            sb[7] = 8;
+            sb[15] = 0x20; /* ILI */
+            cmd->result = (DID_OK << 16) | (DRIVER_SENSE << 8) | (SAM_STAT_CHECK_CONDITION << 1);
+            vtl_xfer_buf_free(buffer);
+            return 0;
+        }
+        scsi_set_resid(cmd, (int)diff);
+    }
     vtl_xfer_buf_free(buffer);
 
     return SAM_STAT_GOOD;
