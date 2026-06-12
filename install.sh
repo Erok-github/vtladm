@@ -692,11 +692,16 @@ if [ "$ENABLE_SYSTEMD" -eq 1 ]; then
       _t=$(cat "$_sd/type" 2>/dev/null) || continue
       [ "$_t" = "1" ] && echo running > "$_sd/state" 2>/dev/null || true
     done
-    # Warm up st driver to flush any internal buffers (prevents stale-data reads)
-    # Must run AFTER device state restore so devices are online
+    # Warm up st driver: first mt command triggers error recovery on Kylin 4.19
+    # ("Device offlined - not ready after error recovery"), second succeeds.
+    # Must run AFTER device state restore so devices are online.
     sleep 1
     for _st in /dev/st[0-9]* /dev/nst[0-9]*; do
-      [ -c "$_st" ] && mt -f "$_st" status > /dev/null 2>&1 || true
+      if [ -c "$_st" ]; then
+        mt -f "$_st" status > /dev/null 2>&1 || true
+        mt -f "$_st" rewind > /dev/null 2>&1 || true
+        mt -f "$_st" rewind > /dev/null 2>&1 || true
+      fi
     done
   fi
 fi
