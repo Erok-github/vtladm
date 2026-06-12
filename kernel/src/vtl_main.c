@@ -1191,6 +1191,7 @@ static int vtl_probe(struct platform_device *pdev)
     shost->max_lun = changer->num_drives + 1;
     shost->max_channel = 0;
     shost->max_id = 1;
+    shost->max_cmd_len = 16;  /* 16-byte CDBs (sg_get_elem_status etc.) */
 
     INIT_DELAYED_WORK(&vhost->scan_work, vtl_host_bringup_handler);
     INIT_DELAYED_WORK(&vhost->post_add_scan_work, vtl_host_scan_handler);

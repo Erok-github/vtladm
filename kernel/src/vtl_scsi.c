@@ -2093,6 +2093,8 @@ static int vtl_changer_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost, u8 *c
 #endif
     case READ_ELEMENT_STATUS:
         return vtl_handle_read_element_status(cmd, vhost);
+    case SERVICE_ACTION_IN:
+        return SAM_STAT_GOOD;
     case REPORT_LUNS:
         return vtl_handle_report_luns(cmd, vhost);
     default:
