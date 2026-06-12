@@ -686,13 +686,15 @@ fn cmd_library_export_tgt(
     _portal_port: u16,
 ) -> Result<(), String> {
     if cli.dry_run {
-        println!("tgtadm --lld iscsi --mode target --op new --tid 1 --targetname {}", iqn);
-        let mut devs: Vec<&str> = vec![changer_sg];
+        println!("# Auto TID, LUN 0=controller, LUN 1=changer, LUN 2+=drives");
+        println!("NEXT_TID=$(expr $(tgtadm --lld iscsi --mode target --op show 2>/dev/null | grep -c ^Target) + 1)");
+        println!("tgtadm --lld iscsi --mode target --op new --tid $NEXT_TID --targetname {}", iqn);
+        let mut devs = vec![changer_sg];
         devs.extend(drive_sg.iter().map(|s| s.as_str()));
         for (i, p) in devs.iter().enumerate() {
-            println!("tgtadm --lld iscsi --mode logicalunit --op new --tid 1 --lun {} --bstype=sg --device-type=pt --backing-store={}", i + 1, p);
+            println!("tgtadm --lld iscsi --mode logicalunit --op new --tid $NEXT_TID --lun {} --bstype=sg --device-type=pt --backing-store={}", i + 1, p);
         }
-        println!("tgtadm --lld iscsi --mode target --op bind --tid 1 --initiator-address=ALL");
+        println!("tgtadm --lld iscsi --mode target --op bind --tid $NEXT_TID --initiator-address=ALL");
         return Ok(());
     }
 
@@ -707,23 +709,39 @@ fn cmd_library_export_tgt(
         Ok(())
     };
 
-    // Create target (ignore "already exists")
-    run(&["--lld", "iscsi", "--mode", "target", "--op", "new", "--tid", "1", "--targetname", iqn])?;
+    // Find the next available TID (tgt requires explicit --tid)
+    let mut max_tid = 0u32;
+    if let Ok(show) = Command::new("tgtadm")
+        .args(&["--lld","iscsi","--mode","target","--op","show"]).output()
+    {
+        for line in String::from_utf8_lossy(&show.stdout).lines() {
+            if let Some(rest) = line.strip_prefix("Target ") {
+                if let Some(n) = rest.split(':').next().and_then(|s| s.parse::<u32>().ok()) {
+                    if n > max_tid { max_tid = n; }
+                }
+            }
+        }
+    }
+    let tid = max_tid + 1;
+    let tid_s = tid.to_string();
 
-    // Create LUNs: changer first, then drives (skip LUN 0 which is controller)
-    let lun_offset = 1u32; // LUN 0 is tgt controller, VTL changer starts at LUN 1
+    // Create target
+    run(&["--lld", "iscsi", "--mode", "target", "--op", "new", "--tid", &tid_s, "--targetname", iqn])?;
+
+    // Create LUNs: changer at LUN 1, drives at LUN 2+ (LUN 0 is tgt controller)
+    let lun_offset = 1u32;
     let mut all_devs: Vec<String> = Vec::with_capacity(1 + drive_sg.len());
     all_devs.push(changer_sg.to_string());
     all_devs.extend(drive_sg.iter().cloned());
     for (i, dev) in all_devs.iter().enumerate() {
         let lun = lun_offset + i as u32;
         run(&["--lld", "iscsi", "--mode", "logicalunit", "--op", "new",
-            "--tid", "1", "--lun", &lun.to_string(),
+            "--tid", &tid_s, "--lun", &lun.to_string(),
             "--bstype=sg", "--device-type=pt", "--backing-store", dev])?;
     }
 
     // Bind to portal
-    run(&["--lld", "iscsi", "--mode", "target", "--op", "bind", "--tid", "1", "--initiator-address=ALL"])?;
+    run(&["--lld", "iscsi", "--mode", "target", "--op", "bind", "--tid", &tid_s, "--initiator-address=ALL"])?;
 
     // Persist config and enable tgtd for reboot survival
     let _ = Command::new("tgt-admin").arg("--dump").arg("--conf")
