@@ -743,9 +743,16 @@ fn cmd_library_export_tgt(
     // Bind to portal
     run(&["--lld", "iscsi", "--mode", "target", "--op", "bind", "--tid", &tid_s, "--initiator-address=ALL"])?;
 
-    // Persist config and enable tgtd for reboot survival
-    let _ = Command::new("tgt-admin").arg("--dump").arg("--conf")
-        .arg("/etc/tgt/targets.conf").output();
+    // Persist config for reboot survival (tgt-admin --dump omits bs-type/device-type)
+    let mut conf = String::from("default-driver iscsi\n\n");
+    conf.push_str(&format!("<target {}>\n", iqn));
+    conf.push_str("\tbs-type sg\n");
+    conf.push_str("\tdevice-type pt\n");
+    for dev in &all_devs {
+        conf.push_str(&format!("\tbacking-store {}\n", dev));
+    }
+    conf.push_str("</target>\n");
+    let _ = std::fs::write("/etc/tgt/targets.conf", &conf);
     let _ = Command::new("systemctl").arg("enable").arg("--now").arg("tgtd").output();
 
     eprintln!("tgt export complete: {} LUNs on {} (tgtd enabled for reboot)", all_devs.len(), iqn);
@@ -827,8 +834,55 @@ fn cmd_library_unexport(
                 return Err(format!("tgtadm delete failed: {}", stderr.trim()));
             }
         }
-        let _ = Command::new("tgt-admin").arg("--dump").arg("--conf")
-            .arg("/etc/tgt/targets.conf").output();
+        // Rewrite persisted config without this target
+        {
+            let mut conf = String::from("default-driver iscsi\n\n");
+            // Re-dump remaining targets
+            if let Ok(show) = Command::new("tgtadm")
+                .args(&["--lld","iscsi","--mode","target","--op","show"]).output()
+            {
+                let out = String::from_utf8_lossy(&show.stdout);
+                let mut in_target = false;
+                let mut cur_iqn = String::new();
+                let mut cur_backing: Vec<String> = Vec::new();
+                for line in out.lines() {
+                    if let Some(rest) = line.strip_prefix("Target ") {
+                        if !cur_iqn.is_empty() && cur_iqn != iqn {
+                            conf.push_str(&format!("<target {}>\n", cur_iqn));
+                            conf.push_str("\tbs-type sg\n");
+                            conf.push_str("\tdevice-type pt\n");
+                            for dev in &cur_backing {
+                                conf.push_str(&format!("\tbacking-store {}\n", dev));
+                            }
+                            conf.push_str("</target>\n\n");
+                        }
+                        cur_iqn.clear();
+                        cur_backing.clear();
+                        if let Some(qn) = rest.split(": ").nth(1) {
+                            cur_iqn = qn.trim().to_string();
+                            in_target = true;
+                        }
+                    } else if in_target && line.contains("Backing store path:") {
+                        if let Some(p) = line.split(": ").nth(1) {
+                            let p = p.trim().to_string();
+                            if !p.is_empty() && p != "None" {
+                                cur_backing.push(p);
+                            }
+                        }
+                    }
+                }
+                if !cur_iqn.is_empty() && cur_iqn != iqn {
+                    conf.push_str(&format!("<target {}>\n", cur_iqn));
+                    for dev in &cur_backing {
+                        conf.push_str(&format!("\tbacking-store {}\n", dev));
+                        conf.push_str("\tbs-type sg\n");
+                        conf.push_str("\tdevice-type pt\n");
+                    }
+                    conf.push_str("</target>\n");
+                }
+            }
+            let _ = std::fs::write("/etc/tgt/targets.conf", &conf);
+        }
         return Ok(());
     }
 
