@@ -1086,6 +1086,11 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         vtl_xfer_buf_free(buffer);
         return SAM_STAT_CHECK_CONDITION;
     }
+    /* Notify initiator of short read: variable-length blocks may be smaller
+     * than the requested transfer length. Without this, st driver pads the
+     * last partial block to full block size, corrupting data. */
+    if (actual < blocks * block_len)
+        scsi_set_resid(cmd, (int)(blocks * block_len - actual));
     vtl_xfer_buf_free(buffer);
 
     return SAM_STAT_GOOD;
