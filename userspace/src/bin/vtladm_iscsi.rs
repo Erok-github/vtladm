@@ -725,11 +725,12 @@ fn cmd_library_export_tgt(
     // Bind to portal
     run(&["--lld", "iscsi", "--mode", "target", "--op", "bind", "--tid", "1", "--initiator-address=ALL"])?;
 
-    // Persist config
-    let _ = Command::new("tgt-admin").arg("--dump").arg("--conf").arg("/etc/tgt/targets.conf")
-        .output().map_err(|e| e.to_string())?;
+    // Persist config and enable tgtd for reboot survival
+    let _ = Command::new("tgt-admin").arg("--dump").arg("--conf")
+        .arg("/etc/tgt/targets.conf").output();
+    let _ = Command::new("systemctl").arg("enable").arg("--now").arg("tgtd").output();
 
-    eprintln!("tgt export complete: {} LUNs on {}", all_devs.len(), iqn);
+    eprintln!("tgt export complete: {} LUNs on {} (tgtd enabled for reboot)", all_devs.len(), iqn);
     Ok(())
 }
 
@@ -762,7 +763,7 @@ fn cmd_library_export_lio(
 
 fn cmd_library_unexport(
     cli: &Cli,
-    _backend: &str,
+    backend: &str,
     id: &str,
     iqn: &str,
     drives: Option<u32>,
@@ -770,6 +771,50 @@ fn cmd_library_unexport(
 ) -> Result<(), String> {
     validate_export_id(id)?;
     validate_iqn(iqn)?;
+
+    // tgt backend: delete by IQN only, no LUN info needed
+    if backend.to_lowercase() == "tgt" {
+        if cli.dry_run {
+            println!("tgtadm --lld iscsi --mode target --op delete --tid 1");
+            return Ok(());
+        }
+        // Find the TID for this IQN (tgt uses TID for delete, not IQN)
+        let mut tid: Option<u32> = None;
+        if let Ok(show) = Command::new("tgtadm").args(&["--lld","iscsi","--mode","target","--op","show"]).output() {
+            let out = String::from_utf8_lossy(&show.stdout);
+            for line in out.lines() {
+                if line.contains(iqn) {
+                    // Line format: "Target N: iqn..."
+                    if let Some(rest) = line.strip_prefix("Target ") {
+                        if let Some(num_end) = rest.find(':') {
+                            if let Ok(n) = rest[..num_end].parse::<u32>() {
+                                tid = Some(n);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let tid = tid.unwrap_or(1u32);
+        let tid_str = tid.to_string();
+        let out = Command::new("tgtadm")
+            .args(&["--lld", "iscsi", "--mode", "target", "--op", "delete", "--tid", &tid_str])
+            .output().map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.contains("does not exist") {
+                eprintln!("tgt target already removed: {}", iqn);
+            } else {
+                return Err(format!("tgtadm delete failed: {}", stderr.trim()));
+            }
+        }
+        let _ = Command::new("tgt-admin").arg("--dump").arg("--conf")
+            .arg("/etc/tgt/targets.conf").output();
+        return Ok(());
+    }
+
+    // LIO backend: need LUN map
     let lun_numbers: Vec<u32> = if let Some(s) = lun_map {
         const MAX_LUN: u32 = 255;
         let v: Vec<u32> = s
