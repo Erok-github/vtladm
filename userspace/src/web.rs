@@ -2354,7 +2354,16 @@ fn iscsi_default_iqn_and_export_id(library: &str) -> (String, String) {
     } else {
         lib_slug
     };
-    let iqn = format!("iqn.{:04}-{:02}.com.marstor:{}-{}", y, m, slug, ts);
+    let host = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "localhost".into());
+    let host_clean: String = host
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
+        .take(63)
+        .collect();
+    let iqn = format!("iqn.{:04}-{:02}.{}:{}-{}", y, m, host_clean, slug, ts);
     let mut export_id = String::from("m");
     for c in library.chars() {
         if c.is_ascii_alphanumeric() {
