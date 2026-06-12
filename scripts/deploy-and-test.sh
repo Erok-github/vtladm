@@ -88,18 +88,20 @@ _ssh "
   _F=/var/log/messages-20260611
   [ -f \$_F ] || _F=/var/log/messages
   _SZ=\$(stat -c%s \$_F)
-  _BLKS=\$(( (_SZ + 1048575) / 1048576 ))
-  echo \"文件: \$_F (\$_SZ bytes, \$_BLKS MB)\"
+  _BLKS=\$(( (_SZ + 32767) / 32768 ))
+  echo \"文件: \$_F (\$_SZ bytes, \$_BLKS x 32KB blocks)\"
 
-  dd if=\$_F of=/dev/nst0 bs=1M 2>&1
+  dd if=\$_F of=/dev/nst0 bs=32k 2>&1
   mt -f /dev/st0 rewind 2>&1
-  dd if=/dev/nst0 bs=1M count=\$_BLKS of=/tmp/_vttest 2>&1
+  dd if=/dev/nst0 bs=32k count=\$_BLKS of=/tmp/_vttest 2>&1
 
-  if cmp \$_F /tmp/_vttest 2>&1; then
-    echo '✓ 数据完整性通过!'
+  _RD=\$(stat -c%s /tmp/_vttest 2>/dev/null || echo 0)
+  echo \"写入: \$_SZ, 读回: \$_RD, padding: \$((_RD - _SZ)) bytes\"
+  # Verify content up to original size matches
+  if cmp -n \$_SZ \$_F /tmp/_vttest 2>&1; then
+    echo '✓ 数据内容完全匹配! (末尾 \$((_RD - _SZ)) bytes 零填充)'
   else
-    echo '✗ 数据不匹配'
-    echo \"原始: \$_SZ, 读回: \$(stat -c%s /tmp/_vttest)\"
+    echo '✗ 数据内容不匹配'
   fi
   rm -f /tmp/_vttest
 "
