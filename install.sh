@@ -294,9 +294,9 @@ fi
 mkdir -p /etc/modprobe.d
 cat > /etc/modprobe.d/vtl-st.conf <<'STEOF'
 # Managed by vtladm install.sh — source of truth: /opt/vtladm/var/vtl.conf (st_direct_io)
-options st try_direct_io=0 try_rdio=0 try_wdio=0 buffer_kbs=32
+options st try_direct_io=1 try_rdio=0 try_wdio=0 buffer_kbs=32
 STEOF
-echo "installed /etc/modprobe.d/vtl-st.conf (st try_direct_io=0)"
+echo "installed /etc/modprobe.d/vtl-st.conf (st try_direct_io=1)"
 if lsmod 2>/dev/null | awk '{print $1}' | grep -qx st; then
   rmmod st 2>/dev/null && modprobe st 2>/dev/null && echo "reloaded st with new config" || true
 fi
