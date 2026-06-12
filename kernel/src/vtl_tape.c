@@ -494,12 +494,17 @@ void vtl_changer_clear_media(struct vtl_changer *ch)
         t = d->loaded_tape;
         if (t) {
             mutex_lock(&t->lock);
-            d->loaded_tape = NULL;
-            t->loaded = false;
-            /* Persist filemark offsets and EOD position before clearing */
-            vtl_tape_save_metadata(t);
+            /* Persist filemark offsets and EOD position BEFORE clearing
+             * pointers, matching vtladm_unload order.  Crash between here
+             * and vtl_tape_put below may lose the last write position
+             * (same limitation as all tape unload paths — full crash
+             * resilience requires write-through persistence in I/O path). */
+            if (vtl_tape_save_metadata(t) < 0)
+                pr_warn("VTL: failed to save metadata for %s\n", t->name);
             vtl_meta_write(t->path, t->meta.density,
                        t->meta.meta_flags, t->meta.used);
+            d->loaded_tape = NULL;
+            t->loaded = false;
             mutex_unlock(&t->lock);
             vtl_tape_put(t);
         }
