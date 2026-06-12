@@ -52,6 +52,7 @@ export function fetchIscsiExportDefaults(library: string, regenerate = false) {
 
 export function libraryIscsiExport(params: {
   library: string;
+  backend?: string;
   iqn?: string;
   export_id?: string;
   changer_sg: string;
@@ -67,6 +68,7 @@ export function libraryIscsiExport(params: {
 
 export function libraryIscsiUnexport(params: {
   library: string;
+  backend?: string;
   iqn?: string;
   export_id?: string;
   lun_map?: number[];

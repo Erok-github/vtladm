@@ -347,6 +347,7 @@ async function handleBatchAssign() {
 const iscsiConfig = ref<{
   iqn: string; portal_ip: string; portal_port: number;
   export_id: string; changer_sg: string; drive_sg: string[];
+  backend: string;
   allow_iscsi_exec: boolean; can_export: boolean; has_saved_export: boolean;
 } | null>(null);
 const iscsiAllowExec = ref(false);
@@ -391,6 +392,7 @@ async function loadTransport() {
           export_id: defs.export_id,
           changer_sg: defs.changer_sg ?? '',
           drive_sg: defs.drive_sg ?? [],
+          backend: 'tgt',
           allow_iscsi_exec: cfg.allow_iscsi_exec,
           can_export: defs.can_export,
           has_saved_export: defs.has_saved_export,
@@ -404,6 +406,7 @@ async function loadTransport() {
           export_id: '',
           changer_sg: '',
           drive_sg: [],
+          backend: 'tgt',
           allow_iscsi_exec: cfg.allow_iscsi_exec,
           can_export: false,
           has_saved_export: false,
@@ -432,6 +435,7 @@ async function handleIscsiExport() {
   try {
     const result = await libraryIscsiExport({
       library: libraryName.value,
+      backend: iscsiConfig.value.backend,
       iqn: iscsiConfig.value.iqn,
       export_id: iscsiConfig.value.export_id,
       changer_sg: iscsiConfig.value.changer_sg,
@@ -454,6 +458,7 @@ async function handleIscsiUnexport() {
   try {
     const result = await libraryIscsiUnexport({
       library: libraryName.value,
+      backend: iscsiConfig.value.backend,
       iqn: iscsiConfig.value.iqn,
       export_id: iscsiConfig.value.export_id,
       dry_run: iscsiDryRun.value,
@@ -808,6 +813,15 @@ onMounted(async () => {
               <NCard title="iSCSI 导出" size="small" style="margin-bottom:16px">
                 <template v-if="iscsiConfig">
                   <NSpace vertical style="width:100%">
+                    <div>
+                      <span>后端</span>
+                      <NRadioGroup v-model:value="iscsiConfig.backend" name="iscsi-backend">
+                        <NSpace>
+                          <NRadio value="tgt">tgt (推荐, 共享 SG)</NRadio>
+                          <NRadio value="lio">LIO (targetcli)</NRadio>
+                        </NSpace>
+                      </NRadioGroup>
+                    </div>
                     <div>
                       <span>IQN</span>
                       <NInput v-model:value="iscsiConfig.iqn" placeholder="iqn..."/>

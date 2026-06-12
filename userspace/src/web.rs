@@ -3264,6 +3264,8 @@ async fn api_manage_iscsi_quick_unexport(
 #[derive(Deserialize)]
 struct IscsiLibraryExportBody {
     library: String,
+    #[serde(default = "default_iscsi_backend")]
+    backend: String,
     #[serde(default)]
     iqn: Option<String>,
     #[serde(default)]
@@ -3282,11 +3284,15 @@ struct IscsiLibraryExportBody {
     sudo: bool,
 }
 
+fn default_iscsi_backend() -> String { "tgt".into() }
+
 #[derive(Deserialize)]
 struct IscsiLibraryUnexportBody {
     /// 按库名从数据库读取上次成功导出的 IQN / export_id / lun_map（推荐，一键卸除）。
     #[serde(default)]
     library: Option<String>,
+    #[serde(default = "default_iscsi_backend")]
+    backend: String,
     #[serde(default)]
     iqn: Option<String>,
     #[serde(default)]
@@ -3821,6 +3827,7 @@ async fn api_manage_iscsi_library_export(
                 cmd.arg("--dry-run");
             }
             cmd.arg("library-export");
+            cmd.arg("--backend").arg(&body.backend);
             cmd.arg("--id").arg(&export_id_for_sp);
             cmd.arg("--iqn").arg(&iqn_for_sp);
             cmd.arg("--changer-sg").arg(&changer_sg);
@@ -3965,6 +3972,7 @@ async fn api_manage_iscsi_library_unexport(
                     cmd.arg("--dry-run");
                 }
                 cmd.arg("library-unexport");
+                cmd.arg("--backend").arg(&body.backend);
                 cmd.arg("--id").arg(&export_id);
                 cmd.arg("--iqn").arg(&iqn);
                 if let Some(ref lm) = lun_map_str {
