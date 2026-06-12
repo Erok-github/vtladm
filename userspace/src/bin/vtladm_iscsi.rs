@@ -444,15 +444,22 @@ fn validate_sg_path(p: &Path) -> Result<String, String> {
         let vendor_path = format!("/sys/class/scsi_generic/{}/device/vendor", dev_name);
         if let Ok(vendor) = fs::read_to_string(&vendor_path) {
             let v = vendor.trim().to_uppercase();
-            // VTL may use different vendor IDs depending on personality (vtl→VTL, ibm→IBM, etc.)
-            // The SCSI host /proc/name check below is a more reliable VTL detection
-            if !v.contains("VTL") {
-                // Check sysfs host proc_name as secondary detection
-                let host_path = format!("/sys/class/scsi_generic/{}/device/../proc_name", dev_name);
-                let is_vtl = std::fs::read_to_string(&host_path)
-                    .map(|pn| pn.trim().to_lowercase().contains("vtl"))
-                    .unwrap_or(false);
-                if !is_vtl {
+            // Vendor check: accept VTL personality and IBM personality (mhVTL emulation).
+            // Also scan all scsi_host proc_name entries as a fallback for custom personalities.
+            if !v.contains("VTL") && !v.contains("IBM") {
+                let mut is_vtl_host = false;
+                if let Ok(entries) = std::fs::read_dir("/sys/class/scsi_host") {
+                    for entry in entries.flatten() {
+                        let proc_path = entry.path().join("proc_name");
+                        if let Ok(pn) = std::fs::read_to_string(&proc_path) {
+                            if pn.trim().to_lowercase().contains("vtl") {
+                                is_vtl_host = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !is_vtl_host {
                     return Err(format!(
                         "{} is not a VTL device (vendor: {})",
                         p.display(), vendor.trim()
