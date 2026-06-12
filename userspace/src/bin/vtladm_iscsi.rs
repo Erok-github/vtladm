@@ -443,11 +443,21 @@ fn validate_sg_path(p: &Path) -> Result<String, String> {
             .unwrap_or("");
         let vendor_path = format!("/sys/class/scsi_generic/{}/device/vendor", dev_name);
         if let Ok(vendor) = fs::read_to_string(&vendor_path) {
-            if !vendor.trim().to_uppercase().contains("VTL") {
-                return Err(format!(
-                    "{} is not a VTL device (vendor: {})",
-                    p.display(), vendor.trim()
-                ));
+            let v = vendor.trim().to_uppercase();
+            // VTL may use different vendor IDs depending on personality (vtl→VTL, ibm→IBM, etc.)
+            // The SCSI host /proc/name check below is a more reliable VTL detection
+            if !v.contains("VTL") {
+                // Check sysfs host proc_name as secondary detection
+                let host_path = format!("/sys/class/scsi_generic/{}/device/../proc_name", dev_name);
+                let is_vtl = std::fs::read_to_string(&host_path)
+                    .map(|pn| pn.trim().to_lowercase().contains("vtl"))
+                    .unwrap_or(false);
+                if !is_vtl {
+                    return Err(format!(
+                        "{} is not a VTL device (vendor: {})",
+                        p.display(), vendor.trim()
+                    ));
+                }
             }
         }
     }
