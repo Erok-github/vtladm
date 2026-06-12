@@ -29,7 +29,6 @@ if [ "$QUICK" != "--quick" ]; then
   echo ">> 远程编译..."
   _ssh "
     cd /root/vtladm/kernel
-    git checkout -- . 2>/dev/null || true
     make clean 2>/dev/null
     make 2>&1
     echo BUILD=\$?
@@ -87,16 +86,16 @@ _ssh "
 echo "--- dd write/read 真实文件 ---"
 _ssh "
   _F=/var/log/messages-20260611
-  [ -f \"\$_F\" ] || _F=/var/log/messages
-  _SZ=\$(stat -c%s \"\$_F\")
+  [ -f \$_F ] || _F=/var/log/messages
+  _SZ=\$(stat -c%s \$_F)
   _BLKS=\$(( (_SZ + 1048575) / 1048576 ))
-  echo \"文件: \$(_F) (\$_SZ bytes, \$_BLKS MB)\"
+  echo \"文件: \$_F (\$_SZ bytes, \$_BLKS MB)\"
 
-  dd if=\"\$_F\" of=/dev/nst0 bs=1M 2>&1
+  dd if=\$_F of=/dev/nst0 bs=1M 2>&1
   mt -f /dev/st0 rewind 2>&1
   dd if=/dev/nst0 bs=1M count=\$_BLKS of=/tmp/_vttest 2>&1
 
-  if cmp \"\$_F\" /tmp/_vttest 2>&1; then
+  if cmp \$_F /tmp/_vttest 2>&1; then
     echo '✓ 数据完整性通过!'
   else
     echo '✗ 数据不匹配'
