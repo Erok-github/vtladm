@@ -71,6 +71,9 @@ enum Commands {
     },
     /// 将本机 VTL 的 `/dev/sg*` 以 **pscsi 多 LUN** 导出：默认 LUN 为 lun0（机械手）、lun1…（磁带机）；`--lun-map` 仅允许与默认相同的 **0,1,2,…** 连续编号（与 targetcli 批处理 `luns/` 自动分配一致）
     LibraryExport {
+        /// iSCSI target 后端：tgt（推荐，`allow-in-use` 可共享 SG 设备）或 lio（targetcli/configfs）
+        #[arg(long, default_value = "tgt")]
+        backend: String,
         /// 后端名前缀（仅字母数字与下划线），将生成 `{id}_ch`、`{id}_dr0`…（LIO pscsi 对象名，作用类似「后端 / fileio 名」）
         #[arg(long)]
         id: String,
@@ -92,6 +95,9 @@ enum Commands {
     },
     /// 删除 `library-export` 创建的 LUN、IQN、pscsi 后端
     LibraryUnexport {
+        /// iSCSI target 后端：须与导出时一致
+        #[arg(long, default_value = "tgt")]
+        backend: String,
         #[arg(long)]
         id: String,
         #[arg(long)]
@@ -181,6 +187,7 @@ fn run(cli: Cli) -> Result<(), String> {
         } => cmd_quick_export(&cli, file, iqn, fileio_name, portal_ip, *portal_port),
         Commands::QuickUnexport { iqn, fileio_name } => cmd_quick_unexport(&cli, iqn, fileio_name),
         Commands::LibraryExport {
+            backend,
             id,
             iqn,
             changer_sg,
@@ -190,6 +197,7 @@ fn run(cli: Cli) -> Result<(), String> {
             portal_port,
         } => cmd_library_export(
             &cli,
+            &backend,
             id,
             iqn,
             changer_sg,
@@ -199,11 +207,12 @@ fn run(cli: Cli) -> Result<(), String> {
             *portal_port,
         ),
         Commands::LibraryUnexport {
+            backend,
             id,
             iqn,
             drives,
             lun_map,
-        } => cmd_library_unexport(&cli, id, iqn, drives.as_ref().copied(), lun_map.as_deref()),
+        } => cmd_library_unexport(&cli, &backend, id, iqn, drives.as_ref().copied(), lun_map.as_deref()),
     }
 }
 
@@ -634,6 +643,7 @@ fn library_unexport_targetcli_script(
 
 fn cmd_library_export(
     cli: &Cli,
+    backend: &str,
     id: &str,
     iqn: &str,
     changer_sg: &Path,
@@ -647,44 +657,104 @@ fn cmd_library_export(
     if drive_sg.is_empty() {
         return Err("need at least one --drive-sg (tape drives); use lsscsi -g to map LUNs".into());
     }
-
     if let Some(s) = lun_map {
         let v = parse_comma_lun_map(s, 1 + drive_sg.len())?;
         lun_map_must_be_consecutive_from_zero(&v)?;
     }
-
     let ch_path = validate_sg_path(changer_sg)?;
     let mut dr_paths: Vec<String> = Vec::with_capacity(drive_sg.len());
     for p in drive_sg {
         dr_paths.push(validate_sg_path(p)?);
     }
 
-    eprintln!(
-        "Note: pscsi passthrough requires kernel/LIO support for the given /dev/sg nodes. \
-         Close other programs using these sg devices. TPG uses demo_mode_write_protect=0 and \
-         generate_node_acls=1 — tighten for production."
-    );
+    match backend.to_lowercase().as_str() {
+        "tgt" => cmd_library_export_tgt(cli, id, iqn, &ch_path, &dr_paths, portal_ip, portal_port),
+        "lio" => cmd_library_export_lio(cli, id, iqn, &ch_path, &dr_paths, portal_ip, portal_port),
+        other => Err(format!("unknown backend '{}': use tgt or lio", other)),
+    }
+}
 
+/// Export library via tgt (SCSI Target Framework). tgt supports `--bstype=sg`
+/// passthrough with implicit `allow-in-use`, sharing SG devices with st/ch drivers.
+fn cmd_library_export_tgt(
+    cli: &Cli,
+    _id: &str,
+    iqn: &str,
+    changer_sg: &str,
+    drive_sg: &[String],
+    _portal_ip: &str,
+    _portal_port: u16,
+) -> Result<(), String> {
+    if cli.dry_run {
+        println!("tgtadm --lld iscsi --mode target --op new --tid 1 --targetname {}", iqn);
+        let mut devs: Vec<&str> = vec![changer_sg];
+        devs.extend(drive_sg.iter().map(|s| s.as_str()));
+        for (i, p) in devs.iter().enumerate() {
+            println!("tgtadm --lld iscsi --mode logicalunit --op new --tid 1 --lun {} --bstype=sg --device-type=pt --backing-store={}", i + 2, p);
+        }
+        println!("tgtadm --lld iscsi --mode target --op bind --tid 1 --initiator-address=ALL");
+        return Ok(());
+    }
+
+    let run = |args: &[&str]| -> Result<(), String> {
+        let out = Command::new("tgtadm").args(args).output().map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !stderr.is_empty() && !stderr.contains("already exists") {
+                return Err(format!("tgtadm {} failed: {}", args[2], stderr.trim()));
+            }
+        }
+        Ok(())
+    };
+
+    // Create target (ignore "already exists")
+    run(&["--lld", "iscsi", "--mode", "target", "--op", "new", "--tid", "1", "--targetname", iqn])?;
+
+    // Create LUNs: changer first, then drives (skip LUN 0 which is controller)
+    let lun_offset = 2u32; // LUN 0 is controller, start at LUN 2
+    let mut all_devs: Vec<String> = Vec::with_capacity(1 + drive_sg.len());
+    all_devs.push(changer_sg.to_string());
+    all_devs.extend(drive_sg.iter().cloned());
+    for (i, dev) in all_devs.iter().enumerate() {
+        let lun = lun_offset + i as u32;
+        run(&["--lld", "iscsi", "--mode", "logicalunit", "--op", "new",
+            "--tid", "1", "--lun", &lun.to_string(),
+            "--bstype=sg", "--device-type=pt", "--backing-store", dev])?;
+    }
+
+    // Bind to portal
+    run(&["--lld", "iscsi", "--mode", "target", "--op", "bind", "--tid", "1", "--initiator-address=ALL"])?;
+
+    // Persist config
+    let _ = Command::new("tgt-admin").arg("--dump").arg("--conf").arg("/etc/tgt/targets.conf")
+        .output().map_err(|e| e.to_string())?;
+
+    eprintln!("tgt export complete: {} LUNs on {}", all_devs.len(), iqn);
+    Ok(())
+}
+
+/// Export library via LIO configfs (bypass targetcli's "already in use" check).
+/// Creates pscsi backstores directly in /sys/kernel/config/target.
+fn cmd_library_export_lio(
+    cli: &Cli,
+    id: &str,
+    iqn: &str,
+    changer_sg: &str,
+    drive_sg: &[String],
+    portal_ip: &str,
+    portal_port: u16,
+) -> Result<(), String> {
     let path_style = resolve_iscsi_shell_path_style(cli)?;
-    let phase1 = library_export_phase1_targetcli_script_with_exit(id, &ch_path, &dr_paths);
+    let phase1 = library_export_phase1_targetcli_script_with_exit(id, changer_sg, drive_sg);
     run_targetcli_batch_captured(
-        cli,
-        &phase1,
-        "library-export-pscsi",
+        cli, &phase1, "library-export-pscsi",
         Some(library_export_phase1_stderr_fatal),
     )?;
     let phase2 = library_export_phase2_targetcli_script(
-        id,
-        iqn,
-        &dr_paths,
-        portal_ip,
-        portal_port,
-        path_style,
+        id, iqn, drive_sg, portal_ip, portal_port, path_style,
     );
     run_targetcli_batch_captured(
-        cli,
-        &phase2,
-        "library-export-iscsi",
+        cli, &phase2, "library-export-iscsi",
         Some(library_export_phase2_stderr_fatal),
     )?;
     Ok(())
@@ -692,6 +762,7 @@ fn cmd_library_export(
 
 fn cmd_library_unexport(
     cli: &Cli,
+    _backend: &str,
     id: &str,
     iqn: &str,
     drives: Option<u32>,
