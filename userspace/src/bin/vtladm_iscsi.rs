@@ -690,7 +690,7 @@ fn cmd_library_export_tgt(
         let mut devs: Vec<&str> = vec![changer_sg];
         devs.extend(drive_sg.iter().map(|s| s.as_str()));
         for (i, p) in devs.iter().enumerate() {
-            println!("tgtadm --lld iscsi --mode logicalunit --op new --tid 1 --lun {} --bstype=sg --device-type=pt --backing-store={}", i + 2, p);
+            println!("tgtadm --lld iscsi --mode logicalunit --op new --tid 1 --lun {} --bstype=sg --device-type=pt --backing-store={}", i + 1, p);
         }
         println!("tgtadm --lld iscsi --mode target --op bind --tid 1 --initiator-address=ALL");
         return Ok(());
@@ -711,7 +711,7 @@ fn cmd_library_export_tgt(
     run(&["--lld", "iscsi", "--mode", "target", "--op", "new", "--tid", "1", "--targetname", iqn])?;
 
     // Create LUNs: changer first, then drives (skip LUN 0 which is controller)
-    let lun_offset = 2u32; // LUN 0 is controller, start at LUN 2
+    let lun_offset = 1u32; // LUN 0 is tgt controller, VTL changer starts at LUN 1
     let mut all_devs: Vec<String> = Vec::with_capacity(1 + drive_sg.len());
     all_devs.push(changer_sg.to_string());
     all_devs.extend(drive_sg.iter().cloned());
