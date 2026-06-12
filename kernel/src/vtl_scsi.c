@@ -2243,6 +2243,9 @@ out:
 
 int vtl_slave_alloc(struct scsi_device *sdev)
 {
+    /* 512-byte DMA alignment: must be set before st driver attaches,
+     * otherwise st disables direct I/O ("alignment 4 B"). */
+    blk_queue_dma_alignment(sdev->request_queue, 511);
     return 0;
 }
 
@@ -2252,6 +2255,9 @@ void vtl_slave_destroy(struct scsi_device *sdev)
 
 int vtl_slave_configure(struct scsi_device *sdev)
 {
+    /* 512-byte DMA alignment: enables st driver direct I/O (try_direct_io=1).
+     * Without this, st disables direct I/O ("alignment 4 B"). */
+    blk_queue_dma_alignment(sdev->request_queue, 511);
     return 0;
 }
 
