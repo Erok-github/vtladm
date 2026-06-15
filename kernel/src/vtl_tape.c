@@ -1511,6 +1511,17 @@ static u32 vtl_elem_status_desc(u8 *p, u32 buf_left, u8 elem_type, int addr,
     p[2] = full ? 0x01 : 0x00;
     p[3] = (elem_type & 0x07) << 5;
 
+    /* Import/Export elements: mark ACCESS, EXENAB, INENAB.
+     * If occupied, also set IMPEXP (media placed by operator). */
+    if (elem_type == VTL_SMC_ELEM_IE) {
+        p[3] |= 0x08;          /* ACCESS — operator access allowed */
+        p[9] |= 0x04;          /* EXENAB — export supported */
+        p[9] |= 0x08;          /* INENAB — import supported */
+        if (full) {
+            p[2] |= 0x02;       /* IMPEXP — media placed by operator */
+        }
+    }
+
     /* Data Transfer element: bytes 10-11 = Source Storage Element Address */
     if (elem_type == VTL_SMC_ELEM_DT && full && source_slot >= 0) {
         p[9] |= 0x40;
