@@ -1505,20 +1505,25 @@ static u32 vtl_elem_status_desc(u8 *p, u32 buf_left, u8 elem_type, int addr,
         return 0;
 
     memset(p, 0, dlen);
-    /* SMC-3 short descriptor: element address BE at bytes 0-1, Full at byte 2 */
+    /* SMC-3 short descriptor: element address BE at bytes 0-1.
+     * Byte 2 status bits: Full(0x01) ImpExp(0x02) Except(0x04) Access(0x08) */
     p[0] = (addr >> 8) & 0xff;
     p[1] = addr & 0xff;
-    p[2] = full ? 0x01 : 0x00;
-    p[3] = (elem_type & 0x07) << 5;
+    p[2] = 0x08;                       /* ACCESS — all VTL slots are reachable */
+    if (full)
+        p[2] |= 0x01;                  /* FULL — media present */
+    else
+        p[2] |= 0x04;                  /* EXCEPT — empty slot (mhVTL convention) */
+    p[3] = (elem_type & 0x07) << 5;    /* element type code in bits 5-7 */
 
-    /* Import/Export elements: mark ACCESS, EXENAB, INENAB.
+    /* Import/Export elements: mark EXENAB, INENAB.
      * If occupied, also set IMPEXP (media placed by operator). */
     if (elem_type == VTL_SMC_ELEM_IE) {
-        p[3] |= 0x08;          /* ACCESS — operator access allowed */
-        p[9] |= 0x04;          /* EXENAB — export supported */
-        p[9] |= 0x08;          /* INENAB — import supported */
+        p[9] |= 0x04;                  /* EXENAB — export supported */
+        p[9] |= 0x08;                  /* INENAB — import supported */
         if (full) {
-            p[2] |= 0x02;       /* IMPEXP — media placed by operator */
+            p[2] &= ~0x04;             /* clear EXCEPT if media present */
+            p[2] |= 0x02;              /* IMPEXP — media placed by operator */
         }
     }
 
