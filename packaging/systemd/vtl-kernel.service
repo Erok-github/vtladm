@@ -2,16 +2,16 @@
 Description=Virtual Tape Library kernel module (vtl.ko)
 Documentation=file:///opt/vtladm/docs/STACK.md
 DefaultDependencies=no
-Before=vtladm-web.service
+Before=vtladm-web.service tgtd.service
 After=local-fs.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 Environment=PATH=/sbin:/usr/sbin:/bin:/usr/bin
-# Ensure st is loaded with VTL-compatible parameters (disables direct I/O)
-ExecStartPre=-/bin/sh -c 'mkdir -p /etc/modprobe.d && echo "options st try_direct_io=0 try_rdio=0 try_wdio=0 buffer_kbs=32" > /etc/modprobe.d/vtl-st.conf'
-ExecStartPre=-/bin/sh -c 'lsmod | grep -qx st && rmmod st 2>/dev/null; modprobe st 2>/dev/null; true'
+# Deploy st config with direct I/O enabled (requires VTL DMA alignment fix)
+ExecStartPre=-/bin/sh -c 'mkdir -p /etc/modprobe.d && echo "options st try_direct_io=1 try_rdio=1 try_wdio=1 buffer_kbs=32" > /etc/modprobe.d/vtl-st.conf'
+ExecStartPre=-/bin/sh -c 'lsmod | grep -qx st && rmmod st 2>/dev/null; modprobe st 2>/dev/null; sleep 1; true'
 ExecStart=/opt/vtladm/sbin/vtl-kernelctl start
 ExecStop=/opt/vtladm/sbin/vtl-kernelctl stop
 
