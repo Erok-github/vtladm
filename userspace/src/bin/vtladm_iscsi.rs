@@ -873,10 +873,10 @@ fn cmd_library_unexport(
                 }
                 if !cur_iqn.is_empty() && cur_iqn != iqn {
                     conf.push_str(&format!("<target {}>\n", cur_iqn));
+                    conf.push_str("\tbs-type sg\n");
+                    conf.push_str("\tdevice-type pt\n");
                     for dev in &cur_backing {
                         conf.push_str(&format!("\tbacking-store {}\n", dev));
-                        conf.push_str("\tbs-type sg\n");
-                        conf.push_str("\tdevice-type pt\n");
                     }
                     conf.push_str("</target>\n");
                 }
