@@ -1852,26 +1852,10 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
         at_end = drv->at_end;
         at_filemark = drv->at_filemark;
         position = drv->loaded_tape->position;
-        mutex_unlock(&drv->loaded_tape->lock);
-    } else {
-        buf[0] = 0x80;  /* BPU: no tape loaded, position unknown */
-    }
-    mutex_unlock(&drv->lock);
-
-    if (loaded) {
-        if (at_bot)
-            buf[1] |= 0x80;
-        if (at_end)
-            buf[1] |= 0x40;
-        if (at_filemark)
-            buf[1] |= 0x20;
-        vtl_put_be64((u64)position, &buf[4]);
-
         /* Compute file number: count filemarks before current position */
         {
             struct vtl_tape *tp = drv->loaded_tape;
             u32 lo = 0, hi = tp->num_filemarks;
-            /* Binary search for first filemark > position */
             while (lo < hi) {
                 u32 mid = lo + (hi - lo) / 2;
                 if (tp->filemark_offsets[mid] <= position)
@@ -1879,17 +1863,23 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
                 else
                     hi = mid;
             }
-            /* lo = number of filemarks before or at position = current file number */
             vtl_put_be32(lo, &buf[12]);
         }
+        mutex_unlock(&drv->loaded_tape->lock);
+    }
+    mutex_unlock(&drv->lock);
+
+    if (loaded) {
+        if (at_bot)  buf[1] |= 0x80;
+        if (at_end)  buf[1] |= 0x40;
+        if (at_filemark) buf[1] |= 0x20;
+        vtl_put_be64((u64)position, &buf[4]);
     } else {
-        buf[1] |= 0x10;
+        buf[0] = 0x80;  /* BPU: not ready */
+        buf[1] = 0x00;   /* no BOP/EOP/filemark */
     }
 
-    if (vtl_scsi_copy_to_sg(cmd, buf, min_t(unsigned int, alloc, 20), &drv->sense)) {
-        vtl_xfer_buf_free(buf);
-        return SAM_STAT_CHECK_CONDITION;
-    }
+    (void)vtl_scsi_copy_to_sg(cmd, buf, min_t(unsigned int, alloc, 20), &drv->sense);
     vtl_xfer_buf_free(buf);
     return SAM_STAT_GOOD;
 }
