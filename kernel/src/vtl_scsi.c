@@ -1844,7 +1844,6 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
     }
 
     memset(buf, 0, 20);
-    buf[0] = 0x80;
     mutex_lock(&drv->lock);
     loaded = drv->loaded_tape != NULL;
     if (loaded) {
@@ -1854,6 +1853,8 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
         at_filemark = drv->at_filemark;
         position = drv->loaded_tape->position;
         mutex_unlock(&drv->loaded_tape->lock);
+    } else {
+        buf[0] = 0x80;  /* BPU: no tape loaded, position unknown */
     }
     mutex_unlock(&drv->lock);
 
