@@ -958,7 +958,7 @@ static void vtl_parse_rw_blocks(const u8 *cdb, u8 op, u32 *blocks, u32 *block_le
     case READ_6:
     case WRITE_6:
         fixed = (cdb[1] & 0x01) != 0;
-        transfer_len = vtl_get_u24(&cdb[2]);
+        transfer_len = ((u32)cdb[2] << 8) | cdb[3];
         break;
     case READ_10:
     case WRITE_10:
@@ -1295,8 +1295,8 @@ static int vtl_handle_read_capacity_16(struct scsi_cmnd *cmd, struct vtl_drive *
         /* Empty tape is valid — return max_lba=0 (consistent with READ CAPACITY 10) */
         if (num_blocks == 0)
             max_lba = 0;
-        else if (num_blocks > 0xFFFFFFFFULL)
-            max_lba = 0xFFFFFFFFULL;
+        else if (num_blocks > 0xFFFFFFFFFFFFFFFFULL - 1)
+            max_lba = 0xFFFFFFFFFFFFFFFFULL;
         else
             max_lba = num_blocks - 1ULL;
     }
