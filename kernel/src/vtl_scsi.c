@@ -19,6 +19,12 @@
 #ifndef WRITE_12
 #define WRITE_12 0xaa
 #endif
+#ifndef WRITE_16
+#define WRITE_16 0x8a
+#endif
+#ifndef READ_16
+#define READ_16 0x88
+#endif
 /* SSC tape opcodes (not always in scsi.h for out-of-tree / older trees) */
 #ifndef REWIND
 #define REWIND 0x01
@@ -962,6 +968,11 @@ static void vtl_parse_rw_blocks(const u8 *cdb, u8 op, u32 *blocks, u32 *block_le
     case WRITE_12:
         fixed = (cdb[1] & 0x02) != 0;
         transfer_len = vtl_get_be32(&cdb[6]);
+        break;
+    case READ_16:
+    case WRITE_16:
+        fixed = (cdb[1] & 0x02) != 0;
+        transfer_len = (u32)vtl_get_be64(&cdb[6]);
         break;
     default:
         return;
@@ -2122,10 +2133,12 @@ static int vtl_tape_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost,
     case READ_6:
     case READ_10:
     case READ_12:
+    case READ_16:
         return vtl_handle_read(cmd, drv, cdb[0]);
     case WRITE_6:
     case WRITE_10:
     case WRITE_12:
+    case WRITE_16:
         return vtl_handle_write(cmd, drv, cdb[0]);
     case REWIND:
         return vtl_handle_rewind(cmd, drv);

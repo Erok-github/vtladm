@@ -45,6 +45,12 @@ static inline u32 vtl_get_be32(const u8 *p)
     return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
 }
 
+static inline u64 vtl_get_be64(const u8 *p)
+{
+    return ((u64)p[0] << 56) | ((u64)p[1] << 48) | ((u64)p[2] << 40) | ((u64)p[3] << 32) |
+           ((u64)p[4] << 24) | ((u64)p[5] << 16) | ((u64)p[6] << 8)  | (u64)p[7];
+}
+
 static inline void vtl_put_be32(u32 v, u8 *p)
 {
     p[0] = (u8)(v >> 24);
