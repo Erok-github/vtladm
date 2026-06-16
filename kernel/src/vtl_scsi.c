@@ -1852,19 +1852,6 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
         at_end = drv->at_end;
         at_filemark = drv->at_filemark;
         position = drv->loaded_tape->position;
-        /* Compute file number: count filemarks before current position */
-        {
-            struct vtl_tape *tp = drv->loaded_tape;
-            u32 lo = 0, hi = tp->num_filemarks;
-            while (lo < hi) {
-                u32 mid = lo + (hi - lo) / 2;
-                if (tp->filemark_offsets[mid] <= position)
-                    lo = mid + 1;
-                else
-                    hi = mid;
-            }
-            vtl_put_be32(lo, &buf[12]);
-        }
         mutex_unlock(&drv->loaded_tape->lock);
     }
     mutex_unlock(&drv->lock);
