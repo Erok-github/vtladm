@@ -941,8 +941,8 @@ mode_pages:
 static void vtl_parse_rw_blocks(const u8 *cdb, u8 op, u32 *blocks, u32 *block_len,
                                 struct vtl_drive *drv)
 {
-    bool fixed;
-    u32 transfer_len;
+    bool fixed = false;
+    u32 transfer_len = 0;
 
     *block_len = drv->block_size;
     *blocks = 0;
@@ -952,44 +952,35 @@ static void vtl_parse_rw_blocks(const u8 *cdb, u8 op, u32 *blocks, u32 *block_le
     case WRITE_6:
         fixed = (cdb[1] & 0x01) != 0;
         transfer_len = vtl_get_u24(&cdb[2]);
-        /* variable block mode: ignore FIXED, use CDB length as block size */
-        if (drv->block_size == 0)
-            fixed = false;
-        if (fixed)
-            *blocks = transfer_len;
-        else {
-            *block_len = transfer_len;
-            *blocks = 1;
-        }
         break;
     case READ_10:
     case WRITE_10:
         fixed = (cdb[1] & 0x02) != 0;
         transfer_len = vtl_get_u24(&cdb[6]);
-        if (drv->block_size == 0)
-            fixed = false;
-        if (fixed)
-            *blocks = transfer_len;
-        else {
-            *block_len = transfer_len;
-            *blocks = 1;
-        }
         break;
     case READ_12:
     case WRITE_12:
         fixed = (cdb[1] & 0x02) != 0;
         transfer_len = vtl_get_be32(&cdb[6]);
-        if (drv->block_size == 0)
-            fixed = false;
-        if (fixed)
-            *blocks = transfer_len;
-        else {
-            *block_len = transfer_len;
-            *blocks = 1;
-        }
         break;
     default:
-        break;
+        return;
+    }
+
+    /* When FIXED=1 in variable-block mode (block_size=0), backup software
+     * expects the transfer length to be treated as number of blocks at the
+     * current implicit block size.  Use 32 KiB as a sensible default. */
+    if (fixed && drv->block_size == 0)
+        drv->block_size = 32768;
+
+    *block_len = drv->block_size ? drv->block_size : transfer_len;
+    if (transfer_len == 0)
+        transfer_len = 1;
+    if (fixed && drv->block_size > 0) {
+        *blocks = transfer_len;
+    } else {
+        *block_len = transfer_len;
+        *blocks = 1;
     }
 }
 
