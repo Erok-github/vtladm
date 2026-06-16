@@ -1830,20 +1830,19 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
         alloc = cdb[4];
 
     svc = (cdb[1] & 0x1f);
-    if (svc != 0x00)
-        pr_info_ratelimited("VTL: READ POSITION svc=0x%02x (using short-form 20B response)\n", svc);
 
-    /* accept any alloc; floor to 20 below */
+    bool want_long = (svc == 6 && alloc >= 32);
+    u32  resp_len  = want_long ? 32 : 20;
     if (alloc == 0)
-        alloc = 20;
+        alloc = resp_len;
 
-    buf = vtl_xfer_buf_alloc(20);
+    buf = vtl_xfer_buf_alloc(resp_len);
     if (!buf) {
         vtl_scsi_staging_oom(cmd, &drv->sense);
         return SAM_STAT_CHECK_CONDITION;
     }
 
-    memset(buf, 0, 20);
+    memset(buf, 0, resp_len);
     mutex_lock(&drv->lock);
     loaded = drv->loaded_tape != NULL;
     if (loaded) {
@@ -1852,24 +1851,39 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
         at_end = drv->at_end;
         at_filemark = drv->at_filemark;
         position = drv->loaded_tape->position;
+        { /* compute file number for long form */
+            struct vtl_tape *tp = drv->loaded_tape;
+            u32 lo = 0, hi = tp->num_filemarks;
+            while (lo < hi) {
+                u32 mid = lo + (hi - lo) / 2;
+                if (tp->filemark_offsets[mid] <= position)
+                    lo = mid + 1;
+                else
+                    hi = mid;
+            }
+            if (want_long)
+                vtl_put_be64((u64)lo, &buf[16]);
+        }
         mutex_unlock(&drv->loaded_tape->lock);
     }
     mutex_unlock(&drv->lock);
 
     if (loaded) {
-        buf[0] = 0x02;  /* BYCU=1: byte count is estimate (matching mhVTL) */
+        buf[0] = 0x02;  /* BYCU=1: byte count is estimate */
         if (at_bot)  buf[1] |= 0x80;
         if (at_end)  buf[1] |= 0x40;
         if (at_filemark) buf[1] |= 0x20;
-        /* mhVTL-compatible short form: 4 bytes position at offsets 4-7 and 8-11 */
-        vtl_put_be32((u32)position, &buf[4]);
-        vtl_put_be32((u32)position, &buf[8]);
+        if (want_long) {
+            vtl_put_be64((u64)position, &buf[8]);
+        } else {
+            vtl_put_be32((u32)position, &buf[4]);
+            vtl_put_be32((u32)position, &buf[8]);
+        }
     } else {
         buf[0] = 0x80;  /* BPU: not ready */
-        buf[1] = 0x00;
     }
 
-    (void)vtl_scsi_copy_to_sg(cmd, buf, min_t(unsigned int, alloc, 20), &drv->sense);
+    (void)vtl_scsi_copy_to_sg(cmd, buf, min_t(unsigned int, alloc, resp_len), &drv->sense);
     vtl_xfer_buf_free(buf);
     return SAM_STAT_GOOD;
 }
