@@ -1429,6 +1429,26 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
     src = (cdb[4] << 8) | cdb[5];
     dst = (cdb[6] << 8) | cdb[7];
 
+    /* Some backup software uses 0-based type-relative addressing (element
+     * type 0 = first element of that type).  Normalize address 0 to the
+     * first valid address for the likely element type. */
+    if (src == 0) {
+        if (ch->num_slots > 0)
+            src = 1;
+        else if (ch->num_drives > 0)
+            src = vtl_elem_drive_base(ch);
+        else if (ch->num_mailslots > 0)
+            src = vtl_elem_ie_base(ch);
+    }
+    if (dst == 0) {
+        if (ch->num_slots > 0)
+            dst = 1;
+        else if (ch->num_drives > 0)
+            dst = vtl_elem_drive_base(ch);
+        else if (ch->num_mailslots > 0)
+            dst = vtl_elem_ie_base(ch);
+    }
+
     /* Pre-validate so empty/missing source returns MEDIUM NOT PRESENT
      * instead of ILLEGAL REQUEST, which avoids Kylin st offline cascade. */
     if (vtl_elem_is_storage(ch, src)) {

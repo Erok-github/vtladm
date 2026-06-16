@@ -273,19 +273,29 @@ static inline int vtl_elem_ie_base(const struct vtl_changer *ch)
 
 static inline int vtl_elem_is_storage(const struct vtl_changer *ch, int addr)
 {
+    /* Accept 0 as alias for address 1 (some backup software uses 0-based
+     * type-relative addressing). */
+    if (addr == 0 && ch->num_slots > 0)
+        return 1;
     return addr >= 1 && addr <= ch->num_slots;
 }
 
 static inline int vtl_elem_is_drive(const struct vtl_changer *ch, int addr)
 {
     int base = vtl_elem_drive_base(ch);
-    return addr >= base && addr < base + ch->num_drives;
+    int end  = base + ch->num_drives;
+    if (addr == 0 && ch->num_drives > 0)
+        return 1;
+    return addr >= base && addr < end;
 }
 
 static inline int vtl_elem_is_ie(const struct vtl_changer *ch, int addr)
 {
     int base = vtl_elem_ie_base(ch);
-    return addr >= base && addr < base + ch->num_mailslots;
+    int end  = base + ch->num_mailslots;
+    if (addr == 0 && ch->num_mailslots > 0)
+        return 1;
+    return addr >= base && addr < end;
 }
 
 /* 0-based slot index from storage element address (1-based). */
