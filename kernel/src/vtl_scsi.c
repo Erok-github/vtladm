@@ -1078,11 +1078,11 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         return SAM_STAT_CHECK_CONDITION;
     }
 
-    /* End of data: return 0 bytes. meta.used tracks write boundary so
-     * reads stop at the natural data end, not immediately at BOT. */
-    /* End of data: return 0 bytes. meta.used tracks write boundary.
-     * st driver buffer interference is handled by mt status warm-up in install.sh. */
+    /* End of data: signal zero bytes transferred via residual.
+     * meta.used tracks write boundary; st buffer interference is handled
+     * by mt warm-up in install.sh. */
     if (actual == 0) {
+        scsi_set_resid(cmd, blocks * block_len);
         vtl_xfer_buf_free(buffer);
         return SAM_STAT_GOOD;
     }
@@ -1831,7 +1831,8 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
 
     svc = (cdb[1] & 0x1f);
 
-    bool want_long = (svc == 6 && alloc >= 32);
+    /* mhVTL uses service action (not allocation length) to select format */
+    bool want_long = (svc == 6);
     u32  resp_len  = want_long ? 32 : 20;
     if (alloc == 0)
         alloc = resp_len;
@@ -1883,7 +1884,10 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
         buf[0] = 0x80;  /* BPU: not ready */
     }
 
-    (void)vtl_scsi_copy_to_sg(cmd, buf, min_t(unsigned int, alloc, resp_len), &drv->sense);
+    if (vtl_scsi_copy_to_sg(cmd, buf, min_t(unsigned int, alloc, resp_len), &drv->sense)) {
+        vtl_xfer_buf_free(buf);
+        return SAM_STAT_CHECK_CONDITION;
+    }
     vtl_xfer_buf_free(buf);
     return SAM_STAT_GOOD;
 }
