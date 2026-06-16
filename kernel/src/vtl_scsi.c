@@ -70,17 +70,18 @@
 #endif
 
 /*
- * Compose cmd->result for SG_IO / sg3_utils: status in bits 0..7 is SAM status << 1;
- * CHECK CONDITION also needs DRIVER_SENSE in bits 8..15. Raw SAM_STAT_* alone breaks
- * sg_turs ("bad pass-through setup") even when the command logic is correct.
- */
+ * Compose cmd->result: bits 0-7=SAM status (raw, not shifted), bits 24-31=driver byte.
+ * Linux 4.19 Kylin uses modern encoding: (result & 0xff) == SAM_STAT_CHECK_CONDITION.
+ * sg_turs / SG_IO reads cmd->result & 0xff directly; DRIVER_SENSE goes in bits 24-31. */
 static void vtl_set_cmd_result(struct scsi_cmnd *cmd, int sam_status)
 {
-    cmd->result = DID_OK << 16;
-    if (sam_status == SAM_STAT_CHECK_CONDITION)
-        cmd->result |= (DRIVER_SENSE << 8) | (SAM_STAT_CHECK_CONDITION << 1);
-    else if (sam_status != SAM_STAT_GOOD)
-        cmd->result |= (sam_status << 1);
+    if (sam_status == SAM_STAT_GOOD) {
+        cmd->result = 0;
+    } else if (sam_status == SAM_STAT_CHECK_CONDITION) {
+        cmd->result = (DRIVER_SENSE << 24) | SAM_STAT_CHECK_CONDITION;
+    } else {
+        cmd->result = sam_status;
+    }
 }
 
 /* Max single READ/WRITE buffer (matches VTL_SCSI_RW_CAP_BYTES below) */
@@ -972,7 +973,8 @@ static void vtl_parse_rw_blocks(const u8 *cdb, u8 op, u32 *blocks, u32 *block_le
     case READ_16:
     case WRITE_16:
         fixed = (cdb[1] & 0x02) != 0;
-        transfer_len = (u32)vtl_get_be64(&cdb[6]);
+        /* SSC: transfer length at bytes 10-13 (4 bytes BE) */
+        transfer_len = vtl_get_be32(&cdb[10]);
         break;
     default:
         return;
@@ -2193,20 +2195,6 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
         }
     }
 
-    /* Unit Attention: report pending UA before processing command.
-     * INQUIRY / REQUEST_SENSE do NOT clear UA (per SPC-3). */
-    if (lun >= 1 && lun <= (unsigned int)vhost->changer->num_drives) {
-        struct vtl_drive *drv = &vhost->changer->drives[lun - 1];
-        if (drv->ua_pending && cdb[0] != INQUIRY && cdb[0] != REQUEST_SENSE) {
-            drv->ua_pending = false;
-            vtl_set_sense(&drv->sense, UNIT_ATTENTION, drv->ua_asc, drv->ua_ascq);
-            vtl_build_sense_buffer(cmd, &drv->sense);
-            cmd->result = (DID_OK << 16) | (DRIVER_SENSE << 8) | (SAM_STAT_CHECK_CONDITION << 1);
-            vtl_scsi_done(cmd);
-            return 0;
-        }
-    }
-
     if (vtl_reconfig_in_progress()) {
         cmd->result = (DID_NO_CONNECT << 16);
         vtl_scsi_done(cmd);
@@ -2219,6 +2207,21 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
         cmd->result = (DID_NO_CONNECT << 16);
         vtl_scsi_done(cmd);
         return 0;
+    }
+
+    /* Unit Attention: report pending UA before processing command.
+     * INQUIRY / REQUEST_SENSE do NOT clear UA (per SPC-3).
+     * Must be inside io_sem to prevent race with vtl_remove. */
+    if (lun >= 1 && lun <= (unsigned int)vhost->changer->num_drives) {
+        struct vtl_drive *drv = &vhost->changer->drives[lun - 1];
+        if (drv->ua_pending && cdb[0] != INQUIRY && cdb[0] != REQUEST_SENSE) {
+            drv->ua_pending = false;
+            vtl_set_sense(&drv->sense, UNIT_ATTENTION, drv->ua_asc, drv->ua_ascq);
+            vtl_build_sense_buffer(cmd, &drv->sense);
+            vtl_scsi_done(cmd);
+            up_read(&vhost->io_sem);
+            return 0;
+        }
     }
 
     ch = vhost->changer;

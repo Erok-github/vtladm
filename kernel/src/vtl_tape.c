@@ -1101,14 +1101,14 @@ int vtl_tape_space(struct vtl_drive *drv, int code, int count)
         drv->at_filemark = (count != 0);
         break;
     }
-    case 3:
-        tape->position = i_size_read(file_inode(tape->file));
-        drv->at_end = (tape->position >= tape->meta.capacity);
+    case 3: /* SPACE to End-of-Data: position at meta.used, not file size */
+        tape->position = tape->meta.used;
+        drv->at_end = true;
         break;
-    case 4:
-        tape->position = i_size_read(file_inode(tape->file));
+    case 4: /* SPACE to End-of-Data then set filemark */
+        tape->position = tape->meta.used;
         drv->at_filemark = true;
-        drv->at_end = (tape->position >= tape->meta.capacity);
+        drv->at_end = true;
         break;
     default:
         ret = -EINVAL;
@@ -1513,8 +1513,8 @@ static u32 vtl_elem_status_desc(u8 *p, u32 buf_left, u8 elem_type, int addr,
     p[2] = 0x08;                       /* ACCESS — all VTL slots are reachable */
     if (full)
         p[2] |= 0x01;                  /* FULL — media present */
-    else
-        p[2] |= 0x04;                  /* EXCEPT — empty slot (mhVTL convention) */
+    /* SMC-3: empty slots only set ACCESS; EXCEPT (0x04) means abnormal
+     * condition like damaged media, not merely an empty slot. */
     p[3] = (elem_type & 0x07) << 5;    /* element type code in bits 5-7 */
 
     /* Import/Export elements: mark EXENAB, INENAB.
