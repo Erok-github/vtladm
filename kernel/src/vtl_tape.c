@@ -1039,10 +1039,11 @@ int vtl_tape_space(struct vtl_drive *drv, int code, int count)
 
     switch (code) {
     case 0:
-        if (drv->block_size == 0) {
-            ret = -EINVAL;
+        /* Variable block mode: SPACE blocks is a no-op — there is no
+         * fixed block size to multiply by.  Backup software often sends
+         * SPACE(0) to position the tape before writing. */
+        if (drv->block_size == 0)
             break;
-        }
         max_blocks = S64_MAX / (s64)drv->block_size;
         if ((s64)count > max_blocks || (s64)count < -max_blocks) {
             ret = -EINVAL;
