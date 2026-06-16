@@ -967,20 +967,23 @@ static void vtl_parse_rw_blocks(const u8 *cdb, u8 op, u32 *blocks, u32 *block_le
         return;
     }
 
-    /* When FIXED=1 in variable-block mode (block_size=0), backup software
-     * expects the transfer length to be treated as number of blocks at the
-     * current implicit block size.  Use 32 KiB as a sensible default. */
-    if (fixed && drv->block_size == 0)
-        drv->block_size = 32768;
+    /* When FIXED=1 in variable-block mode, use 32 KiB as the implicit
+     * block size (do NOT persist — drv->block_size stays 0 for the
+     * next variable-block command). */
+    {
+        u32 effective_blk = drv->block_size;
+        if (fixed && effective_blk == 0)
+            effective_blk = 32768;
 
-    *block_len = drv->block_size ? drv->block_size : transfer_len;
-    if (transfer_len == 0)
-        transfer_len = 1;
-    if (fixed && drv->block_size > 0) {
-        *blocks = transfer_len;
-    } else {
-        *block_len = transfer_len;
-        *blocks = 1;
+        *block_len = effective_blk ? effective_blk : transfer_len;
+        if (transfer_len == 0)
+            transfer_len = 1;
+        if (fixed && effective_blk > 0) {
+            *blocks = transfer_len;
+        } else {
+            *block_len = transfer_len;
+            *blocks = 1;
+        }
     }
 }
 
