@@ -1137,21 +1137,6 @@ static int vtl_handle_write(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         return SAM_STAT_CHECK_CONDITION;
     }
 
-    /* Early Warning EOM: tape nearing end of capacity */
-    {
-        struct vtl_tape *tp;
-        mutex_lock(&drv->lock);
-        tp = drv->loaded_tape;
-        if (tp && tp->meta.capacity > VTL_EARLY_WARN_MARGIN &&
-            tp->position >= tp->meta.capacity - VTL_EARLY_WARN_MARGIN) {
-            mutex_unlock(&drv->lock);
-            vtl_set_sense(&drv->sense, NO_SENSE, 0x00, 0x02);
-            vtl_build_sense_buffer(cmd, &drv->sense);
-            return SAM_STAT_CHECK_CONDITION;
-        }
-        mutex_unlock(&drv->lock);
-    }
-
     return SAM_STAT_GOOD;
 }
 
