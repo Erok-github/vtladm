@@ -1824,6 +1824,8 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
     bool at_end = false;
     bool at_filemark = false;
     loff_t position = 0;
+    bool want_long;
+    u32 resp_len;
 
 
     if (cmd->cmd_len >= 10)
@@ -1834,8 +1836,8 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
     svc = (cdb[1] & 0x1f);
 
     /* mhVTL uses service action (not allocation length) to select format */
-    bool want_long = (svc == 6);
-    u32  resp_len  = want_long ? 32 : 20;
+    want_long = (svc == 6);
+    resp_len  = want_long ? 32 : 20;
     if (alloc == 0)
         alloc = resp_len;
 
