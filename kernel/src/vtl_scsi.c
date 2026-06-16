@@ -1870,13 +1870,16 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
     mutex_unlock(&drv->lock);
 
     if (loaded) {
+        buf[0] = 0x02;  /* BYCU=1: byte count is estimate (matching mhVTL) */
         if (at_bot)  buf[1] |= 0x80;
         if (at_end)  buf[1] |= 0x40;
         if (at_filemark) buf[1] |= 0x20;
-        vtl_put_be64((u64)position, &buf[4]);
+        /* mhVTL-compatible short form: 4 bytes position at offsets 4-7 and 8-11 */
+        vtl_put_be32((u32)position, &buf[4]);
+        vtl_put_be32((u32)position, &buf[8]);
     } else {
         buf[0] = 0x80;  /* BPU: not ready */
-        buf[1] = 0x00;   /* no BOP/EOP/filemark */
+        buf[1] = 0x00;
     }
 
     (void)vtl_scsi_copy_to_sg(cmd, buf, min_t(unsigned int, alloc, 20), &drv->sense);
