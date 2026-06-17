@@ -961,10 +961,15 @@ static void vtl_parse_rw_blocks(struct scsi_cmnd *cmd, u8 op,
     case WRITE_6:
         fixed = (cdb[1] & 0x01) != 0;
         transfer_len = ((u32)cdb[2] << 8) | cdb[3];
-        /* Kylin 4.19 st driver sets CDB transfer_len=0 in variable-block
-         * mode and passes the actual byte count via the SG list. */
-        if (transfer_len == 0 && !fixed)
-            transfer_len = (u32)scsi_bufflen(cmd);
+        /* Kylin 4.19 st driver may set CDB transfer_len to a small
+         * internal chunk size (e.g. 128) in variable-block mode while
+         * the actual data resides in the SG list (e.g. 32 KB).
+         * Always trust scsi_bufflen() for variable-block commands. */
+        if (!fixed && drv->block_size == 0) {
+            unsigned int sg_len = (unsigned int)scsi_bufflen(cmd);
+            if (sg_len > transfer_len)
+                transfer_len = sg_len;
+        }
         break;
     case READ_10:
     case WRITE_10:
@@ -1363,6 +1368,10 @@ static int vtl_handle_synchronize_cache(struct scsi_cmnd *cmd, struct vtl_drive 
         vtl_build_sense_buffer(cmd, &drv->sense);
         return SAM_STAT_CHECK_CONDITION;
     }
+    /* Flush internal write buffer before syncing to stable storage */
+    mutex_lock(&tape->lock);
+    vtl_drv_flush_write_buf(drv, tape);
+    mutex_unlock(&tape->lock);
     kref_get(&tape->ref);
     filp = tape->file;
     mutex_unlock(&drv->lock);
