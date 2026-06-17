@@ -1027,7 +1027,7 @@ static int vtl_rw_prepare_xfer(struct scsi_cmnd *cmd, u32 *blocks, u32 *block_le
         vtl_build_sense_buffer(cmd, sense);
         return -EINVAL;
     }
-    if (*block_len > VTL_MAX_BLOCK_SIZE || *block_len < VTL_MIN_BLOCK_SIZE) {
+    if (*block_len > VTL_MAX_BLOCK_SIZE) {
         vtl_set_sense(sense, ILLEGAL_REQUEST, 0x24, 0);
         vtl_build_sense_buffer(cmd, sense);
         return -EINVAL;
