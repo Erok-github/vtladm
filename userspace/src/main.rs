@@ -2560,7 +2560,7 @@ fn get_config_uncached() -> VtlConfig {
         auto_sync_db_from_kernel: true,
         kernel_personality: "vtl".to_string(),
         patrol_strict: false,
-        compression: true,
+        compression: false,
         compression_algorithm: "lzo".to_string(),
     };
 
@@ -2773,7 +2773,7 @@ web_cookie_secure=0
 # ---- LTO Hardware Compression Simulation ----
 
 # Enable LTO hardware compression simulation (on/off, true/false, 1/0)
-compression=true
+	compression=false
 # Compression algorithm: lzo (default, faster) or zlib (better ratio)
 compression_algorithm=lzo
 
@@ -3013,7 +3013,7 @@ enum Commands {
         density: String,
         #[arg(short, long)]
         tags: Vec<String>,
-        /// 关闭硬件压缩模拟（默认由 vtl.conf 控制：compression=true）
+        /// 关闭硬件压缩模拟（默认由 vtl.conf 控制：compression=false）
         #[arg(long)]
         no_compression: bool,
         /// 压缩算法: zlib 或 lzo（默认由 vtl.conf compression_algorithm 控制）
@@ -6629,7 +6629,7 @@ pub(crate) fn test_baseline_vtl_config() -> VtlConfig {
         auto_sync_db_from_kernel: false,
         kernel_personality: "vtl".to_string(),
         patrol_strict: false,
-        compression: true,
+        compression: false,
         compression_algorithm: "lzo".to_string(),
     }
 }

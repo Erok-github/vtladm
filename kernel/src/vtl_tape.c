@@ -1017,7 +1017,9 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
 
     mutex_unlock(&tape->lock);
     mutex_unlock(&drv->lock);
-    return (ret == (ssize_t)(compressed ? comp_total : to_write)) ? 0 : -ENOSPC;
+    if (ret != (ssize_t)(compressed ? comp_total : to_write))
+        return -ENOSPC;
+    return 0;
 }
 
 int vtl_tape_space(struct vtl_drive *drv, int code, int count)
@@ -1072,7 +1074,7 @@ int vtl_tape_space(struct vtl_drive *drv, int code, int count)
             }
         }
         if (found < count)
-            tape->position = tape->meta.capacity;
+            tape->position = tape->meta.used;
         drv->at_filemark = (count != 0);
         break;
     }
@@ -1157,8 +1159,6 @@ int vtl_tape_write_filemarks(struct vtl_drive *drv, int count)
         if (ret < 0)
             break;
     }
-	/* Advance position past filemark(s) so subsequent writes append */
-	tape->position = i_size_read(file_inode(tape->file));
     drv->at_filemark = false;
     tape->meta.accessed = ktime_get_real_seconds();
     mutex_unlock(&tape->lock);

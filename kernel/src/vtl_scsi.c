@@ -1433,12 +1433,24 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
             src = vtl_elem_ie_base(ch);
     }
     if (dst == 0) {
-        if (ch->num_slots > 0)
+        /* dst=0 means "return to home slot" — use source_slot when
+         * unloading from a drive, otherwise fall back to first element. */
+        if (vtl_elem_is_drive(ch, src)) {
+            int di = src - vtl_elem_drive_base(ch);
+            if (di >= 0 && di < ch->num_drives &&
+                ch->drives[di].source_slot > 0 &&
+                ch->drives[di].source_slot <= ch->num_slots &&
+                vtl_elem_is_storage(ch, ch->drives[di].source_slot))
+                dst = ch->drives[di].source_slot;
+            else if (ch->num_slots > 0)
+                dst = 1;
+        } else if (ch->num_slots > 0) {
             dst = 1;
-        else if (ch->num_drives > 0)
+        } else if (ch->num_drives > 0) {
             dst = vtl_elem_drive_base(ch);
-        else if (ch->num_mailslots > 0)
+        } else if (ch->num_mailslots > 0) {
             dst = vtl_elem_ie_base(ch);
+        }
     }
 
     /* Pre-validate so empty/missing source returns MEDIUM NOT PRESENT
@@ -2246,7 +2258,7 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
     } else {
         result = vtl_tape_scsi(cmd, vhost, lun - 1, cdb);
         if (result != SAM_STAT_GOOD) {
-            pr_info_ratelimited("VTL: tape LUN%u op=0x%02x result=0x%x\n",
+            pr_info("VTL: tape LUN%u op=0x%02x result=0x%x\n",
                 lun, cdb[0], result);
         }
     }
