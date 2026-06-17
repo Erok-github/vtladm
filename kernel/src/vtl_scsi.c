@@ -945,9 +945,11 @@ mode_pages:
     return SAM_STAT_GOOD;
 }
 
-static void vtl_parse_rw_blocks(const u8 *cdb, u8 op, u32 *blocks, u32 *block_len,
+static void vtl_parse_rw_blocks(struct scsi_cmnd *cmd, u8 op,
+                                u32 *blocks, u32 *block_len,
                                 struct vtl_drive *drv)
 {
+    const u8 *cdb = cmd->cmnd;
     bool fixed = false;
     u32 transfer_len = 0;
 
@@ -959,6 +961,10 @@ static void vtl_parse_rw_blocks(const u8 *cdb, u8 op, u32 *blocks, u32 *block_le
     case WRITE_6:
         fixed = (cdb[1] & 0x01) != 0;
         transfer_len = ((u32)cdb[2] << 8) | cdb[3];
+        /* Kylin 4.19 st driver sets CDB transfer_len=0 in variable-block
+         * mode and passes the actual byte count via the SG list. */
+        if (transfer_len == 0 && !fixed)
+            transfer_len = (u32)scsi_bufflen(cmd);
         break;
     case READ_10:
     case WRITE_10:
@@ -1057,7 +1063,7 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
     u32 actual;
     int ret;
 
-    vtl_parse_rw_blocks(cdb, op, &blocks, &block_len, drv);
+    vtl_parse_rw_blocks(cmd, op, &blocks, &block_len, drv);
     if (vtl_rw_prepare_xfer(cmd, &blocks, &block_len, &drv->sense) < 0)
         return SAM_STAT_CHECK_CONDITION;
 
@@ -1113,7 +1119,7 @@ static int vtl_handle_write(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
     u32 blocks;
     int ret;
 
-    vtl_parse_rw_blocks(cdb, op, &blocks, &block_len, drv);
+    vtl_parse_rw_blocks(cmd, op, &blocks, &block_len, drv);
     if (vtl_rw_prepare_xfer(cmd, &blocks, &block_len, &drv->sense) < 0)
         return SAM_STAT_CHECK_CONDITION;
 
