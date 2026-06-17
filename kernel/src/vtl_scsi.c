@@ -457,8 +457,8 @@ static int vtl_handle_read_block_limits(struct scsi_cmnd *cmd, struct vtl_drive 
     buffer[1] = (VTL_MAX_BLOCK_SIZE >> 16) & 0xff;
     buffer[2] = (VTL_MAX_BLOCK_SIZE >> 8) & 0xff;
     buffer[3] = VTL_MAX_BLOCK_SIZE & 0xff;
-    buffer[4] = (VTL_MIN_BLOCK_SIZE >> 8) & 0xff;
-    buffer[5] = (VTL_MIN_BLOCK_SIZE >> 0) & 0xff;
+    buffer[4] = 0x00;  /* Minimum block size: 1 byte */
+    buffer[5] = 0x01;  /* Minimum block size: 1 byte */
 
     if (vtl_scsi_copy_to_sg(cmd, buffer, 6, &drv->sense)) {
         vtl_xfer_buf_free(buffer);
