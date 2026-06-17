@@ -98,7 +98,7 @@ static inline void vtl_put_be64(u64 v, u8 *p)
 
 #define VTL_MIN_BLOCK_SIZE 512
 #define VTL_MAX_BLOCK_SIZE (1024 * 1024)
-#define VTL_DEFAULT_BLOCK_SIZE 0 /* variable block mode */
+#define VTL_DEFAULT_BLOCK_SIZE 32768 /* 32 KB fixed block — avoids Kylin 4.19 st 128-byte slicing */
 #define VTL_DEFAULT_DENSITY 0x40 /* Default LTO (Ultrium) */
 
 /* T10 SCSI density codes for sequential-access devices (SSC-5) */
