@@ -944,11 +944,14 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
 int vtl_drv_flush_write_buf(struct vtl_drive *drv, struct vtl_tape *tape)
 {
     ssize_t ret;
-    loff_t pos = tape->position;
+    loff_t pos;
 
     if (!drv->write_buf || drv->write_buf_used == 0)
         return 0;
 
+    /* tape->position already reflects logical position (updated per-write).
+     * Recover the disk offset where this buffered region starts. */
+    pos = tape->position - (loff_t)drv->write_buf_used;
     ret = kernel_write(tape->file, drv->write_buf, drv->write_buf_used, &pos);
     if (ret < 0) {
         drv->write_buf_used = 0; /* discard on error */
@@ -959,7 +962,6 @@ int vtl_drv_flush_write_buf(struct vtl_drive *drv, struct vtl_tape *tape)
         return -ENOSPC;
     }
 
-    tape->position = pos;
     tape->meta.log_bytes_written += (u64)ret;
     if (pos > tape->meta.used)
         tape->meta.used = pos;
@@ -1011,21 +1013,27 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
 
     /* Accumulate into internal 64 KB buffer; flush when full.
      * Upper SCSI layer: true variable-block mode (any write size).
-     * Lower disk I/O: fixed 64 KB blocks for efficient sparse-file write. */
-    while (to_write > 0) {
-        u32 space = VTL_WRITE_BUF_SIZE - drv->write_buf_used;
-        u32 chunk = min(to_write, space);
+     * Lower disk I/O: fixed 64 KB blocks for efficient sparse-file write.
+     * tape->position advances immediately so filemarks record correct offsets. */
+    {
+        u32 saved_to_write = to_write;
+        while (to_write > 0) {
+            u32 space = VTL_WRITE_BUF_SIZE - drv->write_buf_used;
+            u32 chunk = min(to_write, space);
 
-        memcpy(drv->write_buf + drv->write_buf_used, buffer, chunk);
-        drv->write_buf_used += chunk;
-        buffer += chunk;
-        to_write -= chunk;
+            memcpy(drv->write_buf + drv->write_buf_used, buffer, chunk);
+            drv->write_buf_used += chunk;
+            buffer += chunk;
+            to_write -= chunk;
+            tape->position += (loff_t)chunk;
 
-        if (drv->write_buf_used == VTL_WRITE_BUF_SIZE) {
-            ret = vtl_drv_flush_write_buf(drv, tape);
-            if (ret < 0)
-                goto out;
+            if (drv->write_buf_used == VTL_WRITE_BUF_SIZE) {
+                ret = vtl_drv_flush_write_buf(drv, tape);
+                if (ret < 0)
+                    goto out;
+            }
         }
+        to_write = saved_to_write; /* restore for logging */
     }
 
     if (actual)
