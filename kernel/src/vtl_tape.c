@@ -499,13 +499,6 @@ void vtl_changer_clear_media(struct vtl_changer *ch)
              * and vtl_tape_put below may lose the last write position
              * (same limitation as all tape unload paths — full crash
              * resilience requires write-through persistence in I/O path). */
-		/* Flush and free internal write buffer before clearing */
-		vtl_drv_flush_write_buf(d, t);
-		if (d->write_buf) {
-			vfree(d->write_buf);
-			d->write_buf = NULL;
-			d->write_buf_used = 0;
-		}
             if (vtl_tape_save_metadata(t) < 0)
                 pr_warn("VTL: failed to save metadata for %s\n", t->name);
             vtl_meta_write(t->path, t->meta.density,
@@ -776,8 +769,6 @@ int vtl_tape_load(struct vtl_drive *drv, struct vtl_tape *tape)
     return 0;
 }
 
-int vtl_drv_flush_write_buf(struct vtl_drive *drv, struct vtl_tape *tape);
-
 int vtl_tape_unload(struct vtl_drive *drv)
 {
     struct vtl_tape *tape;
@@ -795,14 +786,6 @@ int vtl_tape_unload(struct vtl_drive *drv)
     mutex_lock(&tape->lock);
     strscpy(tape_name, tape->name, sizeof(tape_name));
     drive_id = drv->id;
-
-    /* Flush and free internal write buffer */
-    vtl_drv_flush_write_buf(drv, tape);
-    if (drv->write_buf) {
-        vfree(drv->write_buf);
-        drv->write_buf = NULL;
-        drv->write_buf_used = 0;
-    }
 
     drv->loaded_tape = NULL;
     tape->loaded = false;
@@ -867,8 +850,43 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
             be32_to_cpu(hdr.magic) == VTL_BLOCK_MAGIC) {
             u32 comp_sz = be32_to_cpu(hdr.compressed_size);
             u32 uncomp_sz = be32_to_cpu(hdr.uncompressed_size);
+            u8  algo    = hdr.algorithm;
             u32 block_total = VTL_BLOCK_HEADER_SIZE + comp_sz;
             u8 *cbuf;
+
+            /* Uncompressed block (algorithm=0): read data directly,
+             * no decompression needed. Preserves exact SCSI block size. */
+            if (algo == 0 && comp_sz == uncomp_sz) {
+                u32 rd = min(comp_sz, len);
+
+                /* Skip past header to data (hdr_pos already points past header) */
+                pos = hdr_pos;
+                ret = kernel_read(tape->file, buffer, rd, &pos);
+                if (ret < 0) {
+                    mutex_unlock(&tape->lock);
+                    mutex_unlock(&drv->lock);
+                    return -EIO;
+                }
+                /* Skip any unread remainder beyond caller buffer */
+                if (rd < comp_sz)
+                    pos = hdr_pos + (loff_t)comp_sz;
+
+                /* Kylin 4.19 st sends SILI=0 in variable-block mode — zero-pad
+                 * short blocks to avoid stale buffer data. */
+                if ((u32)ret < len)
+                    memset(buffer + ret, 0, len - (u32)ret);
+
+                *actual = min(uncomp_sz, len);
+                tape->position = pos;
+                drv->at_bot = false;
+                drv->at_end = (tape->position >= tape->meta.used);
+                tape->meta.accessed = ktime_get_real_seconds();
+                tape->meta.log_bytes_read += (u64)uncomp_sz;
+
+                mutex_unlock(&tape->lock);
+                mutex_unlock(&drv->lock);
+                return 0;
+            }
 
             if (comp_sz > VTL_MAX_BLOCK_SIZE + 1024 ||
                 uncomp_sz > len) {
@@ -941,39 +959,15 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
     return 0;
 }
 
-int vtl_drv_flush_write_buf(struct vtl_drive *drv, struct vtl_tape *tape)
-{
-    ssize_t ret;
-    loff_t pos;
-
-    if (!drv->write_buf || drv->write_buf_used == 0)
-        return 0;
-
-    /* tape->position already reflects logical position (updated per-write).
-     * Recover the disk offset where this buffered region starts. */
-    pos = tape->position - (loff_t)drv->write_buf_used;
-    ret = kernel_write(tape->file, drv->write_buf, drv->write_buf_used, &pos);
-    if (ret < 0) {
-        drv->write_buf_used = 0; /* discard on error */
-        return -EIO;
-    }
-    if ((u32)ret != drv->write_buf_used) {
-        drv->write_buf_used = 0; /* discard on short write */
-        return -ENOSPC;
-    }
-
-    tape->meta.log_bytes_written += (u64)ret;
-    if (pos > tape->meta.used)
-        tape->meta.used = pos;
-    drv->write_buf_used = 0;
-    return 0;
-}
-
 int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual)
 {
     struct vtl_tape *tape;
+    ssize_t ret;
+    loff_t pos;
     u32 to_write;
-    int ret = 0;
+    u8 *comp_buf = NULL;
+    u32 comp_total = 0;
+    bool compressed = false;
 
     mutex_lock(&drv->lock);
     tape = drv->loaded_tape;
@@ -987,66 +981,93 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
     }
     mutex_lock(&tape->lock);
 
+    pos = tape->position;
     if (actual)
         *actual = 0;
-    if (tape->position >= tape->meta.capacity) {
+    if (pos >= tape->meta.capacity) {
         drv->at_end = true;
         mutex_unlock(&tape->lock);
         mutex_unlock(&drv->lock);
         return -ENOSPC;
     }
-    if ((u64)len > (u64)(tape->meta.capacity - tape->position))
-        to_write = (u32)(tape->meta.capacity - tape->position);
+    if ((u64)len > (u64)(tape->meta.capacity - pos))
+        to_write = (u32)(tape->meta.capacity - pos);
     else
         to_write = len;
 
-    /* Allocate internal write buffer on first use */
-    if (!drv->write_buf) {
-        drv->write_buf = vmalloc(VTL_WRITE_BUF_SIZE);
-        if (!drv->write_buf) {
-            mutex_unlock(&tape->lock);
-            mutex_unlock(&drv->lock);
-            return -ENOMEM;
-        }
-        drv->write_buf_used = 0;
-    }
+    /* Attempt compression if enabled and data is non-empty */
+    if (drv->compression_enabled &&
+        drv->compression_algorithm != VTL_COMP_NONE && to_write > 0) {
+        unsigned int buf_sz = to_write + to_write / 16 + 64 + 3 +
+                              VTL_BLOCK_HEADER_SIZE;
 
-    /* Accumulate into internal 64 KB buffer; flush when full.
-     * Upper SCSI layer: true variable-block mode (any write size).
-     * Lower disk I/O: fixed 64 KB blocks for efficient sparse-file write.
-     * tape->position advances immediately so filemarks record correct offsets. */
-    {
-        u32 saved_to_write = to_write;
-        while (to_write > 0) {
-            u32 space = VTL_WRITE_BUF_SIZE - drv->write_buf_used;
-            u32 chunk = min(to_write, space);
-
-            memcpy(drv->write_buf + drv->write_buf_used, buffer, chunk);
-            drv->write_buf_used += chunk;
-            buffer += chunk;
-            to_write -= chunk;
-            tape->position += (loff_t)chunk;
-
-            if (drv->write_buf_used == VTL_WRITE_BUF_SIZE) {
-                ret = vtl_drv_flush_write_buf(drv, tape);
-                if (ret < 0)
-                    goto out;
+        comp_buf = vmalloc(buf_sz);
+        if (comp_buf) {
+            if (vtl_compress_block(buffer, to_write, comp_buf,
+                                   &comp_total,
+                                   drv->compression_algorithm) == 0 &&
+                comp_total > VTL_BLOCK_HEADER_SIZE) {
+                compressed = true;
+            } else {
+                vfree(comp_buf);
+                comp_buf = NULL;
             }
         }
-        to_write = saved_to_write; /* restore for logging */
     }
 
-    if (actual)
-        *actual = len;
-    drv->at_bot = false;
-    drv->at_end = (tape->position >= tape->meta.capacity);
+    if (compressed) {
+        ret = kernel_write(tape->file, comp_buf, comp_total, &pos);
+        vfree(comp_buf);
+        if (ret < 0) {
+            mutex_unlock(&tape->lock);
+            mutex_unlock(&drv->lock);
+            return -EIO;
+        }
+        tape->position = pos;
+        if (actual)
+            *actual = to_write;
+        drv->comp_bytes_written += to_write;
+        tape->meta.log_bytes_written += (u64)to_write;
+    } else {
+        /* Write uncompressed block with VTLB header so the read path
+         * can identify the exact original block size. Each SCSI WRITE
+         * creates one self-describing block — preserves logical tape
+         * block boundaries for all backup software. */
+        struct vtl_block_header hdr;
+
+        memset(&hdr, 0, sizeof(hdr));
+        hdr.magic = cpu_to_be32(VTL_BLOCK_MAGIC);
+        hdr.uncompressed_size = cpu_to_be32(to_write);
+        hdr.compressed_size   = cpu_to_be32(to_write);
+        /* algorithm=0 means uncompressed (raw data) */
+
+        ret = kernel_write(tape->file, &hdr, sizeof(hdr), &pos);
+        if (ret == sizeof(hdr))
+            ret = kernel_write(tape->file, buffer, to_write, &pos);
+        if (ret < 0) {
+            mutex_unlock(&tape->lock);
+            mutex_unlock(&drv->lock);
+            return -EIO;
+        }
+
+        tape->position = pos;
+        if (actual)
+            *actual = to_write;
+        tape->meta.log_bytes_written += (u64)to_write;
+    }
+
+    if (pos > tape->meta.used)
+        tape->meta.used = pos;
+    drv->at_bot = (pos == 0);
+    drv->at_end = (pos >= tape->meta.capacity);
     drv->at_filemark = false;
     tape->meta.accessed = ktime_get_real_seconds();
 
-out:
     mutex_unlock(&tape->lock);
     mutex_unlock(&drv->lock);
-    return ret;
+    if (ret != (ssize_t)(compressed ? comp_total : to_write))
+        return -ENOSPC;
+    return 0;
 }
 
 int vtl_tape_space(struct vtl_drive *drv, int code, int count)
@@ -1181,13 +1202,6 @@ int vtl_tape_write_filemarks(struct vtl_drive *drv, int count)
     }
 
     mutex_lock(&tape->lock);
-    /* Flush any buffered data before writing filemarks */
-    ret = vtl_drv_flush_write_buf(drv, tape);
-    if (ret < 0) {
-        mutex_unlock(&tape->lock);
-        mutex_unlock(&drv->lock);
-        return ret;
-    }
     for (i = 0; i < count; i++) {
         ret = vtl_tape_append_filemark(tape);
         if (ret < 0)
@@ -1267,15 +1281,6 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 	        }
 	        t = src_drv->loaded_tape;
         saved_source_slot = src_drv->source_slot;
-	/* Flush internal write buffer before unloading from drive */
-	mutex_lock(&t->lock);
-	vtl_drv_flush_write_buf(src_drv, t);
-	mutex_unlock(&t->lock);
-	if (src_drv->write_buf) {
-		vfree(src_drv->write_buf);
-		src_drv->write_buf = NULL;
-		src_drv->write_buf_used = 0;
-	}
 	        src_drv->loaded_tape = NULL;
         src_drv->source_slot = -1;
 		/* Persist filemark metadata and EOD position when unloading from drive */
@@ -1488,13 +1493,6 @@ int vtl_changer_remove_medium(struct vtl_changer *ch, int elem)
 	        d->loaded_tape->loaded = false;
 
     /* Persist filemark metadata before unloading */
-		/* Flush and free internal write buffer before clearing */
-		vtl_drv_flush_write_buf(d, t);
-		if (d->write_buf) {
-			vfree(d->write_buf);
-			d->write_buf = NULL;
-			d->write_buf_used = 0;
-		}
     if (vtl_tape_save_metadata(t) < 0)
         pr_warn("VTL: failed to save metadata for %s\n", t->name);
     vtl_meta_write(t->path, t->meta.density,

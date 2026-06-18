@@ -98,8 +98,7 @@ static inline void vtl_put_be64(u64 v, u8 *p)
 
 #define VTL_MIN_BLOCK_SIZE 512
 #define VTL_MAX_BLOCK_SIZE (1024 * 1024)
-#define VTL_DEFAULT_BLOCK_SIZE 0 /* variable block mode — presented to SCSI initiator */
-#define VTL_WRITE_BUF_SIZE 65536 /* 64 KB internal I/O block — matches mhVTL VTL_BLOCK_SIZE */
+#define VTL_DEFAULT_BLOCK_SIZE 0 /* variable block mode */
 #define VTL_DEFAULT_DENSITY 0x40 /* Default LTO (Ultrium) */
 
 /* T10 SCSI density codes for sequential-access devices (SSC-5) */
@@ -231,14 +230,6 @@ struct vtl_drive {
     u8   compression_algorithm; /* VTL_COMP_ZLIB or VTL_COMP_LZO */
     u64  comp_bytes_written;   /* uncompressed bytes written (LOG SENSE stats) */
     u64  comp_bytes_read;      /* uncompressed bytes read    (LOG SENSE stats) */
-
-    /* Internal write buffer: accumulates variable-block SCSI writes into
-     * fixed 64 KB blocks for efficient kernel_write to sparse files.
-     * Upper layer (SCSI) presents true variable-block mode (block_size=0);
-     * lower layer (disk I/O) writes in VTL_WRITE_BUF_SIZE chunks. */
-    u8  *write_buf;
-    u32  write_buf_used;
-
     /* Unit Attention: set on media-change / reset, cleared by REQUEST SENSE */
     bool ua_pending;
     u8   ua_asc;
@@ -377,7 +368,6 @@ int vtl_tape_load(struct vtl_drive *drive, struct vtl_tape *tape);
 int vtl_tape_unload(struct vtl_drive *drive);
 int vtl_tape_read(struct vtl_drive *drive, u8 *buffer, u32 len, u32 *actual);
 int vtl_tape_write(struct vtl_drive *drive, const u8 *buffer, u32 len, u32 *actual);
-int vtl_drv_flush_write_buf(struct vtl_drive *drv, struct vtl_tape *tape);
 int vtl_tape_space(struct vtl_drive *drive, int code, int count);
 int vtl_tape_write_filemarks(struct vtl_drive *drive, int count);
 int vtl_tape_rewind(struct vtl_drive *drive);
