@@ -16,14 +16,14 @@ export function robotAutoAlign(library: string) {
   return api.post<AutoAlignResponse>('/api/manage/robot/auto-align', { library });
 }
 
-export function changerLoad(library: string, slot: number, drive: number) {
-  return api.post<OkResponse>('/api/manage/tape/load', { library, slot, drive });
-}
-
-export function changerUnload(library: string, drive: number) {
-  return api.post<OkResponse & { slot: number }>('/api/manage/tape/unload', { library, drive });
-}
-
-export function changerEject(library: string, slot: number) {
-  return api.post<OkResponse & { mailslot: number }>('/api/manage/tape/eject', { library, slot });
-}
+//export function changerLoad(library: string, slot: number, drive: number) {
+//  return api.post<OkResponse>('/api/manage/tape/load', { library, slot, drive });
+//}
+//
+//export function changerUnload(library: string, drive: number) {
+//  return api.post<OkResponse & { slot: number }>('/api/manage/tape/unload', { library, drive });
+//}
+//
+//export function changerEject(library: string, slot: number) {
+//  return api.post<OkResponse & { mailslot: number }>('/api/manage/tape/eject', { library, slot });
+//}

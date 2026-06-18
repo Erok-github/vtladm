@@ -132,7 +132,8 @@ struct vtl_block_header {
 } __packed;
 
 /*
- * Filemark sidecar (.vtlmeta): separate from the tape-data format.
+ * Filemark sidecar (.vtlfm): stores filemark offsets for SPACE / READ POSITION.
+ * Separate from the tape-data format.
  */
 #define VTL_FM_MAGIC   0x564C5446  /* "VTLF" */
 #define VTL_FM_VERSION 1
@@ -202,7 +203,7 @@ struct vtl_tape {
     bool loaded;
     bool write_protected;
 
-    /* Filemark offset persistence (.vtlmeta sidecar) */
+    /* Filemark offset persistence (.vtlfm sidecar) */
     u64  *filemark_offsets;   /* byte offsets, dynamically allocated */
     u32   num_filemarks;
     u32   filemark_capacity;
@@ -377,7 +378,7 @@ void vtl_tapes_release_all(void);
 /** Drop one reference; frees tape when last ref (module unload / table remove). */
 void vtl_tape_put(struct vtl_tape *tape);
 
-/* Filemark metadata sidecar (.vtlmeta) */
+/* Filemark offset persistence (.vtlfm sidecar) */
 int  vtl_tape_load_metadata(struct vtl_tape *tape, bool *was_loaded);
 int  vtl_tape_save_metadata(struct vtl_tape *tape);
 void vtl_tape_free_metadata(struct vtl_tape *tape);
