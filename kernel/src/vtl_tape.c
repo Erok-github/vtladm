@@ -868,7 +868,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
                     return -EIO;
                 }
                 /* Skip any unread remainder beyond caller buffer */
-                if (rd < comp_sz)
+                if (rd < comp_sz || comp_sz == 0)
                     pos = hdr_pos + (loff_t)comp_sz;
 
                 /* Kylin 4.19 st sends SILI=0 in variable-block mode — zero-pad
@@ -1145,10 +1145,7 @@ int vtl_tape_space(struct vtl_drive *drv, int code, int count)
             while (idx >= 0) {
                 if (tape->filemark_offsets[idx] < tape->position) {
                     if (++matched == remaining) {
-                        if (idx > 0)
-                            tape->position = tape->filemark_offsets[idx];
-                        else
-                            tape->position = tape->filemark_offsets[0];
+                        tape->position = tape->filemark_offsets[idx];
                         break;
                     }
                 }
@@ -1157,7 +1154,7 @@ int vtl_tape_space(struct vtl_drive *drv, int code, int count)
             if (matched < remaining)
                 tape->position = 0;
         }
-        drv->at_filemark = (count != 0);
+        drv->at_filemark = false;
         break;
     }
     case 3: /* SPACE to End-of-Data: position at meta.used, not file size */
