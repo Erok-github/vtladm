@@ -824,6 +824,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
     mutex_lock(&tape->lock);
 
     if (drv->at_filemark) {
+        pr_info("VTL: READ filemark-hit pos=%lld\n", tape->position);
         drv->at_filemark = false;
         *actual = 0;
         mutex_unlock(&tape->lock);
@@ -885,6 +886,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
 
                 mutex_unlock(&tape->lock);
                 mutex_unlock(&drv->lock);
+                pr_info("VTL: READ-uncomp pos=%lld actual=%u\n", tape->position, *actual);
                 return 0;
             }
 
@@ -935,6 +937,9 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
         }
     }
 
+    pr_info("VTL: READ done pos=%lld actual=%u at_fm=%d at_end=%d\n",
+        tape->position, *actual, drv->at_filemark, drv->at_end);
+
     /* Fallback: raw block read (uncompressed or old-format tape) */
     pos = tape->position;
     if (pos + len > tape->meta.used)
@@ -980,6 +985,12 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
         return -EROFS;
     }
     mutex_lock(&tape->lock);
+
+    /* Writing at BOT clears stale filemarks — logically a fresh tape */
+    if (tape->position == 0) {
+        tape->num_filemarks = 0;
+        tape->meta_dirty = true;
+    }
 
     pos = tape->position;
     if (actual)
@@ -1087,6 +1098,9 @@ int vtl_tape_space(struct vtl_drive *drv, int code, int count)
 
     mutex_lock(&tape->lock);
 
+    pr_info("VTL: SPACE code=%d count=%d pos=%lld num_fm=%u at_fm=%d at_end=%d\n",
+        code, count, tape->position, tape->num_filemarks,
+        drv->at_filemark, drv->at_end);
     switch (code) {
     case 0:
         /* Variable block mode: SPACE blocks is a no-op — there is no
