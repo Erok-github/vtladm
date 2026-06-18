@@ -1075,10 +1075,11 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
 
     ret = vtl_tape_read(drv, buffer, blocks * block_len, &actual);
     if (ret < 0) {
-        /* Empty drive: return 0 bytes instead of NOT_READY */
         if (ret == -ENODEV) {
+            vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
+            vtl_build_sense_buffer(cmd, &drv->sense);
             vtl_xfer_buf_free(buffer);
-            return SAM_STAT_GOOD;
+            return SAM_STAT_CHECK_CONDITION;
         }
         vtl_set_sense(&drv->sense, MEDIUM_ERROR, 0x11, 0);
         vtl_build_sense_buffer(cmd, &drv->sense);
@@ -1137,9 +1138,11 @@ static int vtl_handle_write(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
     vtl_xfer_buf_free(buffer);
 
     if (ret < 0) {
-        /* Empty drive: no-op instead of NOT_READY */
-        if (ret == -ENODEV)
-            return SAM_STAT_GOOD;
+        if (ret == -ENODEV) {
+            vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
+            vtl_build_sense_buffer(cmd, &drv->sense);
+            return SAM_STAT_CHECK_CONDITION;
+        }
         if (ret == -EROFS)
             vtl_set_sense(&drv->sense, DATA_PROTECT, 0x27, 0);
         else if (ret == -ENOSPC)
@@ -1171,9 +1174,11 @@ static int vtl_handle_space(struct scsi_cmnd *cmd, struct vtl_drive *drv)
     count = vtl_get_s24(&cdb[2]);
 
     ret = vtl_tape_space(drv, code, count);
-    /* Empty drive: no-op space */
-    if (ret == -ENODEV)
-        return SAM_STAT_GOOD;
+    if (ret == -ENODEV) {
+        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
+        vtl_build_sense_buffer(cmd, &drv->sense);
+        return SAM_STAT_CHECK_CONDITION;
+    }
     if (ret < 0) {
         vtl_set_sense(&drv->sense, ILLEGAL_REQUEST, 0x24, 0);
         vtl_build_sense_buffer(cmd, &drv->sense);

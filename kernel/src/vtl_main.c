@@ -1031,9 +1031,9 @@ static void vtl_host_scan_handler(struct work_struct *work)
 }
 
 /*
- * Periodic offline-device guard: st driver may offline tape devices during
- * background probing on some kernels (Kylin 4.19, etc.).  Restore them every
- * 30 seconds so backup software always finds running devices.
+ * Periodic offline-device safety net: restores any accidentally-offlined
+ * SCSI devices every 30 seconds.  Primary offline prevention is via SCSI
+ * EH handlers (eh_abort/device_reset/host_reset all return SUCCESS).
  */
 static void vtl_offline_guard_work_fn(struct work_struct *work)
 {
