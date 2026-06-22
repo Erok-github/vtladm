@@ -741,7 +741,7 @@ int vtl_tape_load(struct vtl_drive *drv, struct vtl_tape *tape)
         drv->block_size = tape->meta.block_size;
     drv->density = tape->meta.density;
     if (tape->meta.meta_flags & VTL_META_FLAG_COMPRESSED) {
-        drv->compression_enabled = true;
+        drv->compression_enabled = false; /* mhVTL-aligned: always off */
         drv->compression_algorithm =
             (tape->meta.meta_flags & VTL_META_FLAG_ALGO_MASK) >>
              VTL_META_FLAG_ALGO_SHIFT;
@@ -966,9 +966,6 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
     ssize_t ret;
     loff_t pos;
     u32 to_write;
-    u8 *comp_buf = NULL;
-    u32 comp_total = 0;
-    bool compressed = false;
 
     mutex_lock(&drv->lock);
     tape = drv->loaded_tape;
@@ -1002,66 +999,21 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
     else
         to_write = len;
 
-    /* Attempt compression if enabled and data is non-empty */
-    if (drv->compression_enabled &&
-        drv->compression_algorithm != VTL_COMP_NONE && to_write > 0) {
-        unsigned int buf_sz = to_write + to_write / 16 + 64 + 3 +
-                              VTL_BLOCK_HEADER_SIZE;
-
-        comp_buf = vmalloc(buf_sz);
-        if (comp_buf) {
-            if (vtl_compress_block(buffer, to_write, comp_buf,
-                                   &comp_total,
-                                   drv->compression_algorithm) == 0 &&
-                comp_total > VTL_BLOCK_HEADER_SIZE) {
-                compressed = true;
-            } else {
-                vfree(comp_buf);
-                comp_buf = NULL;
-            }
-        }
+    /* Direct write — no VLTB wrapping, no compression.
+     * Each SCSI WRITE maps 1:1 to a kernel_write on the sparse file.
+     * Backup software sees the exact same bytes it wrote (mhVTL-aligned). */
+    ret = kernel_write(tape->file, buffer, to_write, &pos);
+    if (ret < 0) {
+        mutex_unlock(&tape->lock);
+        mutex_unlock(&drv->lock);
+        return -EIO;
     }
 
-    if (compressed) {
-        ret = kernel_write(tape->file, comp_buf, comp_total, &pos);
-        vfree(comp_buf);
-        if (ret < 0) {
-            mutex_unlock(&tape->lock);
-            mutex_unlock(&drv->lock);
-            return -EIO;
-        }
-        tape->position = pos;
-        if (actual)
-            *actual = to_write;
-        drv->comp_bytes_written += to_write;
-        tape->meta.log_bytes_written += (u64)to_write;
-    } else {
-        /* Write uncompressed block with VTLB header so the read path
-         * can identify the exact original block size. Each SCSI WRITE
-         * creates one self-describing block — preserves logical tape
-         * block boundaries for all backup software. */
-        struct vtl_block_header hdr;
-
-        memset(&hdr, 0, sizeof(hdr));
-        hdr.magic = cpu_to_be32(VTL_BLOCK_MAGIC);
-        hdr.uncompressed_size = cpu_to_be32(to_write);
-        hdr.compressed_size   = cpu_to_be32(to_write);
-        /* algorithm=0 means uncompressed (raw data) */
-
-        ret = kernel_write(tape->file, &hdr, sizeof(hdr), &pos);
-        if (ret == sizeof(hdr))
-            ret = kernel_write(tape->file, buffer, to_write, &pos);
-        if (ret < 0) {
-            mutex_unlock(&tape->lock);
-            mutex_unlock(&drv->lock);
-            return -EIO;
-        }
-
-        tape->position = pos;
-        if (actual)
-            *actual = to_write;
-        tape->meta.log_bytes_written += (u64)to_write;
-    }
+    tape->position = pos;
+    if (actual)
+        *actual = (u32)ret;
+    if (ret > 0)
+        tape->meta.log_bytes_written += (u64)ret;
 
     if (pos > tape->meta.used)
         tape->meta.used = pos;
@@ -1072,7 +1024,7 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
 
     mutex_unlock(&tape->lock);
     mutex_unlock(&drv->lock);
-    if (ret != (ssize_t)(compressed ? comp_total : to_write))
+    if (ret != (ssize_t)to_write)
         return -ENOSPC;
     return 0;
 }
@@ -1370,7 +1322,7 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 	            dst_drv->block_size = t->meta.block_size;
 	        dst_drv->density = t->meta.density;
 	        if (t->meta.meta_flags & VTL_META_FLAG_COMPRESSED) {
-	            dst_drv->compression_enabled = true;
+	            dst_drv->compression_enabled = false; /* mhVTL-aligned: always off */
 	            dst_drv->compression_algorithm =
 	                (t->meta.meta_flags & VTL_META_FLAG_ALGO_MASK) >>
 	                 VTL_META_FLAG_ALGO_SHIFT;
