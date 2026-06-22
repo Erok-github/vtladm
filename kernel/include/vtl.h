@@ -98,8 +98,15 @@ static inline void vtl_put_be64(u64 v, u8 *p)
 
 #define VTL_MIN_BLOCK_SIZE 512
 #define VTL_MAX_BLOCK_SIZE (1024 * 1024)
-#define VTL_DEFAULT_BLOCK_SIZE 0 /* 32 KB fixed block — avoids st driver 128-byte slicing */
+#define VTL_DEFAULT_BLOCK_SIZE 0 /* variable — mhVTL hybrid: SCSI var, I/O fixed */
 #define VTL_DEFAULT_DENSITY 0x40 /* Default LTO (Ultrium) */
+
+/* Record-block format (mhVTL-aligned): multiple SCSI writes packed into 64KB I/O blocks.
+ * Block layout: [magic:u32 "VLBK"][num_recs:u16][flags:u16][packed records...]
+ * Each record:   [size:u32][data:size]  */
+#define VTL_REC_BLOCK_MAGIC 0x564C424B /* "VLBK" */
+#define VTL_REC_BUF_SIZE    65536      /* 64 KB I/O block */
+#define VTL_REC_HEADER_SIZE 8          /* magic(4)+num(2)+flags(2) */
 
 /* T10 SCSI density codes for sequential-access devices (SSC-5) */
 #define VTL_DENSITY_LTO5     0x4A
@@ -235,6 +242,16 @@ struct vtl_drive {
     bool ua_pending;
     u8   ua_asc;
     u8   ua_ascq;
+
+    /* mhVTL-style record buffer: each SCSI WRITE becomes a record,
+     * packed into 64KB blocks for efficient disk I/O. */
+    u8  *rec_buf;       /* 64KB record accumulator */
+    u32  rec_buf_used;  /* bytes used in buffer */
+    u16  rec_count;     /* records in current block (write side) */
+    /* Read side: track position within a multi-record block */
+    u16  rec_read_idx;   /* next record index to read (0-based) */
+    u16  rec_read_total; /* total records in current block */
+    loff_t rec_block_start; /* file offset where current block data begins */
 
     struct vtl_sense_data sense;
     struct mutex lock;
