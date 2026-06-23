@@ -309,11 +309,11 @@ install -m 0644 "$_ko" "$PREFIX/ko/vtl.ko"
 _krel="$(uname -r)"
 _extradir="/lib/modules/${_krel}/extra"
 if [ -d "/lib/modules/${_krel}" ]; then
+  rm -f /lib/modules/${_krel}/extra/vtl.ko 2>/dev/null || true
   mkdir -p "$_extradir"
   install -m 0644 "$PREFIX/ko/vtl.ko" "$_extradir/vtl.ko"
   if command -v depmod >/dev/null 2>&1; then
-    depmod -a "$_krel" 2>/dev/null || depmod -a
-    echo "installed $_extradir/vtl.ko (modprobe vtl)"
+    echo "skip depmod: not safe for system module database (see CLAUDE.md)"
   fi
 fi
 if command -v modinfo >/dev/null 2>&1; then

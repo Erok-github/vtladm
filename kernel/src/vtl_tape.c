@@ -826,17 +826,26 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
 
     mutex_lock(&drv->lock);
     tape = drv->loaded_tape;
-    if (!tape) {
+    if (!tape || !tape->file) {
         mutex_unlock(&drv->lock);
         return -ENODEV;
     }
+    kref_get(&tape->ref);
     mutex_lock(&tape->lock);
+
+    if (!tape->file) {
+        mutex_unlock(&tape->lock);
+        mutex_unlock(&drv->lock);
+        kref_put(&tape->ref, vtl_tape_release);
+        return -ENODEV;
+    }
 
     if (drv->at_filemark) {
         drv->at_filemark = false;
         *actual = 0;
         mutex_unlock(&tape->lock);
         mutex_unlock(&drv->lock);
+        kref_put(&tape->ref, vtl_tape_release);
         return 0;
     }
 
@@ -846,46 +855,47 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
         *actual = 0;
         mutex_unlock(&tape->lock);
         mutex_unlock(&drv->lock);
+        kref_put(&tape->ref, vtl_tape_release);
         return 0;
     }
 
-    /* mhVTL-style: unpack next record from a multi-record block */
-    {
+    /* mhVTL-style: unpack records from multi-record blocks.
+     * If not currently inside a block, peek for a new VLBK header. */
+    if (drv->rec_read_idx >= drv->rec_read_total) {
         u8 peek[4];
         loff_t pk_pos = pos;
 
         ret = kernel_read(tape->file, peek, 4, &pk_pos);
         if (ret == 4 && be32_to_cpu(*(__be32 *)peek) == VTL_REC_BLOCK_MAGIC) {
             u16 num_recs;
-            u32 rec_sz;
 
+            pos = pk_pos; /* sync after peek */
             ret = kernel_read(tape->file, &num_recs, 2, &pos);
-            if (ret != 2) { mutex_unlock(&tape->lock); mutex_unlock(&drv->lock); return -EIO; }
+            if (ret != 2) { mutex_unlock(&tape->lock); mutex_unlock(&drv->lock); kref_put(&tape->ref, vtl_tape_release); return -EIO; }
             num_recs = be16_to_cpu(num_recs);
             pos += 2; /* skip flags */
 
             drv->rec_read_total = num_recs;
             drv->rec_read_idx = 0;
+            tape->position = pos;
         }
     }
 
+    /* Read next record from current VLBK block */
     if (drv->rec_read_idx < drv->rec_read_total) {
         u32 rec_sz;
         loff_t rpos = tape->position;
 
         ret = kernel_read(tape->file, &rec_sz, 4, &rpos);
-        if (ret != 4) { mutex_unlock(&tape->lock); mutex_unlock(&drv->lock); return -EIO; }
+        if (ret != 4) { mutex_unlock(&tape->lock); mutex_unlock(&drv->lock); kref_put(&tape->ref, vtl_tape_release); return -EIO; }
         rec_sz = be32_to_cpu(rec_sz);
 
         {
             u32 rd = min(rec_sz, len);
             ret = kernel_read(tape->file, buffer, rd, &rpos);
-            if (ret < 0) { mutex_unlock(&tape->lock); mutex_unlock(&drv->lock); return -EIO; }
-            if (rd < rec_sz) {
-                loff_t sk = rpos;
-                kernel_read(tape->file, NULL, rec_sz - rd, &sk);
-                rpos = (loff_t)((u64)rpos + (u64)(rec_sz - rd));
-            }
+            if (ret < 0) { mutex_unlock(&tape->lock); mutex_unlock(&drv->lock); kref_put(&tape->ref, vtl_tape_release); return -EIO; }
+            if (rd < rec_sz)
+                rpos += (loff_t)(rec_sz - rd);
             if ((u32)ret < len)
                 memset(buffer + ret, 0, len - (u32)ret);
 
@@ -1001,6 +1011,14 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
 
     /* Fallback: raw block read (uncompressed or old-format tape) */
     pos = tape->position;
+    if (pos >= tape->meta.used) {
+        *actual = 0;
+        drv->at_end = true;
+        mutex_unlock(&tape->lock);
+        mutex_unlock(&drv->lock);
+        kref_put(&tape->ref, vtl_tape_release);
+        return 0;
+    }
     if (pos + len > tape->meta.used)
         len = tape->meta.used - pos;
 
@@ -1026,11 +1044,15 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
 static int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape)
 {
     u8 hdr[VTL_REC_HEADER_SIZE];
-    loff_t pos = tape->position;
+    loff_t pos;
     ssize_t ret;
+    u32 saved_used;
 
     if (!drv->rec_buf || drv->rec_count == 0)
         return 0;
+
+    saved_used = drv->rec_buf_used;
+    pos = drv->rec_block_start;
 
     vtl_put_be32(VTL_REC_BLOCK_MAGIC, hdr);
     vtl_put_be16(drv->rec_count, hdr + 4);
@@ -1043,7 +1065,7 @@ static int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape)
         return ret < 0 ? -EIO : -ENOSPC;
     }
 
-    ret = kernel_write(tape->file, drv->rec_buf, drv->rec_buf_used, &pos);
+    ret = kernel_write(tape->file, drv->rec_buf, saved_used, &pos);
     if (ret < 0) {
         drv->rec_buf_used = 0;
         drv->rec_count = 0;
@@ -1051,12 +1073,16 @@ static int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape)
     }
 
     tape->position = pos;
-    if (pos > tape->meta.used)
+    if (pos > tape->meta.used) {
         tape->meta.used = pos;
-    tape->meta.log_bytes_written += (u64)drv->rec_buf_used;
+        vtl_meta_write(tape->path, tape->meta.density,
+                   tape->meta.meta_flags, tape->meta.used);
+    }
+    tape->meta.log_bytes_written += (u64)saved_used;
     drv->rec_buf_used = 0;
     drv->rec_count = 0;
-    return (ret == (ssize_t)drv->rec_buf_used) ? 0 : -ENOSPC;
+    vfs_fsync(tape->file, 0);
+    return (ret == (ssize_t)saved_used) ? 0 : -ENOSPC;
 }
 
 int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual)
@@ -1067,7 +1093,7 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
 
     mutex_lock(&drv->lock);
     tape = drv->loaded_tape;
-    if (!tape) {
+    if (!tape || !tape->file) {
         mutex_unlock(&drv->lock);
         return -ENODEV;
     }
@@ -1075,10 +1101,12 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
         mutex_unlock(&drv->lock);
         return -EROFS;
     }
+    kref_get(&tape->ref);
     mutex_lock(&tape->lock);
 
     if (tape->position == 0) {
         tape->num_filemarks = 0;
+        tape->meta.used = 0;
         tape->meta_dirty = true;
     }
 
@@ -1088,6 +1116,7 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
         drv->at_end = true;
         mutex_unlock(&tape->lock);
         mutex_unlock(&drv->lock);
+        kref_put(&tape->ref, vtl_tape_release);
         return -ENOSPC;
     }
     to_write = ((u64)len > (u64)(tape->meta.capacity - tape->position))
@@ -1098,6 +1127,7 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
         if (!drv->rec_buf) {
             mutex_unlock(&tape->lock);
             mutex_unlock(&drv->lock);
+            kref_put(&tape->ref, vtl_tape_release);
             return -ENOMEM;
         }
         drv->rec_buf_used = 0;
@@ -1111,6 +1141,10 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
         if (ret < 0)
             goto out;
     }
+
+    /* First record in a new VLBK block: remember where the block starts */
+    if (drv->rec_count == 0)
+        drv->rec_block_start = tape->position;
 
     /* Append record: [size:u32 BE][data] */
     vtl_put_be32(to_write, drv->rec_buf + drv->rec_buf_used);
@@ -1129,6 +1163,7 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
 out:
     mutex_unlock(&tape->lock);
     mutex_unlock(&drv->lock);
+    kref_put(&tape->ref, vtl_tape_release);
     return ret;
 }
 
@@ -1421,6 +1456,18 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 	            ret = -EBUSY;
 	            goto rollback;
 	        }
+	 /* re-open tape file to pick up i_size changes (capacity) */
+	 if (t->file) {
+	     filp_close(t->file, NULL);
+	 }
+	 t->file = filp_open(t->path, O_RDWR | O_LARGEFILE, 0);
+	 if (IS_ERR(t->file)) {
+	     mutex_unlock(&dst_drv->lock);
+	     t->file = NULL;
+	     ret = PTR_ERR(t->file);
+	     goto rollback;
+	 }
+	 t->meta.capacity = (u64)i_size_read(file_inode(t->file));
 	        dst_drv->loaded_tape = t;
 	        kref_get(&t->ref);
         dst_drv->source_slot = vtl_elem_is_storage(ch, src) ? src : saved_source_slot;

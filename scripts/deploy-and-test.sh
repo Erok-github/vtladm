@@ -54,8 +54,6 @@ _ssh "
   modprobe st 2>&1
   sleep 1
   cp /root/vtladm/kernel/vtl.ko /opt/vtladm/ko/vtl.ko
-  cp /root/vtladm/kernel/vtl.ko /lib/modules/\$(uname -r)/extra/vtl.ko
-  depmod -a 2>/dev/null || true
   insmod /opt/vtladm/ko/vtl.ko 2>&1
   sleep 8
   # 恢复设备

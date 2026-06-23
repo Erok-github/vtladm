@@ -960,11 +960,10 @@ static void vtl_parse_rw_blocks(struct scsi_cmnd *cmd, u8 op,
     case READ_6:
     case WRITE_6:
         fixed = (cdb[1] & 0x01) != 0;
-        transfer_len = ((u32)cdb[2] << 8) | cdb[3];
-        /* Kylin 4.19 st driver sets CDB transfer_len=0 in variable-block
-         * mode and passes the actual byte count via the SG list. */
-        if (transfer_len == 0 && !fixed)
+        if (!fixed)
             transfer_len = (u32)scsi_bufflen(cmd);
+        else
+            transfer_len = ((u32)cdb[2] << 8) | cdb[3];
         break;
     case READ_10:
     case WRITE_10:
@@ -1087,13 +1086,15 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         return SAM_STAT_CHECK_CONDITION;
     }
 
-    /* End of data: signal zero bytes transferred via residual.
-     * meta.used tracks write boundary; st buffer interference is handled
-     * by mt warm-up in install.sh. */
+    /* End of data: SSC tape targets signal EOD via CHECK CONDITION
+     * with BLANK CHECK (0x00/0x00/0x05), not via GOOD+residual.
+     * Both Kylin 4.19 SILI=0 and openEuler 6.6 st drivers recognise
+     * this as end-of-recorded-data and stop reading. */
     if (actual == 0) {
-        scsi_set_resid(cmd, blocks * block_len);
+        vtl_set_sense(&drv->sense, 0, 0x00, 0x05);
+        vtl_build_sense_buffer(cmd, &drv->sense);
         vtl_xfer_buf_free(buffer);
-        return SAM_STAT_GOOD;
+        return SAM_STAT_CHECK_CONDITION;
     }
 
     /* Kylin 4.19 st sends SILI=0 in variable-block mode, ignoring SCSI
