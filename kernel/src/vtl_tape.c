@@ -1009,35 +1009,13 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
     }
 
 
-    /* Fallback: raw block read (uncompressed or old-format tape) */
-    pos = tape->position;
-    if (pos >= tape->meta.used) {
-        *actual = 0;
-        drv->at_end = true;
-        mutex_unlock(&tape->lock);
-        mutex_unlock(&drv->lock);
-        kref_put(&tape->ref, vtl_tape_release);
-        return 0;
-    }
-    if (pos + len > tape->meta.used)
-        len = tape->meta.used - pos;
-
-    ret = kernel_read(tape->file, buffer, len, &pos);
-    if (ret < 0) {
-        mutex_unlock(&tape->lock);
-        mutex_unlock(&drv->lock);
-        return -EIO;
-    }
-
-    tape->position = pos;
-    *actual = ret;
-    drv->at_bot = (pos == 0);
-    drv->at_end = (pos >= tape->meta.used);
-    tape->meta.accessed = ktime_get_real_seconds();
-    tape->meta.log_bytes_read += (u64)ret;
-
+    /* No VLBK or compressed block found at current position:
+     * treat as end of recorded data — mhVTL has no raw fallback. */
+    *actual = 0;
+    drv->at_end = true;
     mutex_unlock(&tape->lock);
     mutex_unlock(&drv->lock);
+    kref_put(&tape->ref, vtl_tape_release);
     return 0;
 }
 
