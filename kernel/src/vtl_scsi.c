@@ -1055,7 +1055,6 @@ static int vtl_rw_prepare_xfer(struct scsi_cmnd *cmd, u32 *blocks, u32 *block_le
 
 static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
 {
-    u8 *cdb = cmd->cmnd;
     u8 *buffer;
     u32 block_len;
     u32 blocks;
@@ -1115,7 +1114,6 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
 
 static int vtl_handle_write(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
 {
-    u8 *cdb = cmd->cmnd;
     u8 *buffer;
     u32 block_len;
     u32 blocks;
