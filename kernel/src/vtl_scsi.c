@@ -2265,12 +2265,12 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
 
     if (lun == 0) {
         result = vtl_changer_scsi(cmd, vhost, cdb);
+        pr_info("VTL: changer op=0x%02x result=0x%x\n",
+            cdb[0], result);
     } else {
         result = vtl_tape_scsi(cmd, vhost, lun - 1, cdb);
-        if (result != SAM_STAT_GOOD) {
-            pr_info("VTL: tape LUN%u op=0x%02x result=0x%x\n",
-                lun, cdb[0], result);
-        }
+        pr_info("VTL: tape LUN%u op=0x%02x result=0x%x\n",
+            lun, cdb[0], result);
     }
 out:
     vtl_set_cmd_result(cmd, result);
