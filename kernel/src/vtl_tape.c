@@ -851,6 +851,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
 
     pos = tape->position;
     if (pos >= tape->meta.used) {
+        pr_info("VTL: read EOD pos=%lld used=%lld\n", pos, tape->meta.used);
         drv->at_end = true;
         *actual = 0;
         mutex_unlock(&tape->lock);
@@ -1011,6 +1012,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
 
     /* No VLBK or compressed block found at current position:
      * treat as end of recorded data — mhVTL has no raw fallback. */
+    pr_info("VTL: read noVLBK pos=%lld used=%lld\n", tape->position, tape->meta.used);
     *actual = 0;
     drv->at_end = true;
     mutex_unlock(&tape->lock);
