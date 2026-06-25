@@ -1178,6 +1178,11 @@ static int vtl_handle_space(struct scsi_cmnd *cmd, struct vtl_drive *drv)
         vtl_build_sense_buffer(cmd, &drv->sense);
         return SAM_STAT_CHECK_CONDITION;
     }
+    if (ret == -ENODATA) {
+        vtl_set_sense(&drv->sense, 0, 0x00, 0x05);
+        vtl_build_sense_buffer(cmd, &drv->sense);
+        return SAM_STAT_CHECK_CONDITION;
+    }
     if (ret < 0) {
         vtl_set_sense(&drv->sense, ILLEGAL_REQUEST, 0x24, 0);
         vtl_build_sense_buffer(cmd, &drv->sense);

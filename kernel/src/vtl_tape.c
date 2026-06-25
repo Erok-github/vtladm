@@ -1,5 +1,8 @@
 #include "../include/vtl.h"
 #include <linux/err.h>
+#ifndef ENODATA
+#define ENODATA 61
+#endif
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 #include <linux/file.h>
@@ -1216,8 +1219,10 @@ int vtl_tape_space(struct vtl_drive *drv, int code, int count)
                 }
             }
         }
-        if (found < count)
+        if (found < count) {
             tape->position = tape->meta.used;
+            ret = -ENODATA;
+        }
         drv->at_filemark = false;
         break;
     }
@@ -1237,8 +1242,10 @@ int vtl_tape_space(struct vtl_drive *drv, int code, int count)
                 }
                 idx--;
             }
-            if (matched < remaining)
+            if (matched < remaining) {
                 tape->position = 0;
+                ret = -ENODATA;
+            }
         }
         drv->at_filemark = false;
         break;
