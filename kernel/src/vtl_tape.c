@@ -4,6 +4,7 @@
 #include <linux/uaccess.h>
 #include <linux/file.h>
 #include <linux/limits.h>
+#include <linux/sort.h>
 #include <linux/vmalloc.h>
 
 int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape);
@@ -690,6 +691,15 @@ void vtl_tape_free_metadata(struct vtl_tape *tape)
     tape->meta_dirty = false;
 }
 
+static int cmp_u64(const void *a, const void *b)
+{
+    u64 va = *(const u64 *)a;
+    u64 vb = *(const u64 *)b;
+    if (va < vb) return -1;
+    if (va > vb) return 1;
+    return 0;
+}
+
 /* Internal: append a filemark at the current position. */
 static int vtl_tape_append_filemark(struct vtl_tape *tape)
 {
@@ -1295,6 +1305,9 @@ int vtl_tape_write_filemarks(struct vtl_drive *drv, int count)
         if (ret < 0)
             break;
     }
+    if (count > 0 && tape->num_filemarks > 1)
+        sort(tape->filemark_offsets, tape->num_filemarks,
+             sizeof(u64), cmp_u64, NULL);
     drv->at_filemark = false;
     tape->meta.accessed = ktime_get_real_seconds();
     mutex_unlock(&tape->lock);
