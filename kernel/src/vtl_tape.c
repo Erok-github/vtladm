@@ -6,7 +6,7 @@
 #include <linux/limits.h>
 #include <linux/vmalloc.h>
 
-static int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape);
+int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape);
 static struct vtl_tape *vtl_tapes[VTL_MAX_SLOTS];
 static DEFINE_MUTEX(vtl_tape_lock);
 
@@ -1027,7 +1027,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
     return 0;
 }
 
-static int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape)
+int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape)
 {
     u8 hdr[VTL_REC_HEADER_SIZE];
     loff_t pos;
