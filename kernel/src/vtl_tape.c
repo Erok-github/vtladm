@@ -909,6 +909,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
 
             mutex_unlock(&tape->lock);
             mutex_unlock(&drv->lock);
+            kref_put(&tape->ref, vtl_tape_release);
             return 0;
         }
     }
@@ -938,6 +939,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
                 if (ret < 0) {
                     mutex_unlock(&tape->lock);
                     mutex_unlock(&drv->lock);
+                    kref_put(&tape->ref, vtl_tape_release);
                     return -EIO;
                 }
                 /* Skip any unread remainder beyond caller buffer */
@@ -958,6 +960,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
 
                 mutex_unlock(&tape->lock);
                 mutex_unlock(&drv->lock);
+                kref_put(&tape->ref, vtl_tape_release);
                 return 0;
             }
 
@@ -965,6 +968,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
                 uncomp_sz > len) {
                 mutex_unlock(&tape->lock);
                 mutex_unlock(&drv->lock);
+                kref_put(&tape->ref, vtl_tape_release);
                 return -EIO;
             }
 
@@ -972,6 +976,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
             if (!cbuf) {
                 mutex_unlock(&tape->lock);
                 mutex_unlock(&drv->lock);
+                kref_put(&tape->ref, vtl_tape_release);
                 return -ENOMEM;
             }
 
@@ -981,6 +986,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
                 vfree(cbuf);
                 mutex_unlock(&tape->lock);
                 mutex_unlock(&drv->lock);
+                kref_put(&tape->ref, vtl_tape_release);
                 return -EIO;
             }
 
@@ -990,6 +996,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
             if (ret < 0) {
                 mutex_unlock(&tape->lock);
                 mutex_unlock(&drv->lock);
+                kref_put(&tape->ref, vtl_tape_release);
                 return -EIO;
             }
 
@@ -1004,6 +1011,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
 
             mutex_unlock(&tape->lock);
             mutex_unlock(&drv->lock);
+            kref_put(&tape->ref, vtl_tape_release);
             return 0;
         }
     }
@@ -1366,13 +1374,14 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
         saved_source_slot = src_drv->source_slot;
 	        src_drv->loaded_tape = NULL;
         src_drv->source_slot = -1;
-		/* Persist filemark metadata and EOD position when unloading from drive */
+		vtl_rec_flush(src_drv, t);
+			mutex_lock(&t->lock);
+/* Persist filemark metadata and EOD position when unloading from drive */
 		vtl_tape_save_metadata(t);
 		vtl_meta_write(t->path, t->meta.density,
 		           t->meta.meta_flags, t->meta.used);
-	        mutex_lock(&t->lock);
-	        t->loaded = false;
-	        mutex_unlock(&t->lock);
+	        			t->loaded = false;
+			mutex_unlock(&t->lock);
 	        src_drv->at_filemark = false;
 	        src_drv->at_end = false;
 	        src_drv->at_bot = true;
