@@ -1897,8 +1897,6 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
 
     if (loaded) {
         buf[0] = 0x02;  /* BYCU=1: byte count is estimate */
-        pr_info("VTL: read_pos loaded LUN%u pos=%lld bot=%d eod=%d\n",
-            cmd->device->lun, position, at_bot, at_end);
         if (at_bot)  buf[1] |= 0x80;
         if (at_end)  buf[1] |= 0x40;
         if (at_filemark) buf[1] |= 0x20;
@@ -1910,8 +1908,6 @@ static int vtl_handle_read_position(struct scsi_cmnd *cmd, struct vtl_drive *drv
         }
     } else {
         buf[0] = 0x80;  /* BPU: not ready */
-        pr_info("VTL: read_pos empty drive LUN%u svc=%u\n",
-            cmd->device->lun, svc);
     }
 
     if (vtl_scsi_copy_to_sg(cmd, buf, min_t(unsigned int, alloc, resp_len), &drv->sense)) {
@@ -2269,12 +2265,12 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
 
     if (lun == 0) {
         result = vtl_changer_scsi(cmd, vhost, cdb);
-        pr_info("VTL: changer op=0x%02x result=0x%x\n",
-            cdb[0], result);
     } else {
         result = vtl_tape_scsi(cmd, vhost, lun - 1, cdb);
-        pr_info("VTL: tape LUN%u op=0x%02x result=0x%x\n",
-            lun, cdb[0], result);
+        if (result != SAM_STAT_GOOD) {
+            pr_info("VTL: tape LUN%u op=0x%02x result=0x%x\n",
+                lun, cdb[0], result);
+        }
     }
 out:
     vtl_set_cmd_result(cmd, result);
