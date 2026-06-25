@@ -44,6 +44,7 @@ async function handleComplete() {
     vtl_ko: vtlKo.value,
     vtl_reload_scan_delay_ms: 2000,
     run_kernel_reload_now: false,
+    personality: personality.value,
   });
   router.replace('/');
 }

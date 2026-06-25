@@ -1,8 +1,5 @@
 <script setup lang="ts">
-import { NMessageProvider, NNotificationProvider, NDialogProvider, NConfigProvider, zhCN, darkTheme } from 'naive-ui';
-import { useRouter } from 'vue-router';
-
-const router = useRouter();
+import { NMessageProvider, NNotificationProvider, NDialogProvider, NConfigProvider, zhCN } from 'naive-ui';
 </script>
 
 <template>

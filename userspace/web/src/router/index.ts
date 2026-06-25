@@ -59,7 +59,7 @@ router.beforeEach(async (to, _from, next) => {
   if (!auth.sessionValid) {
     const ok = await auth.checkSession();
     if (!ok) {
-      next('/login');
+      next({ path: '/login', query: { redirect: to.fullPath } });
       return;
     }
   }
