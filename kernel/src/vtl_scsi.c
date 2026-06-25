@@ -1163,6 +1163,58 @@ static int vtl_handle_rewind(struct scsi_cmnd *cmd, struct vtl_drive *drv)
     return SAM_STAT_GOOD;
 }
 
+static int vtl_handle_locate(struct scsi_cmnd *cmd, struct vtl_drive *drv)
+{
+    u8 *cdb = cmd->cmnd;
+    struct vtl_tape *tape;
+    int bt, cp;
+    u32 target;
+    int ret = SAM_STAT_GOOD;
+
+    mutex_lock(&drv->lock);
+    tape = drv->loaded_tape;
+    if (!tape) {
+        mutex_unlock(&drv->lock);
+        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
+        vtl_build_sense_buffer(cmd, &drv->sense);
+        return SAM_STAT_CHECK_CONDITION;
+    }
+    mutex_lock(&tape->lock);
+
+    bt = (cdb[1] >> 1) & 1;
+    cp = cdb[1] & 1;
+    target = ((u32)cdb[2] << 24) | ((u32)cdb[3] << 16) |
+             ((u32)cdb[4] << 8)  | (u32)cdb[5];
+
+    if (cp)
+        goto done;
+
+    if (bt) {
+        if (target >= tape->num_filemarks) {
+            vtl_set_sense(&drv->sense, 0, 0x64, 0x00);
+            vtl_build_sense_buffer(cmd, &drv->sense);
+            ret = SAM_STAT_CHECK_CONDITION;
+            goto done;
+        }
+        tape->position = tape->filemark_offsets[target];
+    } else {
+        if (target > tape->meta.used) {
+            vtl_set_sense(&drv->sense, 0, 0x64, 0x00);
+            vtl_build_sense_buffer(cmd, &drv->sense);
+            ret = SAM_STAT_CHECK_CONDITION;
+            goto done;
+        }
+        tape->position = (loff_t)target;
+    }
+    drv->at_bot = (tape->position == 0);
+    drv->at_end = (tape->position >= tape->meta.used);
+
+done:
+    mutex_unlock(&tape->lock);
+    mutex_unlock(&drv->lock);
+    return ret;
+}
+
 static int vtl_handle_space(struct scsi_cmnd *cmd, struct vtl_drive *drv)
 {
     u8 *cdb = cmd->cmnd;
@@ -1179,7 +1231,7 @@ static int vtl_handle_space(struct scsi_cmnd *cmd, struct vtl_drive *drv)
         return SAM_STAT_CHECK_CONDITION;
     }
     if (ret == -ENODATA) {
-        vtl_set_sense(&drv->sense, 0, 0x00, 0x05);
+        vtl_set_sense(&drv->sense, 0, 0x64, 0x00);
         vtl_build_sense_buffer(cmd, &drv->sense);
         return SAM_STAT_CHECK_CONDITION;
     }
@@ -2204,7 +2256,7 @@ static int vtl_tape_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost,
             return vtl_handle_read_capacity_16(cmd, drv);
         return vtl_cmd_illegal(cmd, &drv->sense);
     case POSITION_TO_ELEMENT:
-        return SAM_STAT_GOOD;
+        return vtl_handle_locate(cmd, drv);
     default:
         return vtl_cmd_illegal(cmd, &drv->sense);
     }
