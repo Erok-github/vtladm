@@ -1337,9 +1337,9 @@ int vtl_tape_rewind(struct vtl_drive *drv)
     mutex_lock(&tape->lock);
     vtl_rec_flush(drv, tape);
     tape->position = 0;
+    tape->num_filemarks = 0;
     drv->rec_read_idx = 0;
     drv->rec_read_total = 0;
-    /* Keep meta.used so reads of existing data work; writes redefine it */
     drv->at_bot = true;
     drv->at_end = false;
     drv->at_filemark = false;
