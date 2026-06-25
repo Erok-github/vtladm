@@ -1190,13 +1190,14 @@ static int vtl_handle_locate(struct scsi_cmnd *cmd, struct vtl_drive *drv)
         goto done;
 
     if (bt) {
-        if (target >= tape->num_filemarks) {
+        if (target > tape->num_filemarks) {
             vtl_set_sense(&drv->sense, 0, 0x64, 0x00);
             vtl_build_sense_buffer(cmd, &drv->sense);
             ret = SAM_STAT_CHECK_CONDITION;
             goto done;
         }
-        tape->position = tape->filemark_offsets[target];
+        tape->position = (target == 0) ? 0 :
+            tape->filemark_offsets[target - 1];
     } else {
         if (target > tape->meta.used) {
             vtl_set_sense(&drv->sense, 0, 0x64, 0x00);
