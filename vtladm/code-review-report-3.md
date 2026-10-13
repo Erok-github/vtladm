@@ -108,15 +108,15 @@
 | 条目 | 级别 | 说明 | 建议 |
 |------|------|------|------|
 | M5 | 中（文档项） | Web 会话内存态、无审计落盘 | 文档先行设计 |
-| M7 | 提示 | 登录错误日志插入未消毒的用户名 | 过滤控制字符 |
-| M8 | 提示 | RESIZE_GEOMETRY int 级瞬时不一致 | 加注释说明 |
-| L4 | 低 | filemark 读返回报 BLANK CHECK 而非 FILEMARK sense | st 可容忍，SSC 严格语义待加固 |
-| L5 | 低 | move_medium ref 时序依赖隐式不变式 | 改为显式托底 |
+| M7 | 提示（已修复 `b8eccb6`） | ~~登录错误日志插入未消毒的用户名~~ | `sanitize_for_log` 已落实 |
+| M8 | 提示（已修复 `b8eccb6`） | ~~RESIZE_GEOMETRY int 级瞬时不一致~~ | 注释已落实 |
+| L4 | 低（已修复 `b8eccb6`） | ~~filemark 读返回报 BLANK CHECK 而非 FILEMARK sense~~ | FILEMARK sense 已落实 |
+| L5 | 低（已修复 `b8eccb6`） | ~~move_medium ref 时序依赖隐式不变式~~ | 先 pin 后 put 已落实 |
 | L14 | 低（已修复 `59871db`） | ~~遗留页 `j.error` 未转义入 innerHTML~~ | 统一 escapeHtml，已落实 |
 | L15 | 低（已修复 `59871db`） | ~~货架名无字符白名单~~ | 与库名对齐，已落实 |
 | L16 | 提示 | setup complete TOCTOU 小窗口 | 可不改 |
 
-高危（H1–H3）与可修中危（M1–M4、M6、M9–M11）已全部闭环；低危项按批次持续收敛。
+高危（H1–H3）与全部可修中低危项（M1–M4、M6–M11、L1–L3、L5–L8、L13–L15）已闭环；遗留仅剩 M5（文档先行项）与 L16（提示级，记录未改码）。
 
 ---
 
