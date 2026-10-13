@@ -2303,6 +2303,10 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
             drv->ua_pending = false;
             vtl_set_sense(&drv->sense, UNIT_ATTENTION, drv->ua_asc, drv->ua_ascq);
             vtl_build_sense_buffer(cmd, &drv->sense);
+            /* cmd->result must be set explicitly: completing with a stale
+             * (zero) result would make the initiator see GOOD and silently
+             * drop the media-change Unit Attention. */
+            vtl_set_cmd_result(cmd, SAM_STAT_CHECK_CONDITION);
             vtl_scsi_done(cmd);
             up_read(&vhost->io_sem);
             return 0;

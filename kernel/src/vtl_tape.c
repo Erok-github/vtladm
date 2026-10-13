@@ -1469,9 +1469,12 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 	 }
 	 t->file = filp_open(t->path, O_RDWR | O_LARGEFILE, 0);
 	 if (IS_ERR(t->file)) {
+	     /* Save the error BEFORE clearing t->file: PTR_ERR(NULL) is 0,
+	      * which would misreport a failed load as SUCCESS (move_medium
+	      * returns 0) while the tape is not in the drive. */
+	     ret = PTR_ERR(t->file);
 	     mutex_unlock(&dst_drv->lock);
 	     t->file = NULL;
-	     ret = PTR_ERR(t->file);
 	     goto rollback;
 	 }
 	 t->meta.capacity = (u64)i_size_read(file_inode(t->file));
