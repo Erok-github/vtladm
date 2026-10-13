@@ -6341,11 +6341,18 @@ fn reset_web_auth(password: Option<&str>) -> Result<(), VtlError> {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let auth_path = db_parent.join("web_admin.json");
-    let st = web_auth::WebState::new(auth_path.clone());
+    // 与 web 服务同样接入持久化存储：clear_all_sessions 才能清掉库里的会话行，
+    // 否则重启后旧会话会"复活"。db 文件不存在时自动降级为纯内存。
+    let st = web_auth::WebState::with_session_store(auth_path.clone(), &get_config().db_path);
     st.force_reset_auth(pw)
         .map_err(|e| VtlError::InvalidParameter(e))?;
-    // 清除所有活跃会话，确保旧会话失效
+    // 清除所有活跃会话（含持久化行），确保旧会话失效
     st.clear_all_sessions();
+    monitor::log_event(
+        "auth",
+        "reset_auth",
+        &format!("user={} file={}", web_auth::DEFAULT_WEB_USER, auth_path.display()),
+    );
     println!(
         "Web auth reset: user={} file={}",
         web_auth::DEFAULT_WEB_USER,

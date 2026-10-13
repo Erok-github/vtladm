@@ -317,7 +317,6 @@ pub fn ensure_events_table(conn: &rusqlite::Connection) -> Result<(), String> {
 }
 
 /// Log an operation event. Safe to call anywhere with DB access.
-#[allow(dead_code)]
 pub fn log_event(category: &str, action: &str, detail: &str) {
     if let Ok(conn) = init_db() {
         let _ = ensure_events_table(&conn);

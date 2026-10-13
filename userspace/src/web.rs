@@ -1169,6 +1169,7 @@ async fn api_login(
     // attacker-influenced; sanitize before they reach the log lines below.
     let login_key_log = super::sanitize_for_log(&login_key);
     if let Err(wait) = st.login_allowed(&login_key) {
+        let retry_secs = wait.as_secs().max(1);
         super::log_error(
             "api_login",
             &format!(
@@ -1176,6 +1177,11 @@ async fn api_login(
                 login_key_log,
                 wait.as_secs()
             ),
+        );
+        super::monitor::log_event(
+            "auth",
+            "login_locked",
+            &format!("ip={} retry_after_secs={}", login_key_log, retry_secs),
         );
         return json_cookie_response(
             StatusCode::TOO_MANY_REQUESTS,
@@ -1189,6 +1195,15 @@ async fn api_login(
             "api_login",
             &format!(
                 "验证码校验失败：IP={} user={}",
+                login_key_log,
+                super::sanitize_for_log(body.username.trim())
+            ),
+        );
+        super::monitor::log_event(
+            "auth",
+            "login_fail",
+            &format!(
+                "reason=captcha ip={} user={}",
                 login_key_log,
                 super::sanitize_for_log(body.username.trim())
             ),
@@ -1208,6 +1223,11 @@ async fn api_login(
         Ok((tok, csrf_tok)) => {
             st.record_login_success(&login_key);
             super::log_message(&format!("Web 登录成功：user={} IP={}", username_log, login_key_log));
+            super::monitor::log_event(
+                "auth",
+                "login",
+                &format!("user={} ip={}", username_log, login_key_log),
+            );
             let must_change = st.must_change_password();
             let sc = session_cookie(&tok, super::web_auth::SESSION_SECS);
             let cc = csrf_cookie(&csrf_tok, super::web_auth::SESSION_SECS);
@@ -1227,6 +1247,16 @@ async fn api_login(
                     st.auth_file.display()
                 ),
             );
+            super::monitor::log_event(
+                "auth",
+                "auth_file_error",
+                &format!(
+                    "ip={} user={} path={}",
+                    login_key_log,
+                    username_log,
+                    st.auth_file.display()
+                ),
+            );
             json_cookie_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 json!({
@@ -1240,6 +1270,11 @@ async fn api_login(
             super::log_error(
                 "api_login",
                 &format!("用户名或密码错误：IP={} user={}", login_key_log, username_log),
+            );
+            super::monitor::log_event(
+                "auth",
+                "login_fail",
+                &format!("reason=bad_credentials ip={} user={}", login_key_log, username_log),
             );
             json_cookie_response(
                 StatusCode::UNAUTHORIZED,
@@ -1282,8 +1317,14 @@ async fn api_change_password(
     if let Err(resp) = require_session(&st, &jar) {
         return resp;
     }
+    // 改密会清除全部会话（含当前会话），审计用的用户名必须在改密前取
+    let actor = st
+        .session_username(session_token(&jar).as_deref())
+        .map(|u| super::sanitize_for_log(&u))
+        .unwrap_or_else(|| "unknown".to_string());
     match st.change_password(&body.old_password, &body.new_password) {
         Ok(()) => {
+            super::monitor::log_event("auth", "change_password", &format!("user={}", actor));
             let sc = session_cookie("", 0);
             let cc = csrf_cookie("", 0);
             json_cookie_response(StatusCode::OK, json!({ "ok": true }), &[&sc, &cc])
@@ -1320,7 +1361,22 @@ async fn api_sessions_revoke(
     }
     let current = session_token(&jar).unwrap_or_default();
     match st.revoke_session(&body.token.trim(), &current) {
-        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))).into_response(),
+        Ok(()) => {
+            let actor = st
+                .session_username(Some(&current))
+                .map(|u| super::sanitize_for_log(&u))
+                .unwrap_or_else(|| "unknown".to_string());
+            super::monitor::log_event(
+                "auth",
+                "revoke_session",
+                &format!(
+                    "user={} revoked_prefix={}",
+                    actor,
+                    super::sanitize_for_log(&body.token.trim())
+                ),
+            );
+            (StatusCode::OK, Json(json!({ "ok": true }))).into_response()
+        }
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     }
 }
@@ -4279,8 +4335,14 @@ pub(crate) fn run_web_ui(host: &str, port: u16) -> Result<(), super::VtlError> {
             ),
         }
     }
-    let auth = Arc::new(super::web_auth::WebState::new(auth_path.clone()));
+    // 会话持久化到 catalog 库：进程重启后恢复未过期会话。
+    // db 文件不存在（setup 未完成）时自动降级为纯内存模式。
+    let auth = Arc::new(super::web_auth::WebState::with_session_store(
+        auth_path.clone(),
+        &super::get_config().db_path,
+    ));
     auth.init_auth_file().map_err(super::VtlError::IoError)?;
+    auth.restore_sessions();
 
     eprintln!(
         "VTL web UI: http://{}:{}  （须登录后访问页面与 API；默认用户 {}；认证文件 {})",

@@ -2,13 +2,23 @@
 
 use bcrypt::{hash, verify, DEFAULT_COST};
 use rand::seq::SliceRandom;
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+/// 会话 `last_activity` 落盘的最小间隔（秒）。
+/// 每次活动请求都回写 SQLite 会形成写放大，因此按此间隔节流。
+const SESSION_TOUCH_MIN_INTERVAL_SECS: u64 = 60;
+
+/// 当前 Unix 时间戳（秒），用于会话持久化的时间字段。
+fn unix_now() -> i64 {
+    chrono::Local::now().timestamp()
+}
 
 pub const DEFAULT_WEB_USER: &str = "admin";
 /// Test-only password. Production deployments get a random UUID password
@@ -35,6 +45,146 @@ struct SessionData {
     last_activity: Instant,
     csrf_token: String,
     password_change_required: bool,
+    /// 上次落盘的 `last_activity`（Unix 秒），用于节流回写。
+    db_synced_unix: i64,
+}
+
+/// Web 会话的 SQLite 持久化存储（表 `web_sessions`）。
+///
+/// 会话令牌以明文落库：catalog 库文件由 `init_db()` 创建时 chmod 0600
+/// （见 main.rs），文件权限与 `web_admin.json` 同级，风险可接受。
+/// 所有方法吞错不 panic：持久化失败不应影响内存会话的正常使用。
+struct SessionStore {
+    conn: Mutex<Connection>,
+    /// schema 是否已在本进程创建（`CREATE TABLE IF NOT EXISTS` 幂等，只需一次）。
+    ready: Mutex<bool>,
+}
+
+impl SessionStore {
+    /// 打开 catalog 库上的会话表。**db 文件不存在时返回 None**：setup 完成前
+    /// web 层不得提前创建 catalog 库（`api_login` 是 public 路由，setup 前可达）。
+    fn open(db_path: &Path) -> Option<Self> {
+        if !db_path.exists() {
+            return None;
+        }
+        let conn = Connection::open(db_path).ok()?;
+        conn.busy_timeout(Duration::from_secs(2)).ok()?;
+        Some(Self {
+            conn: Mutex::new(conn),
+            ready: Mutex::new(false),
+        })
+    }
+
+    fn ensure_schema(&self) {
+        let mut ready = self.ready.lock().unwrap();
+        if *ready {
+            return;
+        }
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "CREATE TABLE IF NOT EXISTS web_sessions (
+                token TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                csrf_token TEXT NOT NULL,
+                password_change_required INTEGER NOT NULL DEFAULT 0,
+                created_unix INTEGER NOT NULL,
+                last_activity_unix INTEGER NOT NULL
+            )",
+            [],
+        );
+        *ready = true;
+    }
+
+    fn save(&self, token: &str, username: &str, csrf: &str, must_change: bool) {
+        self.ensure_schema();
+        let now = unix_now();
+        let _ = self.conn.lock().unwrap().execute(
+            "INSERT OR REPLACE INTO web_sessions
+             (token, username, csrf_token, password_change_required, created_unix, last_activity_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![token, username, csrf, must_change as i32, now],
+        );
+    }
+
+    fn touch(&self, token: &str, last_activity_unix: i64) {
+        self.ensure_schema();
+        let _ = self
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE web_sessions SET last_activity_unix = ?2 WHERE token = ?1",
+                params![token, last_activity_unix],
+            );
+    }
+
+    fn remove(&self, token: &str) {
+        self.ensure_schema();
+        let _ = self.conn.lock().unwrap().execute(
+            "DELETE FROM web_sessions WHERE token = ?1",
+            params![token],
+        );
+    }
+
+    fn clear(&self) {
+        self.ensure_schema();
+        let _ = self
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM web_sessions", []);
+    }
+
+    /// 读回所有未过期会话，并顺手清理过期行（进程重启后 last_activity
+    /// 以落库值为准恢复，避免内存态丢失导致空闲超时从头计算）。
+    fn load_active(&self) -> Vec<(String, SessionData)> {
+        self.ensure_schema();
+        let now = unix_now();
+        let cutoff_created = now - SESSION_SECS as i64;
+        let cutoff_idle = now - SESSION_IDLE_SECS as i64;
+        let _ = self.conn.lock().unwrap().execute(
+            "DELETE FROM web_sessions WHERE created_unix < ?1 OR last_activity_unix < ?2",
+            params![cutoff_created, cutoff_idle],
+        );
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT token, username, csrf_token, password_change_required, created_unix, last_activity_unix
+             FROM web_sessions WHERE created_unix >= ?1 AND last_activity_unix >= ?2",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(params![cutoff_created, cutoff_idle], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i32>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        });
+        let mut out = Vec::new();
+        if let Ok(rows) = rows {
+            let inst_now = Instant::now();
+            for (tok, user, csrf, must, created, last) in rows.flatten() {
+                let created_age = (now - created).max(0) as u64;
+                let idle_age = (now - last).max(0) as u64;
+                out.push((
+                    tok,
+                    SessionData {
+                        username: user,
+                        created_at: inst_now - Duration::from_secs(created_age),
+                        last_activity: inst_now - Duration::from_secs(idle_age),
+                        csrf_token: csrf,
+                        password_change_required: must != 0,
+                        db_synced_unix: last,
+                    },
+                ));
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +208,8 @@ pub struct WebState {
     captcha: Mutex<HashMap<String, (i32, Instant)>>,
     sessions: Mutex<HashMap<String, SessionData>>,
     login_failures: Mutex<HashMap<String, LoginThrottle>>,
+    /// 会话持久化存储；None 表示纯内存（单测 / db 未就绪时）。
+    session_store: Option<SessionStore>,
 }
 
 #[derive(Clone, Copy)]
@@ -76,12 +228,37 @@ pub struct SessionInfo {
 }
 
 impl WebState {
+    /// 纯内存会话（无持久化）。db 文件不存在 / 未就绪时自动降级为此模式。
     pub fn new(auth_file: PathBuf) -> Self {
         Self {
             auth_file,
             captcha: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             login_failures: Mutex::new(HashMap::new()),
+            session_store: None,
+        }
+    }
+
+    /// 带会话持久化的构造：会话写入 catalog 库的 `web_sessions` 表，
+    /// 进程重启后可通过 `restore_sessions()` 恢复未过期会话。
+    pub fn with_session_store(auth_file: PathBuf, db_path: &Path) -> Self {
+        let mut st = Self::new(auth_file);
+        st.session_store = SessionStore::open(db_path);
+        st
+    }
+
+    /// 启动时从库中恢复未过期会话（并清理过期行）。应在 `init_auth_file` 之后调用。
+    pub fn restore_sessions(&self) {
+        let Some(store) = &self.session_store else {
+            return;
+        };
+        let active = store.load_active();
+        if active.is_empty() {
+            return;
+        }
+        let mut sess = self.sessions.lock().unwrap();
+        for (tok, sd) in active {
+            sess.entry(tok).or_insert(sd);
         }
     }
 
@@ -211,6 +388,7 @@ impl WebState {
         let mut sess = self.sessions.lock().unwrap();
         let now = Instant::now();
         sess.retain(|_, sd| now.duration_since(sd.created_at) < Duration::from_secs(SESSION_SECS + 3600));
+        let mut evicted: Option<String> = None;
         if sess.len() >= MAX_SESSIONS {
             if let Some(oldest) = sess
                 .iter()
@@ -218,6 +396,7 @@ impl WebState {
                 .map(|(tok, _)| tok.clone())
             {
                 sess.remove(&oldest);
+                evicted = Some(oldest);
             }
         }
         sess.insert(
@@ -228,8 +407,17 @@ impl WebState {
                 last_activity: Instant::now(),
                 csrf_token: csrf.clone(),
                 password_change_required: must_change,
+                db_synced_unix: unix_now(),
             },
         );
+        drop(sess);
+        if let Some(store) = &self.session_store {
+            store.save(&tok, user, &csrf, must_change);
+            // 被淘汰的会话同步从库中删除，避免重启后"复活"
+            if let Some(old) = evicted {
+                store.remove(&old);
+            }
+        }
         Ok((tok, csrf))
     }
 
@@ -275,22 +463,42 @@ impl WebState {
 
     pub fn session_username(&self, token: Option<&str>) -> Option<String> {
         let t = token?;
-        let mut sess = self.sessions.lock().unwrap();
-        if let Some(sd) = sess.get_mut(t) {
-            let elapsed = sd.created_at.elapsed();
-            if elapsed > Duration::from_secs(SESSION_SECS) {
-                sess.remove(t);
+        // (用户名, 是否需节流回写 last_activity, 回写时间戳)；
+        // expired=true 表示会话已过期并在内存中删除，需同步删库。
+        let (username, needs_touch, touch_unix, expired) = {
+            let mut sess = self.sessions.lock().unwrap();
+            if let Some(sd) = sess.get_mut(t) {
+                let expired = sd.created_at.elapsed() > Duration::from_secs(SESSION_SECS)
+                    || sd.last_activity.elapsed() > Duration::from_secs(SESSION_IDLE_SECS);
+                if expired {
+                    sess.remove(t);
+                    (String::new(), false, 0, true)
+                } else {
+                    sd.last_activity = Instant::now();
+                    let now_unix = unix_now();
+                    let needs_touch = now_unix.saturating_sub(sd.db_synced_unix)
+                        >= SESSION_TOUCH_MIN_INTERVAL_SECS as i64;
+                    if needs_touch {
+                        sd.db_synced_unix = now_unix;
+                    }
+                    (sd.username.clone(), needs_touch, now_unix, false)
+                }
+            } else {
                 return None;
             }
-            let idle = sd.last_activity.elapsed();
-            if idle > Duration::from_secs(SESSION_IDLE_SECS) {
-                sess.remove(t);
-                return None;
+        };
+        // 锁外再做 SQLite 调用，避免持锁跨 IO。
+        if let Some(store) = &self.session_store {
+            if expired {
+                store.remove(t);
+            } else if needs_touch {
+                store.touch(t, touch_unix);
             }
-            sd.last_activity = Instant::now();
-            return Some(sd.username.clone());
         }
-        None
+        if expired {
+            return None;
+        }
+        Some(username)
     }
 
     /// Check if a session token is valid without updating last_activity (for ping endpoints).
@@ -361,36 +569,66 @@ impl WebState {
     /// 清除所有活跃会话（密码重置后调用）。
     pub fn clear_all_sessions(&self) {
         self.sessions.lock().unwrap().clear();
+        if let Some(store) = &self.session_store {
+            store.clear();
+        }
     }
 
     pub fn revoke_session(&self, token_prefix: &str, current_token: &str) -> Result<(), String> {
         if current_token.starts_with(token_prefix) {
             return Err("不能撤销当前会话，请使用登出".into());
         }
-        let mut sess = self.sessions.lock().unwrap();
-        if sess.remove(token_prefix).is_some() {
-            return Ok(());
-        }
-        let matches: Vec<String> = sess
-            .keys()
-            .filter(|k| k.starts_with(token_prefix))
-            .cloned()
-            .collect();
-        if matches.len() == 1 {
-            if matches[0] == current_token {
-                return Err("不能撤销当前会话，请使用登出".into());
+        let removed: Option<String> = {
+            let mut sess = self.sessions.lock().unwrap();
+            if sess.remove(token_prefix).is_some() {
+                Some(token_prefix.to_string())
+            } else {
+                let matches: Vec<String> = sess
+                    .keys()
+                    .filter(|k| k.starts_with(token_prefix))
+                    .cloned()
+                    .collect();
+                if matches.len() == 1 {
+                    if matches[0] == current_token {
+                        return Err("不能撤销当前会话，请使用登出".into());
+                    }
+                    sess.remove(&matches[0]);
+                    Some(matches[0].clone())
+                } else {
+                    None
+                }
             }
-            sess.remove(&matches[0]);
-            Ok(())
-        } else if matches.is_empty() {
-            Err("未找到匹配的会话".into())
-        } else {
-            Err("匹配到多个会话，请提供更完整的前缀".into())
+        };
+        match removed {
+            Some(full_token) => {
+                // 按前缀匹配到的完整令牌同步从库中删除
+                if let Some(store) = &self.session_store {
+                    store.remove(&full_token);
+                }
+                Ok(())
+            }
+            None => {
+                let matches_len = self
+                    .sessions
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .filter(|k| k.starts_with(token_prefix))
+                    .count();
+                if matches_len > 1 {
+                    Err("匹配到多个会话，请提供更完整的前缀".into())
+                } else {
+                    Err("未找到匹配的会话".into())
+                }
+            }
         }
     }
 
     pub fn logout_token(&self, token: &str) {
         self.sessions.lock().unwrap().remove(token);
+        if let Some(store) = &self.session_store {
+            store.remove(token);
+        }
     }
 
     #[cfg(test)]
@@ -408,6 +646,7 @@ impl WebState {
                 last_activity: Instant::now(),
                 csrf_token: format!("csrf_{}", token),
                 password_change_required: false,
+                db_synced_unix: unix_now(),
             },
         );
     }
@@ -424,6 +663,9 @@ impl WebState {
         cred.password_change_required = false;
         self.write_auth(&cred)?;
         self.sessions.lock().unwrap().clear();
+        if let Some(store) = &self.session_store {
+            store.clear();
+        }
         Ok(())
     }
 
@@ -641,5 +883,110 @@ mod tests {
         // 不能撤销自己
         assert!(st.revoke_session(&tok1[..16], &tok1).is_err());
         let _ = fs::remove_file(&st.auth_file);
+    }
+
+    fn tmp_db_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "vtladm_web_sess_{}_{}_{}.db",
+            label,
+            std::process::id(),
+            rand::random::<u32>()
+        ))
+    }
+
+    /// 建一个带持久化的 state；db 文件先由调用方创建（SessionStore::open
+    /// 要求文件已存在，避免提前创建 catalog 库）。
+    fn fresh_state_with_store(label: &str) -> (WebState, PathBuf, PathBuf) {
+        let auth = tmp_auth_path(label);
+        let _ = fs::remove_file(&auth);
+        let db = tmp_db_path(label);
+        let _ = fs::remove_file(&db);
+        Connection::open(&db).unwrap();
+        let st = WebState::with_session_store(auth.clone(), &db);
+        st.write_default_auth_with_flags(TEST_PASSWORD, true).unwrap();
+        (st, auth, db)
+    }
+
+    fn db_session_count(db: &Path) -> i64 {
+        let conn = Connection::open(db).unwrap();
+        conn.query_row("SELECT COUNT(*) FROM web_sessions", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn test_session_persist_and_restore_after_restart() {
+        let (st, auth, db) = fresh_state_with_store("persist");
+        let (tok, csrf) = st.login(DEFAULT_WEB_USER, TEST_PASSWORD).unwrap();
+        assert_eq!(db_session_count(&db), 1);
+        // 模拟重启：新 WebState 指向同一 db，恢复会话
+        let st2 = WebState::with_session_store(auth.clone(), &db);
+        st2.restore_sessions();
+        assert_eq!(
+            st2.session_username(Some(tok.as_str())).as_deref(),
+            Some(DEFAULT_WEB_USER)
+        );
+        assert_eq!(st2.csrf_token_for_session(&tok).as_deref(), Some(csrf.as_str()));
+        assert_eq!(st2.list_sessions(&tok).len(), 1);
+        let _ = fs::remove_file(&auth);
+        let _ = fs::remove_file(&db);
+    }
+
+    #[test]
+    fn test_session_store_prunes_expired_rows_on_restore() {
+        let (st, auth, db) = fresh_state_with_store("expired");
+        let (_tok, _) = st.login(DEFAULT_WEB_USER, TEST_PASSWORD).unwrap();
+        // 直接把行改老：created 与 last_activity 都超过上限
+        let conn = Connection::open(&db).unwrap();
+        let ancient = unix_now() - (SESSION_SECS as i64 + 60);
+        conn.execute(
+            "UPDATE web_sessions SET created_unix = ?1, last_activity_unix = ?1",
+            params![ancient],
+        )
+        .unwrap();
+        drop(conn);
+        let st2 = WebState::with_session_store(auth.clone(), &db);
+        st2.restore_sessions();
+        // 过期会话不再恢复，且行已被清理
+        assert_eq!(st2.session_count(), 0);
+        assert_eq!(db_session_count(&db), 0);
+        let _ = fs::remove_file(&auth);
+        let _ = fs::remove_file(&db);
+    }
+
+    #[test]
+    fn test_session_store_remove_and_clear_sync() {
+        let (st, auth, db) = fresh_state_with_store("lifecycle");
+        let (tok, _) = st.login(DEFAULT_WEB_USER, TEST_PASSWORD).unwrap();
+        // logout 同步删库
+        st.logout_token(&tok);
+        assert_eq!(db_session_count(&db), 0);
+        // 两个会话 → clear_all_sessions 全清
+        st.login(DEFAULT_WEB_USER, TEST_PASSWORD).unwrap();
+        let (tok2, _) = st.login(DEFAULT_WEB_USER, TEST_PASSWORD).unwrap();
+        assert_eq!(db_session_count(&db), 2);
+        st.revoke_session(&tok2[..16], "current-not-tok2").unwrap();
+        assert_eq!(db_session_count(&db), 1);
+        st.clear_all_sessions();
+        assert_eq!(db_session_count(&db), 0);
+        let _ = fs::remove_file(&auth);
+        let _ = fs::remove_file(&db);
+    }
+
+    #[test]
+    fn test_with_session_store_missing_db_falls_back_to_memory() {
+        let auth = tmp_auth_path("no_db");
+        let _ = fs::remove_file(&auth);
+        let missing = tmp_db_path("definitely_missing");
+        let _ = fs::remove_file(&missing);
+        let st = WebState::with_session_store(auth.clone(), &missing);
+        st.write_default_auth_with_flags(TEST_PASSWORD, true).unwrap();
+        // db 不存在：不得创建文件，会话纯内存
+        assert!(!missing.exists());
+        let (tok, _) = st.login(DEFAULT_WEB_USER, TEST_PASSWORD).unwrap();
+        assert_eq!(
+            st.session_username(Some(tok.as_str())).as_deref(),
+            Some(DEFAULT_WEB_USER)
+        );
+        let _ = fs::remove_file(&auth);
     }
 }
