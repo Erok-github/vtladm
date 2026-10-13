@@ -30,6 +30,8 @@
 
 ## 二、本轮新发现问题
 
+> **状态更新**：本节 M9、M10、M11、L10、L11、L12 均已在提交 `9fffd94` 中修复（同批完成硬编码专项审查，见第五节）。
+
 ### M9. SYNCHRONIZE CACHE 不持 tape->lock 直接 fsync，与 MOVE MEDIUM 的 filp_close/reopen 存在 struct file UAF 竞态
 `kernel/src/vtl_scsi.c:1427-1456`（`vtl_handle_synchronize_cache`）↔ `kernel/src/vtl_tape.c:1593-1597`（`vtl_changer_move_medium` 装载前 `filp_close`/`filp_open`）
 
@@ -98,7 +100,21 @@ SSC 语义下 LOAD UNLOAD(Load=0) 是"回到 BOP"，等价 REWIND。但 handler 
 
 ---
 
-## 五、审查限制声明
+## 五、硬编码专项审查（随 `9fffd94` 同批进行）
+
+对全仓（userspace/src、kernel/src、scripts、packaging、install.sh）做凭据/IP/端口/路径/魔数五类硬编码扫描，结论：**未发现生产路径硬编码敏感值**。
+
+| 类别 | 结论 |
+|------|------|
+| 凭据/密钥 | 无硬编码秘密。Web 初始密码为随机 UUID（`web_auth.rs:89` `init_auth_file`），强制首次改密；`DEFAULT_WEB_PASSWORD = "admin"`（`web_auth.rs:15`）此前被第一轮标记为"死常量"，实际仅用于 `#[cfg(test)]` 测试代码（`web.rs:6734/6901/7265`），生产不可达。bcrypt 哈希、登录限流、一次性验证码逻辑均无内嵌密钥。 |
+| IP 地址 | 全部为可覆盖的默认值或测试数据：CLI `default_value = "0.0.0.0"`（`vtladm_iscsi.rs:60/91`）、配置文件示例与缺省回落（`web.rs:2913/3475`、`main.rs:2764`、`patrol.rs:629` 支持 `VTLADM_WEB_HOST` 环境变量）、测试断言中的文档段地址（`192.168.x`、`203.0.113.10`）、`install_prompt.sh:11` 的 `1.1.1.1` 仅作路由探测目标。 |
+| 端口 | iSCSI 3260 为协议标准端口，经配置文件 `iscsi_portals` / CLI 覆盖；Web 端口经配置文件与 CLI 覆盖。 |
+| 绝对路径 | 均为 OS 标准位置而非项目秘密：configfs（`/sys/kernel/config/target`）、`/dev/vtl`、`/sys/module/vtl/parameters/*`、`/etc/tgt/targets.conf`（tgtd 后端整体覆写该文件，未合并管理员手工配置，列为低危提示 L13）、`/opt/vtladm`、`/usr/local/sbin/vtl-kernelctl`（管理员配置脚本的搜索路径）。 |
+| 内核魔数 | 全部经 `#define` 收敛（`VTL_REC_BLOCK_MAGIC`、`VTL_BLOCK_MAGIC`、`VTL_META_MAGIC`、`VTL_FM_MAGIC` 及缓冲/块尺寸），抽查 `vtl_tape.c` 无散落十六进制字面量。 |
+
+**L13（新增低危）**：`vtladm_iscsi.rs:755/884` 直接整体覆写 `/etc/tgt/targets.conf`，会静默丢弃管理员在该文件中的手工配置；tgtd 后端启用前应先备份/合并现有内容，或在文档中明示该行为。
+
+## 六、审查限制声明
 
 - 未编译、未运行：所有结论基于源码静态分析；新发现（尤其 M9 竞态窗口）需在 Linux 构建机上以 KASAN 内核 + 并发 SYNCHRONIZE CACHE/MOVE MEDIUM 压测验证。
 - `userspace/web`（Vue3 前端）本轮仍未逐行审查；`main.rs`（8400+ 行）与 `web.rs`（4000+ 行）做了风险模式检索 + 重点函数精读，非逐行。
