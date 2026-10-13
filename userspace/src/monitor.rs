@@ -8,6 +8,8 @@ use serde::Serialize;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::sync::Mutex;
+#[cfg(not(test))]
+use std::sync::OnceLock;
 
 use crate::init_db;
 
@@ -316,14 +318,67 @@ pub fn ensure_events_table(conn: &rusqlite::Connection) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// Process-wide cached connection for audit events (M13).
+///
+/// `init_db()` pays open + pragmas + table/migration probes on every call;
+/// login attempts can trigger `log_event` at attack frequency, so the event
+/// path reuses one connection opened lazily on the first event. A broken
+/// connection is dropped and re-opened on the next event.
+///
+/// Tests bypass the cache: each test points VTL_DB_PATH at its own temp db,
+/// and a process-wide connection would keep writing to the first test's file.
+#[cfg(not(test))]
+static EVENT_CONN: OnceLock<Mutex<Option<rusqlite::Connection>>> = OnceLock::new();
+
 /// Log an operation event. Safe to call anywhere with DB access.
+///
+/// M12: never create the catalog db from the event path — public pre-setup
+/// routes (api_login) call log_event, and init_db() would otherwise create
+/// the db file + schema as an unauthenticated side effect before the setup
+/// wizard runs. Events raised before the db exists are simply not persisted
+/// (the stderr log lines in the callers still record them).
 pub fn log_event(category: &str, action: &str, detail: &str) {
-    if let Ok(conn) = init_db() {
-        let _ = ensure_events_table(&conn);
-        let _ = conn.execute(
-            "INSERT INTO operation_events (category, action, detail) VALUES (?1, ?2, ?3)",
-            params![category, action, detail],
-        );
+    if !crate::get_db_path().exists() {
+        return;
+    }
+    #[cfg(test)]
+    {
+        if let Ok(conn) = init_db() {
+            let _ = ensure_events_table(&conn);
+            let _ = conn.execute(
+                "INSERT INTO operation_events (category, action, detail) VALUES (?1, ?2, ?3)",
+                params![category, action, detail],
+            );
+        }
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        let mut slot = match EVENT_CONN
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+        {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if slot.is_none() {
+            *slot = init_db().ok();
+            if let Some(conn) = slot.as_ref() {
+                let _ = ensure_events_table(conn);
+            }
+        }
+        let insert_result = match slot.as_ref() {
+            Some(conn) => conn.execute(
+                "INSERT INTO operation_events (category, action, detail) VALUES (?1, ?2, ?3)",
+                params![category, action, detail],
+            ),
+            None => return,
+        };
+        if insert_result.is_err() {
+            // Broken/stale connection (db replaced, deleted, …) — drop it so
+            // the next event re-opens a fresh one instead of failing forever.
+            *slot = None;
+        }
     }
 }
 
@@ -389,5 +444,48 @@ pub fn system_snapshot() -> SystemSnapshot {
         cpu: sample_cpu(),
         mem: sample_mem(),
         disks: sample_disks(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_utils;
+
+    /// M12: the event path must never create the catalog db — public pre-setup
+    /// routes (api_login) call log_event, and creating the db file from an
+    /// unauthenticated request would be an unintended filesystem write.
+    #[test]
+    fn log_event_never_creates_db() {
+        let dir = test_utils::prepare_temp_vtl("log_event_no_create");
+        let prev_db = std::env::var("VTL_DB_PATH").ok();
+        let nested = dir.join("no_such_subdir").join("missing.db");
+        std::env::set_var("VTL_DB_PATH", nested.to_str().unwrap());
+        crate::monitor::log_event("auth", "login_fail", "probe");
+        assert!(!nested.exists(), "log_event must not create the db file");
+        assert!(!nested.parent().unwrap().exists(), "log_event must not create parent dirs either");
+        match prev_db {
+            Some(p) => std::env::set_var("VTL_DB_PATH", p),
+            None => std::env::remove_var("VTL_DB_PATH"),
+        }
+        test_utils::cleanup_temp_vtl(&dir);
+    }
+
+    #[test]
+    fn log_event_writes_row_when_db_exists() {
+        let dir = test_utils::prepare_temp_vtl("log_event_write");
+        // 生产路径中调用方先 init_db()（建库）再 log_event；测试同样先建库，
+        // 因为 M12 门要求 db 文件已存在才允许落事件。
+        let _ = crate::init_db().expect("init db");
+        crate::monitor::log_event("auth", "login", "user=test");
+        let conn = crate::init_db().expect("db");
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM operation_events WHERE category='auth' AND action='login'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(n, 1);
+        test_utils::cleanup_temp_vtl(&dir);
     }
 }
