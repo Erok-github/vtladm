@@ -384,7 +384,14 @@ int vtl_changer_slot_place(struct vtl_changer *ch, int slot, struct vtl_tape *ta
 int vtl_changer_load_slot_to_drive(struct vtl_changer *ch, int slot, int drive,
 				   const char *tape_name, const char *barcode);
 int vtl_changer_unload_drive_to_slot(struct vtl_changer *ch, int drive, int slot);
-struct vtl_changer *vtl_changer_get_instance(int instance);
+/* Look up a changer by instance.  On success *vhost_out (if non-NULL)
+ * receives the owning host with its io_sem held in READ mode, which pins
+ * vhost+changer against vtl_remove()/hot-geometry teardown — those take
+ * io_sem for WRITE and free the changer only after every reader drains.
+ * H2 fix: callers must pair every successful call with
+ * vtl_changer_put_instance() after their last use of the changer. */
+struct vtl_changer *vtl_changer_get_instance(int instance, struct vtl_host **vhost_out);
+void vtl_changer_put_instance(struct vtl_host *vhost);
 int vtl_tape_load(struct vtl_drive *drive, struct vtl_tape *tape);
 int vtl_tape_unload(struct vtl_drive *drive);
 int vtl_tape_read(struct vtl_drive *drive, u8 *buffer, u32 len, u32 *actual);

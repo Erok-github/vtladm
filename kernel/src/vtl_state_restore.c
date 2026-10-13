@@ -220,10 +220,13 @@ void vtl_restore_all_changer_states(void)
 	 * vtl_list_lock, which is safe because we're in module_init serial context.
 	 */
 	for (instance = 0; ; instance++) {
-		ch = vtl_changer_get_instance(instance);
+		struct vtl_host *vhost;
+
+		ch = vtl_changer_get_instance(instance, &vhost);
 		if (!ch)
 			break;
 		vtl_restore_one_changer_state(ch, instance);
+		vtl_changer_put_instance(vhost);
 		restored++;
 	}
 

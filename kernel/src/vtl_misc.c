@@ -93,6 +93,7 @@ static long vtl_ioctl_get_inventory(void __user *uarg)
 	int *elements;
 	char *names;
 	struct vtl_changer *ch;
+	struct vtl_host *vhost;
 	int i, ret;
 
 	if (!capable(CAP_SYS_ADMIN))
@@ -113,7 +114,7 @@ static long vtl_ioctl_get_inventory(void __user *uarg)
 		goto out;
 	}
 
-	ch = vtl_changer_get_instance(inv->instance);
+	ch = vtl_changer_get_instance(inv->instance, &vhost);
 	if (!ch) {
 		ret = -ENODEV;
 		goto out;
@@ -124,6 +125,7 @@ static long vtl_ioctl_get_inventory(void __user *uarg)
 		ch, &inv->num_drives, &inv->num_slots,
 		&inv->num_mailslots, &inv->count, &inv->truncated,
 		elements, (char (*)[64])names, VTL_INV_MAX_ITEMS);
+	vtl_changer_put_instance(vhost);
 	if (ret)
 		goto out;
 
@@ -164,6 +166,8 @@ static long vtl_ioctl_load_tape(void __user *uarg)
 {
 	struct vtl_load_req load_req;
 	struct vtl_changer *ch;
+	struct vtl_host *vhost;
+	int ret;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -171,35 +175,44 @@ static long vtl_ioctl_load_tape(void __user *uarg)
 		return -EFAULT;
 	load_req.tape_name[sizeof(load_req.tape_name) - 1] = '\0';
 	load_req.barcode[sizeof(load_req.barcode) - 1] = '\0';
-	ch = vtl_changer_get_instance(load_req.instance);
+	ch = vtl_changer_get_instance(load_req.instance, &vhost);
 	if (!ch)
 		return -ENODEV;
-	return vtl_changer_load_slot_to_drive(ch, load_req.slot, load_req.drive,
+	ret = vtl_changer_load_slot_to_drive(ch, load_req.slot, load_req.drive,
 					      load_req.tape_name, load_req.barcode);
+	vtl_changer_put_instance(vhost);
+	return ret;
 }
 
 static long vtl_ioctl_unload_tape(void __user *uarg)
 {
 	struct vtl_unload_req unload_req;
 	struct vtl_changer *ch;
+	struct vtl_host *vhost;
+	int ret;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 	if (copy_from_user(&unload_req, uarg, sizeof(unload_req)))
 		return -EFAULT;
-	ch = vtl_changer_get_instance(unload_req.instance);
+	ch = vtl_changer_get_instance(unload_req.instance, &vhost);
 	if (!ch)
 		return -ENODEV;
-	if (unload_req.slot < 0)
+	if (unload_req.slot < 0) {
+		vtl_changer_put_instance(vhost);
 		return -EINVAL;
-	return vtl_changer_unload_drive_to_slot(ch, unload_req.drive,
+	}
+	ret = vtl_changer_unload_drive_to_slot(ch, unload_req.drive,
 						unload_req.slot);
+	vtl_changer_put_instance(vhost);
+	return ret;
 }
 
 static long vtl_ioctl_slot_place(void __user *uarg)
 {
 	struct vtl_slot_place_req place_req;
 	struct vtl_changer *ch;
+	struct vtl_host *vhost;
 	struct vtl_tape *tape;
 	int ret;
 
@@ -209,17 +222,22 @@ static long vtl_ioctl_slot_place(void __user *uarg)
 		return -EFAULT;
 	place_req.tape_name[sizeof(place_req.tape_name) - 1] = '\0';
 	place_req.barcode[sizeof(place_req.barcode) - 1] = '\0';
-	ch = vtl_changer_get_instance(place_req.instance);
+	ch = vtl_changer_get_instance(place_req.instance, &vhost);
 	if (!ch)
 		return -ENODEV;
 	tape = vtl_tape_open_existing(place_req.tape_name);
-	if (IS_ERR(tape))
+	if (IS_ERR(tape)) {
+		vtl_changer_put_instance(vhost);
 		return PTR_ERR(tape);
-	if (!tape)
+	}
+	if (!tape) {
+		vtl_changer_put_instance(vhost);
 		return -EINVAL;
+	}
 	if (place_req.barcode[0])
 		vtl_tape_set_barcode(tape, place_req.barcode);
 	ret = vtl_changer_slot_place(ch, place_req.slot, tape);
+	vtl_changer_put_instance(vhost);
 	return ret;
 }
 
@@ -227,30 +245,38 @@ static long vtl_ioctl_move_medium(void __user *uarg)
 {
 	struct vtl_move_req move_req;
 	struct vtl_changer *ch;
+	struct vtl_host *vhost;
+	int ret;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 	if (copy_from_user(&move_req, uarg, sizeof(move_req)))
 		return -EFAULT;
-	ch = vtl_changer_get_instance(move_req.instance);
+	ch = vtl_changer_get_instance(move_req.instance, &vhost);
 	if (!ch)
 		return -ENODEV;
-	return vtl_changer_move_medium(ch, move_req.src, move_req.dst);
+	ret = vtl_changer_move_medium(ch, move_req.src, move_req.dst);
+	vtl_changer_put_instance(vhost);
+	return ret;
 }
 
 static long vtl_ioctl_elem_remove(void __user *uarg)
 {
 	struct vtl_elem_remove_req remove_req;
 	struct vtl_changer *ch;
+	struct vtl_host *vhost;
+	int ret;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 	if (copy_from_user(&remove_req, uarg, sizeof(remove_req)))
 		return -EFAULT;
-	ch = vtl_changer_get_instance(remove_req.instance);
+	ch = vtl_changer_get_instance(remove_req.instance, &vhost);
 	if (!ch)
 		return -ENODEV;
-	return vtl_changer_remove_medium(ch, remove_req.element);
+	ret = vtl_changer_remove_medium(ch, remove_req.element);
+	vtl_changer_put_instance(vhost);
+	return ret;
 }
 
 static long vtl_ioctl_set_instances(void __user *uarg)

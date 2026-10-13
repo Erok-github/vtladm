@@ -38,25 +38,49 @@ bool vtl_module_is_unloading(void)
 	return atomic_read(&vtl_module_unloading) != 0;
 }
 
-struct vtl_changer *vtl_changer_get_instance(int instance)
+struct vtl_changer *vtl_changer_get_instance(int instance, struct vtl_host **vhost_out)
 {
     struct vtl_host *vhost;
     struct vtl_changer *ch = NULL;
     int i = 0;
 
+    if (vhost_out)
+        *vhost_out = NULL;
     if (instance < 0)
         return NULL;
 
     mutex_lock(&vtl_list_lock);
     list_for_each_entry(vhost, &vtl_host_list, list) {
         if (i == instance) {
+            /*
+             * Pin the host BEFORE it can leave the list: vtl_remove()
+             * list_del's under this same lock, then takes io_sem for
+             * write and frees the changer.  Holding a read count here
+             * blocks the writer until vtl_changer_put_instance(), so the
+             * returned changer pointer stays valid for the caller's
+             * whole syscall (H2: in-flight ioctls vs teardown UAF).
+             */
+            down_read(&vhost->io_sem);
             ch = vhost->changer;
+            if (!ch) {
+                up_read(&vhost->io_sem);
+                vhost = NULL;
+            }
             break;
         }
         i++;
     }
     mutex_unlock(&vtl_list_lock);
+
+    if (vhost_out && vhost)
+        *vhost_out = vhost;
     return ch;
+}
+
+void vtl_changer_put_instance(struct vtl_host *vhost)
+{
+    if (vhost)
+        up_read(&vhost->io_sem);
 }
 static DEFINE_MUTEX(vtl_reconfig_mutex);
 
