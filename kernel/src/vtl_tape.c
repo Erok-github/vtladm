@@ -10,7 +10,7 @@
 #include <linux/sort.h>
 #include <linux/vmalloc.h>
 
-int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape);
+int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape, bool retain);
 static struct vtl_tape *vtl_tapes[VTL_MAX_SLOTS];
 static DEFINE_MUTEX(vtl_tape_lock);
 
@@ -821,7 +821,7 @@ int vtl_tape_unload(struct vtl_drive *drv)
     strscpy(tape_name, tape->name, sizeof(tape_name));
     drive_id = drv->id;
 
-    vtl_rec_flush(drv, tape);
+    vtl_rec_flush(drv, tape, false);
     if (drv->rec_buf) {
         vfree(drv->rec_buf);
         drv->rec_buf = NULL;
@@ -922,6 +922,17 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
         ret = kernel_read(tape->file, &rec_sz, 4, &rpos);
         if (ret != 4) { mutex_unlock(&tape->lock); mutex_unlock(&drv->lock); kref_put(&tape->ref, vtl_tape_release); return -EIO; }
         rec_sz = be32_to_cpu(rec_sz);
+        /* A record extending past end-of-data means a torn or corrupt
+         * block (e.g. left by a partial flush): report EOD instead of
+         * walking past the recorded medium. */
+        if (rpos + (loff_t)rec_sz > tape->meta.used) {
+            *actual = 0;
+            drv->at_end = true;
+            mutex_unlock(&tape->lock);
+            mutex_unlock(&drv->lock);
+            kref_put(&tape->ref, vtl_tape_release);
+            return 0;
+        }
 
         {
             u32 rd = min(rec_sz, len);
@@ -1060,18 +1071,20 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
     return 0;
 }
 
-int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape)
+int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape, bool retain)
 {
     u8 hdr[VTL_REC_HEADER_SIZE];
-    loff_t pos;
+    loff_t pos, data_start;
     ssize_t ret;
     u32 saved_used;
+    u32 complete, nfull = 0;
 
     if (!drv->rec_buf || drv->rec_count == 0)
         return 0;
 
     saved_used = drv->rec_buf_used;
     pos = drv->rec_block_start;
+    data_start = pos + VTL_REC_HEADER_SIZE;
 
     vtl_put_be32(VTL_REC_BLOCK_MAGIC, hdr);
     vtl_put_be16(drv->rec_count, hdr + 4);
@@ -1079,29 +1092,78 @@ int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape)
 
     ret = kernel_write(tape->file, hdr, VTL_REC_HEADER_SIZE, &pos);
     if (ret != VTL_REC_HEADER_SIZE) {
-        drv->rec_buf_used = 0;
-        drv->rec_count = 0;
+        /* position/meta.used are not advanced, so a retained buffer is
+         * safely retried at the same offset (overwriting the partial
+         * header); a dropped buffer leaves nothing stale behind. */
+        if (!retain) {
+            drv->rec_buf_used = 0;
+            drv->rec_count = 0;
+        }
         return ret < 0 ? -EIO : -ENOSPC;
     }
 
+    pos = data_start;
     ret = kernel_write(tape->file, drv->rec_buf, saved_used, &pos);
     if (ret < 0) {
-        drv->rec_buf_used = 0;
-        drv->rec_count = 0;
+        if (!retain) {
+            drv->rec_buf_used = 0;
+            drv->rec_count = 0;
+        }
         return -EIO;
     }
 
-    tape->position = pos;
-    if (pos > tape->meta.used) {
-        tape->meta.used = pos;
+    complete = saved_used;
+    if (ret != (ssize_t)saved_used) {
+        /* Short write: find the last record that fully made it to the
+         * medium and rewrite the block header with the true count, so
+         * records for which the initiator already saw GOOD are not
+         * silently discarded. */
+        u32 lim = (u32)ret;
+        u32 off = 0;
+
+        while (off + 4 <= lim) {
+            u32 rlen = be32_to_cpu(*(__be32 *)(drv->rec_buf + off));
+
+            if (off + 4 + rlen > lim)
+                break;
+            off += 4 + rlen;
+            nfull++;
+        }
+
+        pos = drv->rec_block_start;
+        vtl_put_be16((u16)nfull, hdr + 4);
+        ret = kernel_write(tape->file, hdr, VTL_REC_HEADER_SIZE, &pos);
+        if (ret != VTL_REC_HEADER_SIZE)
+            pr_warn("VTL: rec block header fixup failed (%zd) on %s\n",
+                ret, tape->name);
+
+        complete = off;
+    }
+
+    tape->position = data_start + (loff_t)complete;
+    if (tape->position > tape->meta.used) {
+        tape->meta.used = tape->position;
         vtl_meta_write(tape->path, tape->meta.density,
                    tape->meta.meta_flags, tape->meta.used);
     }
-    tape->meta.log_bytes_written += (u64)saved_used;
+    tape->meta.log_bytes_written += (u64)complete;
+
+    if (complete != saved_used) {
+        /* Carry the unwritten tail over: it becomes the first records of
+         * the next VLBK block, written at the current end of data. */
+        memmove(drv->rec_buf, drv->rec_buf + complete,
+            saved_used - complete);
+        drv->rec_buf_used = saved_used - complete;
+        drv->rec_count -= nfull;
+        drv->rec_block_start = data_start + (loff_t)complete;
+        vfs_fsync(tape->file, 0);
+        return -ENOSPC;
+    }
+
     drv->rec_buf_used = 0;
     drv->rec_count = 0;
     vfs_fsync(tape->file, 0);
-    return (ret == (ssize_t)saved_used) ? 0 : -ENOSPC;
+    return 0;
 }
 
 int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual)
@@ -1154,11 +1216,50 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
     }
 
     /* Flush if this record won't fit */
-    if (drv->rec_count > 0 &&
+    if (drv->rec_buf_used > 0 &&
         drv->rec_buf_used + 4 + to_write > VTL_REC_BUF_SIZE) {
-        ret = vtl_rec_flush(drv, tape);
+        ret = vtl_rec_flush(drv, tape, true);
         if (ret < 0)
             goto out;
+    }
+
+    /* A record larger than the whole buffer cannot be staged in
+     * rec_buf (64 KB): write it out as a single-record VLBK block
+     * directly.  Without this branch a large CDB (variable-block mode
+     * accepts up to the per-command transfer limit) would memcpy
+     * beyond the vmalloc'd rec_buf and corrupt kernel memory. */
+    if (4 + to_write > VTL_REC_BUF_SIZE) {
+        u8 shdr[VTL_REC_HEADER_SIZE + 4];
+        loff_t pos = tape->position;
+
+        vtl_put_be32(VTL_REC_BLOCK_MAGIC, shdr);
+        vtl_put_be16(1, shdr + 4);
+        shdr[6] = 0; shdr[7] = 0;
+        vtl_put_be32(to_write, shdr + 8);
+
+        ret = kernel_write(tape->file, shdr, sizeof(shdr), &pos);
+        if (ret == (ssize_t)sizeof(shdr))
+            ret = kernel_write(tape->file, buffer, to_write, &pos);
+        if (ret < 0)
+            ret = -EIO;
+        else if (ret != (ssize_t)to_write)
+            ret = -ENOSPC;
+        else {
+            tape->position = pos;
+            if (pos > tape->meta.used) {
+                tape->meta.used = pos;
+                vtl_meta_write(tape->path, tape->meta.density,
+                           tape->meta.meta_flags, tape->meta.used);
+            }
+            tape->meta.log_bytes_written += (u64)to_write;
+            if (actual) *actual = len;
+            drv->at_bot = false;
+            drv->at_end = (tape->position >= tape->meta.capacity);
+            drv->at_filemark = false;
+            tape->meta.accessed = ktime_get_real_seconds();
+            ret = 0;
+        }
+        goto out;
     }
 
     /* First record in a new VLBK block: remember where the block starts */
@@ -1321,7 +1422,7 @@ int vtl_tape_write_filemarks(struct vtl_drive *drv, int count)
     }
 
     mutex_lock(&tape->lock);
-    ret = vtl_rec_flush(drv, tape);
+    ret = vtl_rec_flush(drv, tape, true);
     if (ret < 0) {
         mutex_unlock(&tape->lock);
         mutex_unlock(&drv->lock);
@@ -1355,7 +1456,7 @@ int vtl_tape_rewind(struct vtl_drive *drv)
     }
 
     mutex_lock(&tape->lock);
-    vtl_rec_flush(drv, tape);
+    vtl_rec_flush(drv, tape, false);
     tape->position = 0;
     /*
      * SSC semantics: REWIND does not erase filemarks on the medium — it
@@ -1420,7 +1521,7 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
         saved_source_slot = src_drv->source_slot;
 	        src_drv->loaded_tape = NULL;
         src_drv->source_slot = -1;
-		vtl_rec_flush(src_drv, t);
+		vtl_rec_flush(src_drv, t, false);
 			mutex_lock(&t->lock);
 /* Persist filemark metadata and EOD position when unloading from drive */
 		vtl_tape_save_metadata(t);

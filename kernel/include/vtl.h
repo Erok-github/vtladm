@@ -373,7 +373,10 @@ int vtl_meta_read(const char *tape_path, u8 *density_out, u8 *flags_out, u64 *us
 void vtl_block_header_fill(struct vtl_block_header *hdr, u32 uncomp_sz, u32 comp_sz, u8 algo);
 int vtl_compress_block(const u8 *in, u32 in_len, u8 *out, u32 *out_len, u8 algo);
 int vtl_decompress_block(const u8 *in, u32 in_len, u8 *out, u32 *out_len);
-void vtl_format_meta_path(char *buf, size_t len, const char *tape_path);
+/* Returns 0 on success; -EINVAL if tape_path has no ".vtltape" suffix
+ * (fail-safe: never derive a sidecar path that aliases the tape image
+ * itself, e.g. for raw device paths), -ENAMETOOLONG if buf is too small. */
+int vtl_format_meta_path(char *buf, size_t len, const char *tape_path);
 struct vtl_tape *vtl_tape_find_by_name(const char *name);
 struct vtl_tape *vtl_tape_open_existing(const char *name);
 void vtl_tape_set_barcode(struct vtl_tape *tape, const char *barcode);

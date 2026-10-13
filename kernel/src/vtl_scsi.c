@@ -1277,7 +1277,7 @@ static int vtl_handle_erase(struct scsi_cmnd *cmd, struct vtl_drive *drv)
     /* Short/long erase: reset data boundary.
      * LONG bit (cdb[1] & 0x20) for thorough erase — same outcome in VTL. */
     mutex_lock(&tape->lock);
-    vtl_rec_flush(drv, tape);
+    vtl_rec_flush(drv, tape, false);
     tape->position = 0;
     tape->meta.used = 0;
     vtl_meta_write(tape->path, tape->meta.density,
