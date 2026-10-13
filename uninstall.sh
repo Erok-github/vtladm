@@ -71,7 +71,8 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl stop vtladm-web.service vtl-kernel.service 2>/dev/null || true
   for _u in vtladm-web.service vtl-kernel.service \
     vtl-patrol.timer vtl-patrol.service \
-    vtl-robot-sync.timer vtl-robot-sync.service; do
+    vtl-robot-sync.timer vtl-robot-sync.service \
+    vtl-robot-align.timer vtl-robot-align.service; do
     systemctl stop "$_u" 2>/dev/null || true
     systemctl disable "$_u" 2>/dev/null || true
     rm -f "/etc/systemd/system/$_u"

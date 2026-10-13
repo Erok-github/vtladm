@@ -56,6 +56,7 @@
 | `vtladm-web.service` | `vtladm serve`（默认 `0.0.0.0:8765`） |
 | `vtl-patrol.timer` | 每小时 `vtl-patrol.sh` 巡检 |
 | `vtl-robot-sync.timer` | 每 5 分钟 `robot sync-db`（仅当 `robot_authority=kernel` 且 `auto_sync_db_from_kernel!=false`；`install.sh --enable` 按配置启用） |
+| `vtl-robot-align.timer` | 每小时 `robot auto-align-all`（疏散孤儿带；仅在所有漂移为双侧时 pull 内核→DB，`auto_reconcile_pull=false` 时只疏散；`install.sh --enable` 在 `robot_sync=true` 时启用） |
 
 ## 巡检（patrol 模块）
 

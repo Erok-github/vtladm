@@ -360,6 +360,7 @@ fi
 # userspace scripts
 install -m 0755 "$ROOT/packaging/scripts/vtl-patrol.sh" "$PREFIX/scripts/vtl-patrol.sh"
 install -m 0755 "$ROOT/packaging/scripts/vtl-robot-sync.sh" "$PREFIX/scripts/vtl-robot-sync.sh"
+install -m 0755 "$ROOT/packaging/scripts/vtl-robot-align.sh" "$PREFIX/scripts/vtl-robot-align.sh"
 install -m 0755 "$ROOT/packaging/scripts/vtl-kernel-safe.sh" "$PREFIX/scripts/vtl-kernel-safe.sh"
 install -m 0644 "$ROOT/packaging/scripts/vtl-source-defaults.sh" "$PREFIX/scripts/vtl-source-defaults.sh"
 
@@ -402,7 +403,7 @@ fi
 
 # systemd
 if command -v systemctl >/dev/null 2>&1; then
-  for _u in vtl-kernel.service vtladm-web.service vtl-patrol.service vtl-patrol.timer vtl-robot-sync.service vtl-robot-sync.timer; do
+  for _u in vtl-kernel.service vtladm-web.service vtl-patrol.service vtl-patrol.timer vtl-robot-sync.service vtl-robot-sync.timer vtl-robot-align.service vtl-robot-align.timer; do
     install -m 0644 "$ROOT/packaging/systemd/$_u" "$PREFIX/lib/systemd/system/$_u"
     ln -sf "$PREFIX/lib/systemd/system/$_u" "/etc/systemd/system/$_u"
   done
@@ -543,6 +544,7 @@ echo "  modinfo $PREFIX/ko/vtl.ko"
 echo "  $PREFIX/sbin/vtl-kernelctl start"
 echo "  $PREFIX/scripts/vtl-patrol.sh"
 echo "  $PREFIX/scripts/vtl-robot-sync.sh  (kernel→DB catalog hints every 5min when robot_sync=true)"
+echo "  $PREFIX/scripts/vtl-robot-align.sh (full reconcile hourly: evacuate orphans + gated kernel→DB pull)"
 echo "  $PREFIX/bin/vtladm serve --host 0.0.0.0 --port 8765"
 echo "  data: $PREFIX/var/  (vtl.conf, vtl.db, tapes/, log/)"
 echo "  uninstall: $PREFIX/sbin/vtl-uninstall  (or: sudo sh uninstall.sh from source tree)"
@@ -569,10 +571,13 @@ _resolve_kernel_spec_for_defaults() {
 if [ "$ENABLE_SYSTEMD" -eq 1 ]; then
   _vtl_conf="$PREFIX/var/vtl.conf"
   _enable_robot_sync_timer=0
+  _enable_robot_align_timer=0
   if [ -f "$_vtl_conf" ] \
-    && grep -qE '^[[:space:]]*robot_sync[[:space:]]*=[[:space:]]*true' "$_vtl_conf" 2>/dev/null \
-    && ! grep -qE '^[[:space:]]*auto_sync_db_from_kernel[[:space:]]*=[[:space:]]*false' "$_vtl_conf" 2>/dev/null; then
-    _enable_robot_sync_timer=1
+    && grep -qE '^[[:space:]]*robot_sync[[:space:]]*=[[:space:]]*true' "$_vtl_conf" 2>/dev/null; then
+    _enable_robot_align_timer=1
+    if ! grep -qE '^[[:space:]]*auto_sync_db_from_kernel[[:space:]]*=[[:space:]]*false' "$_vtl_conf" 2>/dev/null; then
+      _enable_robot_sync_timer=1
+    fi
   fi
   systemctl enable vtl-kernel.service
   systemctl enable vtladm-web.service
@@ -582,6 +587,11 @@ if [ "$ENABLE_SYSTEMD" -eq 1 ]; then
       systemctl enable vtl-robot-sync.timer 2>/dev/null || true
     else
       systemctl disable vtl-robot-sync.timer 2>/dev/null || true
+    fi
+    if [ "$_enable_robot_align_timer" -eq 1 ]; then
+      systemctl enable vtl-robot-align.timer 2>/dev/null || true
+    else
+      systemctl disable vtl-robot-align.timer 2>/dev/null || true
     fi
     _kspec=$(_resolve_kernel_spec_for_defaults) || _kspec=""
     if [ -n "$_kspec" ] && [ -f "$_vtl_conf" ]; then
@@ -594,7 +604,7 @@ if [ "$ENABLE_SYSTEMD" -eq 1 ]; then
         echo "  synced vtl_instances=${_kspec} into vtl.conf (before reboot)"
       fi
     fi
-    echo "enabled for boot: vtl-kernel.service, vtladm-web.service, vtl-patrol.timer"
+    echo "enabled for boot: vtl-kernel.service, vtladm-web.service, vtl-patrol.timer, vtl-robot-align.timer"
     if [ -f "$PREFIX/scripts/vtl-kernel-safe.sh" ]; then
       # shellcheck source=/dev/null
       . "$PREFIX/scripts/vtl-kernel-safe.sh"
@@ -612,6 +622,12 @@ if [ "$ENABLE_SYSTEMD" -eq 1 ]; then
     systemctl disable vtl-robot-sync.timer 2>/dev/null || true
     echo "note: vtl-robot-sync.timer not enabled (need robot_sync=true and auto_sync_db_from_kernel!=false)"
   fi
+  if [ "$_enable_robot_align_timer" -eq 1 ]; then
+    systemctl enable --now vtl-robot-align.timer
+  else
+    systemctl disable vtl-robot-align.timer 2>/dev/null || true
+    echo "note: vtl-robot-align.timer not enabled (need robot_sync=true)"
+  fi
   _kernel_ok=0
   if [ "${_VTL_RELOADED:-0}" -eq 1 ] && lsmod 2>/dev/null | grep -q '^vtl '; then
     echo "vtl.ko already loaded from install reload (skip vtl-kernel.service start)"
@@ -626,7 +642,7 @@ if [ "$ENABLE_SYSTEMD" -eq 1 ]; then
     echo "  systemctl status vtl-kernel.service -l" >&2
     echo "  journalctl -xeu vtl-kernel.service" >&2
     echo "  $PREFIX/sbin/vtl-kernelctl start" >&2
-    echo "Timers vtl-patrol / vtl-robot-sync are enabled; sync-db runs after vtl.ko loads." >&2
+    echo "Timers vtl-patrol / vtl-robot-sync / vtl-robot-align are enabled; sync-db runs after vtl.ko loads." >&2
     exit 1
   fi
   if [ "$_kernel_ok" -eq 1 ]; then

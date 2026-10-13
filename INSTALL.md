@@ -64,7 +64,7 @@ sudo sh install.sh --enable
 | `/opt/vtladm/var/` | `vtl.conf`、`vtl.db`、`tapes/`、`log/`（运行时数据） |
 | `/opt/vtladm/sbin/vtl-uninstall` | 卸载脚本（`uninstall.sh` 安装副本） |
 
-`--enable` 会启用并启动：`vtl-kernel.service`、`vtladm-web.service`、`vtl-patrol.timer`（始终）。**`vtl-robot-sync.timer`** 在 `robot_sync=true` 且 `auto_sync_db_from_kernel!=false` 时启用。`init-config` 默认：运行时机械手在 **vtl.ko**，`auto_sync_db_from_kernel=true` 仅同步目录提示。
+`--enable` 会启用并启动：`vtl-kernel.service`、`vtladm-web.service`、`vtl-patrol.timer`（始终）。**`vtl-robot-sync.timer`** 在 `robot_sync=true` 且 `auto_sync_db_from_kernel!=false` 时启用；**`vtl-robot-align.timer`**（每小时全量对账：疏散孤儿带 + 仅在漂移全为双侧时 pull 内核→DB）在 `robot_sync=true` 时启用。`init-config` 默认：运行时机械手在 **vtl.ko**，`auto_sync_db_from_kernel=true` 仅同步目录提示。
 
 ### 内核模块：默认卸载后重启（推荐）
 

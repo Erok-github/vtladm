@@ -44,9 +44,9 @@ chronyc makestep 2>/dev/null || true
 mkdir -p /var/log/journal && systemctl restart systemd-journald
 
 systemctl status vtl-kernel vtladm-web -l
-systemctl status vtl-patrol.timer vtl-robot-sync.timer
+systemctl status vtl-patrol.timer vtl-robot-sync.timer vtl-robot-align.timer
 /opt/vtladm/bin/vtladm patrol
-# 备份软件搬带后（或等待 ≤5 分钟）：
+# 备份软件搬带后（或等待 ≤5 分钟，全量对账 ≤1 小时）：
 /opt/vtladm/bin/vtladm robot sync-db
 ```
 
