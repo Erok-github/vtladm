@@ -21,10 +21,12 @@
 | M3 vtl_rec_flush 短写静默截断 | `e33f91d` | 短写保留完整记录尾部、重写块头真实条数、`rec_block_start` 随迁 |
 | 新增 critical：rec_buf 64KB 溢出 | `e33f91d` | 超大记录走单记录 VLBK 直写；flush 条件改 `rec_buf_used` 判定 |
 | zvol：sidecar 路径派生失败安全 | `0c705d4` | 两个路径构造函数对非 `.vtltape` 后缀返回 `-EINVAL`，调用点全部传播 |
+| M4 filemark sidecar 值域校验 | `0cdc749` | `vtl_tape_load_metadata` 先校验后接管：要求严格递增、>0、≤ `meta.used`；EOD==0 时全部拒绝（顺带中和 init-tape 遗留 sidecar）；旧内存集合改为校验通过后才释放 |
+| M6 zvol create 缺 pool panic | `0cdc749` | `zpool.unwrap()` 改为显式 `VtlError::InvalidParameter`，缺 `--zpool` 时报错而非 panic |
 
 ### 仍未修复（本轮再次确认）
 
-- **M4**（`.vtlfm` 值域/单调性校验）、**M6**（`main.rs:3618` `zpool.unwrap()`，本轮 grep 确认仍在）、**M5/M7/M8**、**L1–L3、L6–L9**：维持第一轮结论。
+- **M5/M7/M8**、**L1–L3、L6–L9**：维持第一轮结论。
 
 ---
 
@@ -94,8 +96,8 @@ SSC 语义下 LOAD UNLOAD(Load=0) 是"回到 BOP"，等价 REWIND。但 handler 
 ## 四、修复优先级建议（合并两轮）
 
 1. **立即**：M9（sync-cache 加锁，改动小，真实 UAF 竞态）、M10（LOAD UNLOAD 直接转调 `vtl_tape_rewind`）。
-2. **下一迭代**：M6（`zpool.unwrap` 一行）、M4（sidecar 值域校验）、M5（审计/会话持久化，文档先行）。
-3. **中期**：M4（sidecar 值域校验）、M5（审计/会话持久化，文档先行）。
+2. **下一迭代**：M5（审计/会话持久化，文档先行）——M4/M6 已在 `0cdc749` 修复。
+3. **中期**：M5（审计/会话持久化，文档先行）。
 4. **清理**：L1–L3、L6–L9、L11–L12 与死代码。
 
 ---
