@@ -115,14 +115,23 @@ struct vtl_meta_header {
     u8     reserved[8];
 } __packed;
 
-void vtl_format_meta_path(char *buf, size_t len, const char *tape_path)
+int vtl_format_meta_path(char *buf, size_t len, const char *tape_path)
 {
-    size_t plen;
+	size_t plen;
 
-    strlcpy(buf, tape_path, len);
-    plen = strnlen(buf, len);
-    if (plen > 8 && !strcmp(buf + plen - 8, ".vtltape"))
-        snprintf(buf + plen - 8, len - (plen - 8), ".vtlmeta");
+	if (!buf || !tape_path)
+		return -EINVAL;
+	plen = strlen(tape_path);
+	/* Fail-safe: without the ".vtltape" suffix we cannot derive a sidecar
+	 * path; returning the tape path unchanged would make meta I/O scribble
+	 * over the tape image itself (e.g. a raw zvol device node). */
+	if (plen <= 8 || strcmp(tape_path + plen - 8, ".vtltape"))
+		return -EINVAL;
+	if (plen + 1 > len)
+		return -ENAMETOOLONG;
+	strlcpy(buf, tape_path, len);
+	snprintf(buf + plen - 8, len - (plen - 8), ".vtlmeta");
+	return 0;
 }
 
 int vtl_meta_write(const char *tape_path, u8 density, u8 flags, u64 used)
@@ -140,7 +149,8 @@ int vtl_meta_write(const char *tape_path, u8 density, u8 flags, u64 used)
     hdr.flags = flags;
     hdr.used = cpu_to_le64(used);
 
-    vtl_format_meta_path(meta_path, sizeof(meta_path), tape_path);
+    if (vtl_format_meta_path(meta_path, sizeof(meta_path), tape_path))
+        return -EINVAL;
 
     filp = filp_open(meta_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (IS_ERR(filp)) {
@@ -173,7 +183,8 @@ int vtl_meta_read(const char *tape_path, u8 *density_out, u8 *flags_out, u64 *us
     if (used_out)
         *used_out = 0;
 
-    vtl_format_meta_path(meta_path, sizeof(meta_path), tape_path);
+    if (vtl_format_meta_path(meta_path, sizeof(meta_path), tape_path))
+        return -EINVAL;
 
     filp = filp_open(meta_path, O_RDONLY, 0);
     if (IS_ERR(filp))
@@ -549,16 +560,23 @@ void vtl_tapes_release_all(void)
 }
 
 
-/* Build sidecar path by appending "meta" to the tape file path. */
-/* Build sidecar path by replacing ".vtltape" suffix with ".vtlfm". */
-static void vtl_tape_meta_path(const char *tape_path, char *meta_path, size_t sz)
+/* Build the ".vtlfm" sidecar path by replacing the ".vtltape" suffix.
+ * Fail-safe: returns -EINVAL unless the tape path has the expected
+ * suffix, so a raw device path can never alias the tape image itself. */
+static int vtl_tape_meta_path(const char *tape_path, char *meta_path, size_t sz)
 {
 	size_t plen;
 
+	if (!meta_path || !tape_path)
+		return -EINVAL;
+	plen = strlen(tape_path);
+	if (plen <= 8 || strcmp(tape_path + plen - 8, ".vtltape"))
+		return -EINVAL;
+	if (plen + 1 > sz)
+		return -ENAMETOOLONG;
 	strlcpy(meta_path, tape_path, sz);
-	plen = strnlen(meta_path, sz);
-	if (plen > 8 && !strcmp(meta_path + plen - 8, ".vtltape"))
-		snprintf(meta_path + plen - 8, sz - (plen - 8), ".vtlfm");
+	snprintf(meta_path + plen - 8, sz - (plen - 8), ".vtlfm");
+	return 0;
 }
 
 /* Load filemark offsets from sidecar.  On success *out_loaded is true.
@@ -575,7 +593,8 @@ int vtl_tape_load_metadata(struct vtl_tape *tape, bool *out_loaded)
 
     *out_loaded = false;
 
-    vtl_tape_meta_path(tape->path, meta_path, sizeof(meta_path));
+    if (vtl_tape_meta_path(tape->path, meta_path, sizeof(meta_path)))
+        return 0; /* unexpected path shape — behave as if no sidecar */
     f = filp_open(meta_path, O_RDONLY, 0);
     if (IS_ERR(f)) {
         /* No sidecar yet — not an error */
@@ -646,7 +665,8 @@ int vtl_tape_save_metadata(struct vtl_tape *tape)
     if (!tape->meta_dirty)
         return 0;
 
-    vtl_tape_meta_path(tape->path, meta_path, sizeof(meta_path));
+    if (vtl_tape_meta_path(tape->path, meta_path, sizeof(meta_path)))
+        return -EINVAL;
     f = filp_open(meta_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (IS_ERR(f))
         return PTR_ERR(f);
