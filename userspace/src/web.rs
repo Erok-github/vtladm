@@ -4426,7 +4426,7 @@ function loc(x){
 async function loadLibs(){
   const r=await fetch('/api/libraries',{credentials:'include'});
   const j=await r.json();
-  if(!r.ok){document.getElementById('tapes').innerHTML='<p class="err">'+(j.error||r.status)+'</p>';return;}
+  if(!r.ok){document.getElementById('tapes').innerHTML='<p class="err">'+escapeHtml(j.error||r.status)+'</p>';return;}
   const sel=document.getElementById('lib');
   sel.innerHTML='';
   (j.libraries||[]).filter(l=>!l.is_offline_storage&&l.name).forEach(l=>{const o=document.createElement('option');o.value=l.name;o.textContent=l.name+' (#'+l.id+')';sel.appendChild(o);});
@@ -4436,7 +4436,7 @@ async function refresh(){
   const lib=document.getElementById('lib').value;
   const t=await fetch('/api/tapes?library='+encodeURIComponent(lib),{credentials:'include'});
   const tj=await t.json();
-  if(!t.ok){document.getElementById('tapes').innerHTML='<p class="err">'+(tj.error||t.status)+'</p>';return;}
+  if(!t.ok){document.getElementById('tapes').innerHTML='<p class="err">'+escapeHtml(tj.error||t.status)+'</p>';return;}
   const rows=tj.tapes||[];
   if(!rows.length){document.getElementById('tapes').innerHTML='<div class="empty">当前库暂无磁带</div>';return;}
   let h='<table class="data-table"><thead><tr><th>名称</th><th>条码</th><th class="num">容量</th><th class="num">已用</th><th>位置</th><th>货架</th><th>在驱动</th></tr></thead><tbody>';
@@ -4491,7 +4491,7 @@ async function loadSummary(){
   const r=await fetch('/api/libraries-status',{credentials:'include'});
   const j=await r.json();
   const el=document.getElementById('sum-wrap');
-  if(!r.ok){el.innerHTML='<p class="err">'+(j.error||r.status)+'</p>';return;}
+  if(!r.ok){el.innerHTML='<p class="err">'+escapeHtml(j.error||r.status)+'</p>';return;}
   const rows=j.libraries||[];
   if(!rows.length){el.innerHTML='<div class="empty">暂无库</div>';return;}
   let h='<table class="data-table"><thead><tr><th>库</th><th class="num">磁带数</th><th class="num">已加载驱动</th><th class="num">驱动数</th><th class="num">数据槽位</th><th>iSCSI</th></tr></thead><tbody>';

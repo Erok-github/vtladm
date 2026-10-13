@@ -724,11 +724,7 @@ pub(crate) fn ensure_offline_library(conn: &Connection) -> Result<i64, VtlError>
 
 /// 在离线保管区新建用户货架（与在线库无关）。
 pub(crate) fn create_offline_shelf(shelf_name: &str) -> Result<(), VtlError> {
-    if shelf_name.is_empty() {
-        return Err(VtlError::InvalidParameter(
-            "Shelf name cannot be empty".to_string(),
-        ));
-    }
+    validate_shelf_name(shelf_name)?;
     if shelf_name == DEFAULT_UNUSED_SHELF_NAME {
         return Err(VtlError::InvalidParameter(format!(
             "Shelf name '{}' is reserved for the default unused shelf",
@@ -6056,12 +6052,33 @@ fn list_shelves() -> Result<(), VtlError> {
     Ok(())
 }
 
-fn create_shelf(shelf_name: &str) -> Result<(), VtlError> {
-    if shelf_name.is_empty() {
+fn validate_shelf_name(name: &str) -> Result<(), VtlError> {
+    if name.is_empty() {
         return Err(VtlError::InvalidParameter(
             "Shelf name cannot be empty".to_string(),
         ));
     }
+    if name.len() > 64 {
+        return Err(VtlError::InvalidParameter(
+            "Shelf name too long (max 64)".to_string(),
+        ));
+    }
+    // L15: same whitelist as library names — shelf names flow into error
+    // messages, Web JSON and logs; without this, arbitrary markup (e.g. via
+    // the legacy admin pages' error rendering) could be reflected back.
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(VtlError::InvalidParameter(
+            "货架名仅允许 ASCII 字母、数字、连字符(-) 与下划线(_)".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn create_shelf(shelf_name: &str) -> Result<(), VtlError> {
+    validate_shelf_name(shelf_name)?;
     if shelf_name == DEFAULT_UNUSED_SHELF_NAME {
         return Err(VtlError::InvalidParameter(format!(
             "Shelf name '{}' is reserved for the default unused shelf",
