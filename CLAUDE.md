@@ -161,7 +161,7 @@ cmp -n $(stat -c%s /var/log/messages-20260611) \
 1. Web UI 构建需要 Node >= 18，低版本自动跳过
 2. **Kylin 4.19 st 驱动 SILI=0**：短块读取时最后不完整块被零填充（32KB 块中最多 26KB 零填充）。内容正确，但逐字节 cmp 会因尾部零填充失败。tar 等实际应用不受影响
 3. st 驱动 MOVE MEDIUM 后首个 mt 命令 ENXIO，第二个恢复正常（install.sh warmup 已处理）
-4. 文件标记在 REWIND 后追加可导致 `filemark_offsets` 数组乱序（需后续加排序）
+4. ~~文件标记在 REWIND 后追加可导致 `filemark_offsets` 数组乱序（需后续加排序）~~ 已解决：`vtl_tape_write_filemarks` 追加后调用 `sort()` 排序（`kernel/src/vtl_tape.c`）
 5. 侧文件扩展名 `.vtlfm` (filemark) 与 `.vtlmeta` (EOD/密度) 分离，尚未合并
 6. `vtl_tape_load` 函数当前未使用（代码路径统一走 `changer_move_medium`）
 7. `sg_dd` / `sg_dd --verify` 不兼容（使用磁盘 LBA 寻址 CDB，非磁带格式）

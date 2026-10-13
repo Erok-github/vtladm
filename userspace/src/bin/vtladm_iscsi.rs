@@ -674,6 +674,24 @@ fn cmd_library_export(
     }
 }
 
+/// Persist tgtd config for reboot survival. Writing replaces the whole
+/// file, so preserve the original admin-maintained content once (L13):
+/// the first overwrite saves the pre-existing file to
+/// /etc/tgt/targets.conf.vtladm-bak (kept only once, so the admin's
+/// original copy is never clobbered by a later run).
+fn persist_tgt_config(conf: &str) {
+    const PATH: &str = "/etc/tgt/targets.conf";
+    const BAK: &str = "/etc/tgt/targets.conf.vtladm-bak";
+    if let Ok(old) = std::fs::read_to_string(PATH) {
+        if !old.trim().is_empty() && old != conf && std::fs::metadata(BAK).is_err() {
+            if std::fs::write(BAK, &old).is_ok() {
+                eprintln!("note: existing {} backed up to {} (admin edits preserved)", PATH, BAK);
+            }
+        }
+    }
+    let _ = std::fs::write(PATH, conf);
+}
+
 /// Export library via tgt (SCSI Target Framework). tgt supports `--bstype=sg`
 /// passthrough with implicit `allow-in-use`, sharing SG devices with st/ch drivers.
 fn cmd_library_export_tgt(
@@ -752,7 +770,7 @@ fn cmd_library_export_tgt(
         conf.push_str(&format!("\tbacking-store {}\n", dev));
     }
     conf.push_str("</target>\n");
-    let _ = std::fs::write("/etc/tgt/targets.conf", &conf);
+    persist_tgt_config(&conf);
     let _ = Command::new("systemctl").arg("enable").arg("--now").arg("tgtd").output();
 
     eprintln!("tgt export complete: {} LUNs on {} (tgtd enabled for reboot)", all_devs.len(), iqn);
@@ -881,7 +899,7 @@ fn cmd_library_unexport(
                     conf.push_str("</target>\n");
                 }
             }
-            let _ = std::fs::write("/etc/tgt/targets.conf", &conf);
+            persist_tgt_config(&conf);
         }
         return Ok(());
     }

@@ -109,6 +109,11 @@ static long vtl_ioctl_get_inventory(void __user *uarg)
 		return -ENOMEM;
 	}
 
+	/* L1: zero the whole struct up front so struct padding and inventory
+	 * items beyond inv->count never leak uninitialized heap memory back to
+	 * userspace via copy_to_user() below. */
+	memset(inv, 0, sizeof(*inv));
+
 	if (copy_from_user(inv, uarg, sizeof(*inv))) {
 		ret = -EFAULT;
 		goto out;

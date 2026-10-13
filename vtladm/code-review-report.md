@@ -130,6 +130,8 @@ if (drv->ua_pending && cdb[0] != INQUIRY && cdb[0] != REQUEST_SENSE) {
 | L8 | `CLAUDE.md` 已知限制 #4 | "filemark_offsets 乱序需后续排序"已被 `vtl_tape_write_filemarks` 内 `sort()`（`vtl_tape.c:1315-1317`）解决，文档未同步 |
 | L9 | `install.sh` / `packaging` | 脚本整体规范（变量加引号、`install -m` 显式权限、`rm -rf` 均限定在 `$PREFIX` 内），未发现危险模式；`rmmod st && modprobe st` 有 `|| true` 兜底 |
 
+> **状态更新**：L1、L2、L3、L6、L8 及第二轮 L13 已在低危清理批次修复，详见第二轮报告「L 系列低危项清理」表；L7 经核查启动时已打印设置指引，按"已缓解"关闭；L9 无问题。L4、L5 维持"建议加固"级遗留。
+
 ---
 
 ## 五、值得肯定的做法（摘录）

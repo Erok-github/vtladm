@@ -1376,8 +1376,6 @@ static int vtl_handle_read_capacity_16(struct scsi_cmnd *cmd, struct vtl_drive *
         /* Empty tape is valid — return max_lba=0 (consistent with READ CAPACITY 10) */
         if (num_blocks == 0)
             max_lba = 0;
-        else if (num_blocks > 0xFFFFFFFFFFFFFFFFULL - 1)
-            max_lba = 0xFFFFFFFFFFFFFFFFULL;
         else
             max_lba = num_blocks - 1ULL;
     }

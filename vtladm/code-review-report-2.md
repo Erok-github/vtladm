@@ -26,7 +26,21 @@
 
 ### 仍未修复（本轮再次确认）
 
-- **M5/M7/M8**、**L1–L3、L6–L9**：维持第一轮结论。
+- **M5/M7/M8**：维持第一轮结论。
+- L1/L2/L3/L6/L8/L13：已在 `TBD` 批次清理（L 系列低危项，见下）。
+
+### L 系列低危项清理（随 `TBD` 提交完成）
+
+| 条目 | 处理 | 说明 |
+|------|------|------|
+| L1 GET_INVENTORY 未清零信息泄露 | 已修复 | `vtl_misc.c` 在 `copy_from_user` 前 `memset(inv, 0, sizeof(*inv))`，padding 与未用 items 不再回传用户态 |
+| L2 READ CAPACITY(16) 恒假判断 | 已修复 | 删除 `num_blocks > U64_MAX-1` 死分支 |
+| L3 compression.c 死代码 | 已修复 | 删除无调用点的 `vtl_compress_block` 与其专用的 `vtl_block_header_fill`；**保留 `vtl_decompress_block`**——读路径需解码 mhVTL/旧导出写入的压缩块（`vtl_tape.c` 有活调用点） |
+| L6 DEFAULT_WEB_PASSWORD 误导性常量 | 已修复 | 改为 `#[cfg(test)]`，仅测试构建存在，并加注释说明生产初始密码为随机 UUID |
+| L7 cookie secure 默认 true | 已缓解（无需改码） | 首轮报告后核查：`run_web_ui` 启动时已有显式提示（未设 `VTLADM_WEB_COOKIE_SECURE` 且绑定 loopback 时打印设置指引，`web.rs`） |
+| L8 CLAUDE.md 文档未同步 | 已修复 | 已知限制 #4 标注已解决并指向 `vtl_tape_write_filemarks` 的 `sort()` |
+| L9 脚本规范 | 无问题 | 维持首轮结论 |
+| L13 tgtd 覆写 /etc/tgt/targets.conf | 已修复 | 新增 `persist_tgt_config()`：首次覆写前将原文件备份为 `targets.conf.vtladm-bak`（仅备份一次，不覆盖既有备份），export/unexport 两个写盘点共用 |
 
 ---
 
@@ -98,7 +112,7 @@ SSC 语义下 LOAD UNLOAD(Load=0) 是"回到 BOP"，等价 REWIND。但 handler 
 1. **立即**：M9（sync-cache 加锁，改动小，真实 UAF 竞态）、M10（LOAD UNLOAD 直接转调 `vtl_tape_rewind`）。
 2. **下一迭代**：M5（审计/会话持久化，文档先行）——M4/M6 已在 `0cdc749` 修复。
 3. **中期**：M5（审计/会话持久化，文档先行）。
-4. **清理**：L1–L3、L6–L9、L11–L12 与死代码。
+4. **清理**：L4/L5（第一轮遗留，均为"建议加固"级，无现成安全风险）与文档同步；L 系列其余低危项（L1–L3、L6–L9、L13）已在本轮 `TBD` 批次清理。
 
 ---
 

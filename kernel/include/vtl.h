@@ -369,9 +369,10 @@ int vtl_tape_create(const char *name, u64 size, u8 density, u8 flags);
 int vtl_meta_write(const char *tape_path, u8 density, u8 flags, u64 used);
 int vtl_meta_read(const char *tape_path, u8 *density_out, u8 *flags_out, u64 *used_out);
 
-/* Compression engine (compression.c) */
-void vtl_block_header_fill(struct vtl_block_header *hdr, u32 uncomp_sz, u32 comp_sz, u8 algo);
-int vtl_compress_block(const u8 *in, u32 in_len, u8 *out, u32 *out_len, u8 algo);
+/* Compression engine (compression.c).  Only decompression is wired up:
+ * the write path always stores VLBK/uncompressed blocks (mhVTL-aligned),
+ * but the read path must still decode compressed blocks written by
+ * mhVTL or older exports. */
 int vtl_decompress_block(const u8 *in, u32 in_len, u8 *out, u32 *out_len);
 /* Returns 0 on success; -EINVAL if tape_path has no ".vtltape" suffix
  * (fail-safe: never derive a sidecar path that aliases the tape image

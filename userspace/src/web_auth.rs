@@ -11,7 +11,10 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 pub const DEFAULT_WEB_USER: &str = "admin";
-#[allow(dead_code)]
+/// Test-only password. Production deployments get a random UUID password
+/// (see init_auth_file); this constant exists solely for #[cfg(test)]
+/// login tests and is compiled out of release builds.
+#[cfg(test)]
 pub const DEFAULT_WEB_PASSWORD: &str = "admin";
 /// Cookie `Max-Age` 与会话有效期（秒）。设为会话 cookie（浏览器关闭即失效），
 /// 此常量仅用于服务端空闲超时判断。
