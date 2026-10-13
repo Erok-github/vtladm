@@ -621,14 +621,6 @@ int vtl_tape_load_metadata(struct vtl_tape *tape, bool *out_loaded)
     if (!arr)
         goto out_close;
 
-    /* Free previous allocation now that new one succeeded */
-    if (tape->filemark_offsets) {
-        vfree(tape->filemark_offsets);
-        tape->filemark_offsets = NULL;
-        tape->num_filemarks = 0;
-        tape->filemark_capacity = 0;
-    }
-
     pos = sizeof(hdr);
     for (i = 0; i < n; i++) {
         __be64 val;
@@ -638,6 +630,38 @@ int vtl_tape_load_metadata(struct vtl_tape *tape, bool *out_loaded)
             goto out_close;
         }
         arr[i] = be64_to_cpu(val);
+    }
+
+    /* M4: validate on-disk offsets before adopting them.  They drive
+     * LOCATE/SPACE directly; a corrupt or stale sidecar must not inject
+     * arbitrary positions (a u64 > LLONG_MAX truncates to a negative
+     * loff_t, and past-EOD offsets make SPACE/LOCATE lie about the
+     * medium).  Require strictly increasing, positive offsets within the
+     * recorded data — with EOD == 0 every offset fails, which also
+     * neutralises sidecars left behind by init-tape. */
+    {
+        u64 prev = 0;
+
+        for (i = 0; i < n; i++) {
+            if (arr[i] <= prev || arr[i] > tape->meta.used) {
+                pr_warn("VTL: %s filemark sidecar offsets invalid (idx %u off %llu EOD %llu) — ignoring\n",
+                    tape->name, i,
+                    (unsigned long long)arr[i],
+                    (unsigned long long)tape->meta.used);
+                vfree(arr);
+                goto out_close;
+            }
+            prev = arr[i];
+        }
+    }
+
+    /* Free previous allocation only now that the new one succeeded and
+     * validated — a corrupt sidecar must not wipe a good in-memory set. */
+    if (tape->filemark_offsets) {
+        vfree(tape->filemark_offsets);
+        tape->filemark_offsets = NULL;
+        tape->num_filemarks = 0;
+        tape->filemark_capacity = 0;
     }
 
     tape->filemark_offsets = arr;

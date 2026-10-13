@@ -3615,7 +3615,10 @@ fn create_tape(name: &str, size: u64, shelf_name: Option<&str>, density: u8,
     let _actual_size = size;
 
     if backend == "zvol" {
-        let pool = zpool.unwrap();
+        let pool = zpool.ok_or_else(|| {
+            log_error("create_tape", "zvol backend requires a zpool");
+            VtlError::InvalidParameter("zvol backend requires --zpool".into())
+        })?;
         log_message(&format!(
             "使用 ZFS zvol 后端: pool={} library={} tape={}",
             pool, lib_name, name
