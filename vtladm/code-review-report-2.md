@@ -14,6 +14,7 @@
 | 条目 | 修复提交 | 复核说明 |
 |------|----------|----------|
 | H1 MOVE MEDIUM filp_open 失败误报成功 | `04b92ec` | `vtl_tape.c:1598-1606` 先存 `PTR_ERR` 再置 NULL，回滚路径 ref 平衡正确 |
+| H2 ioctl changer 裸指针 UAF 竞态 | `7673448` | `vtl_changer_get_instance` 在 `vtl_list_lock` 内取 `vhost->io_sem` 读锁后返回 vhost，调用方经新增的 `vtl_changer_put_instance` 配对释放；`vtl_remove`/热改几何的 `down_write` 因此会等待在飞 ioctl 排干。6 个 ioctl handler + `vtl_state_restore.c` 全部转换，每个获取后的出口均有配对 put；锁序 list_lock→io_sem(R) 与其余路径无嵌套、无 ABBA |
 | H3 UA 路径未置 cmd->result | `04b92ec` | queuecommand UA 快速路径已补 `vtl_set_cmd_result(cmd, SAM_STAT_CHECK_CONDITION)` |
 | M1 REWIND 清 filemark | `c7a4dfe` | REWIND 不再清 `num_filemarks`，仅复位位置与读游标 |
 | M2 init-tape/delete-tape 孤儿 sidecar | `c7a4dfe` | userspace 提交后删除 `.vtlmeta`/`.vtlfm`；内核装载路径增加 magic 自检自愈 |
@@ -23,8 +24,7 @@
 
 ### 仍未修复（本轮再次确认）
 
-- **H2**（changer 裸指针 UAF，`vtl_main.c:41-60` + `vtl_remove:1233-1269`）：`vtl_changer_get_instance` 仍返回无引用保护的裸指针；`vtl_remove` 与热改几何 teardown 不等待在飞 ioctl。`vtl_ioctl` 入口的 `vtl_reconfig_in_progress()` 检查（`vtl_misc.c:284`）只是"进入时"标志——重配置可以在检查通过后、ioctl 使用 changer 前开始，窗口仍在。维持第一轮结论：默认配置（`allow_hot_geom=N`）下不可触发，开启热改几何即为真实漏洞。
-- **M4**（`.vtlfm` 值域/单调性校验）、**M6**（`main.rs:3618` `zpool.unwrap()`，本轮 grep 确认仍在）、**M5/M7/M8**、**L1–L9**：维持第一轮结论。
+- **M4**（`.vtlfm` 值域/单调性校验）、**M6**（`main.rs:3618` `zpool.unwrap()`，本轮 grep 确认仍在）、**M5/M7/M8**、**L1–L3、L6–L9**：维持第一轮结论。
 
 ---
 
@@ -94,7 +94,7 @@ SSC 语义下 LOAD UNLOAD(Load=0) 是"回到 BOP"，等价 REWIND。但 handler 
 ## 四、修复优先级建议（合并两轮）
 
 1. **立即**：M9（sync-cache 加锁，改动小，真实 UAF 竞态）、M10（LOAD UNLOAD 直接转调 `vtl_tape_rewind`）。
-2. **下一迭代**：H2（changer 生命周期，第一轮遗留）、M6（`zpool.unwrap` 一行）、M11（import 事务化）、L10（IE 分支补守卫，防回归）。
+2. **下一迭代**：M6（`zpool.unwrap` 一行）、M4（sidecar 值域校验）、M5（审计/会话持久化，文档先行）。
 3. **中期**：M4（sidecar 值域校验）、M5（审计/会话持久化，文档先行）。
 4. **清理**：L1–L3、L6–L9、L11–L12 与死代码。
 
