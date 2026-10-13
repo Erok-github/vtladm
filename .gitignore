@@ -1,0 +1,20 @@
+# Never commit or rsync build artifacts onto Linux — stale 0-byte vtladm breaks install.
+/userspace/target/
+/kernel/vtl.ko
+/kernel/*.o
+/kernel/**/*.o
+/kernel/.*.cmd
+/kernel/**/.*.cmd
+/kernel/Module.symvers
+/kernel/modules.order
+/kernel/*.mod
+/kernel/*.mod.c
+
+# Editor / OS
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# External files
+*.rpm

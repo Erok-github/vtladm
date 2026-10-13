@@ -1,0 +1,2009 @@
+#include "../include/vtl.h"
+#include <linux/err.h>
+#ifndef ENODATA
+#define ENODATA 61
+#endif
+#include <linux/fs.h>
+#include <linux/uaccess.h>
+#include <linux/file.h>
+#include <linux/limits.h>
+#include <linux/sort.h>
+#include <linux/vmalloc.h>
+
+int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape);
+static struct vtl_tape *vtl_tapes[VTL_MAX_SLOTS];
+static DEFINE_MUTEX(vtl_tape_lock);
+
+static void vtl_tape_release(struct kref *ref)
+{
+	struct vtl_tape *t = container_of(ref, struct vtl_tape, ref);
+
+	mutex_lock(&t->lock);
+	vtl_tape_free_metadata(t);
+	if (t->file && !IS_ERR(t->file)) {
+		filp_close(t->file, NULL);
+		t->file = NULL;
+	}
+	mutex_unlock(&t->lock);
+	kfree(t);
+}
+
+void vtl_tape_put(struct vtl_tape *tape)
+{
+	if (tape)
+		kref_put(&tape->ref, vtl_tape_release);
+}
+
+static int vtl_tape_table_insert(struct vtl_tape *tape)
+{
+	int i;
+
+	mutex_lock(&vtl_tape_lock);
+	for (i = 0; i < VTL_MAX_SLOTS; i++) {
+		if (!vtl_tapes[i]) {
+			vtl_tapes[i] = tape;
+			mutex_unlock(&vtl_tape_lock);
+			return 0;
+		}
+	}
+	mutex_unlock(&vtl_tape_lock);
+	return -ENOSPC;
+}
+
+static bool vtl_tape_name_valid(const char *name)
+{
+	size_t i;
+
+	if (!name || !name[0])
+		return false;
+	for (i = 0; name[i] && i < 64; i++) {
+		if (name[i] == '/' || name[i] == '\\')
+			return false;
+		if (name[i] < ' ' || name[i] > '~')
+			return false;
+	}
+	if (i == 0 || i >= 64)
+		return false;
+	if (strstr(name, ".."))
+		return false;
+	return true;
+}
+
+static void vtl_format_tape_path(char *buf, size_t len, const char *name)
+{
+	const char *dir = vtl_tape_dir ? vtl_tape_dir : "/opt/vtladm/var/tapes";
+	size_t dlen = strnlen(dir, 200);
+
+	while (dlen > 0 && (dir[dlen - 1] == '/' || dir[dlen - 1] == '\n' ||
+			    dir[dlen - 1] == '\r' || dir[dlen - 1] == ' ' ||
+			    dir[dlen - 1] == '\t'))
+		dlen--;
+	snprintf(buf, len, "%.*s/%s.vtltape", (int)dlen, dir, name);
+}
+
+static void vtl_generate_serial(char *buf, int len)
+{
+    static atomic64_t counter = ATOMIC64_INIT(0);
+    u64 val = atomic64_inc_return(&counter);
+    snprintf(buf, len, "VTL%08llX", val);
+}
+
+static void vtl_generate_barcode(char *buf, int len)
+{
+    static atomic64_t counter = ATOMIC64_INIT(0);
+    u64 val = atomic64_inc_return(&counter);
+    snprintf(buf, len, "VTL%06llX", val);
+}
+
+/* Sidecar metadata file format (24 bytes, little-endian):
+ *   u32: magic 0x564C544D ("VTML")
+ *   u16: version 2
+ *   u8:  density code
+ *   u8:  flags (compression algorithm etc.)
+ *   u64: used (end-of-data offset in bytes)
+ *   u8[8]: reserved
+ */
+#define VTL_META_MAGIC   0x564C544D
+#define VTL_META_VERSION 2
+
+struct vtl_meta_header {
+    __le32 magic;
+    __le16 version;
+    u8     density;
+    u8     flags;
+    __le64 used;
+    u8     reserved[8];
+} __packed;
+
+void vtl_format_meta_path(char *buf, size_t len, const char *tape_path)
+{
+    size_t plen;
+
+    strlcpy(buf, tape_path, len);
+    plen = strnlen(buf, len);
+    if (plen > 8 && !strcmp(buf + plen - 8, ".vtltape"))
+        snprintf(buf + plen - 8, len - (plen - 8), ".vtlmeta");
+}
+
+int vtl_meta_write(const char *tape_path, u8 density, u8 flags, u64 used)
+{
+    struct vtl_meta_header hdr;
+    struct file *filp;
+    char meta_path[256];
+    loff_t pos = 0;
+    ssize_t written;
+
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.magic = cpu_to_le32(VTL_META_MAGIC);
+    hdr.version = cpu_to_le16(VTL_META_VERSION);
+    hdr.density = density;
+    hdr.flags = flags;
+    hdr.used = cpu_to_le64(used);
+
+    vtl_format_meta_path(meta_path, sizeof(meta_path), tape_path);
+
+    filp = filp_open(meta_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (IS_ERR(filp)) {
+        pr_warn("VTL: Cannot create meta file %s: %ld\n", meta_path,
+            PTR_ERR(filp));
+        return PTR_ERR(filp);
+    }
+
+    written = kernel_write(filp, &hdr, sizeof(hdr), &pos);
+    if (written != sizeof(hdr)) {
+        pr_warn("VTL: Short write on meta file %s: %zd/%zu\n", meta_path,
+            written, sizeof(hdr));
+        filp_close(filp, NULL);
+        return -EIO;
+    }
+
+    vfs_fsync(filp, 0);
+    filp_close(filp, NULL);
+    return 0;
+}
+
+int vtl_meta_read(const char *tape_path, u8 *density_out, u8 *flags_out, u64 *used_out)
+{
+    struct vtl_meta_header hdr;
+    struct file *filp;
+    char meta_path[256];
+    loff_t pos = 0;
+    ssize_t n;
+
+    if (used_out)
+        *used_out = 0;
+
+    vtl_format_meta_path(meta_path, sizeof(meta_path), tape_path);
+
+    filp = filp_open(meta_path, O_RDONLY, 0);
+    if (IS_ERR(filp))
+        return PTR_ERR(filp);
+
+    n = kernel_read(filp, &hdr, sizeof(hdr), &pos);
+    filp_close(filp, NULL);
+
+    if (n < 0)
+        return (int)n;
+    if ((size_t)n < sizeof(hdr))
+        return -EIO;
+
+    if (le32_to_cpu(hdr.magic) != VTL_META_MAGIC) {
+        pr_warn("VTL: Bad meta magic in %s\n", meta_path);
+        return -EINVAL;
+    }
+    if (le16_to_cpu(hdr.version) != VTL_META_VERSION) {
+        /* version 1: density/flags only, no used field */
+        if (le16_to_cpu(hdr.version) == 1) {
+            *density_out = hdr.density;
+            if (flags_out)
+                *flags_out = hdr.flags;
+            return 0;
+        }
+        pr_warn("VTL: Unsupported meta version %u in %s\n",
+            le16_to_cpu(hdr.version), meta_path);
+        return -EINVAL;
+    }
+
+    *density_out = hdr.density;
+    if (flags_out)
+        *flags_out = hdr.flags;
+    if (used_out)
+        *used_out = le64_to_cpu(hdr.used);
+    return 0;
+}
+
+int vtl_tape_create(const char *name, u64 size, u8 density, u8 flags)
+{
+    struct vtl_tape *tape;
+    struct file *filp;
+    char path[256];
+    int ret;
+
+    if (!vtl_tape_name_valid(name))
+        return -EINVAL;
+    if (size < VTL_MIN_TAPE_SIZE)
+        size = VTL_MIN_TAPE_SIZE;
+    if (size > VTL_MAX_TAPE_SIZE)
+        size = VTL_MAX_TAPE_SIZE;
+
+    tape = kzalloc(sizeof(*tape), GFP_KERNEL);
+    if (!tape)
+        return -ENOMEM;
+
+    strncpy(tape->name, name, sizeof(tape->name) - 1);
+    tape->name[sizeof(tape->name) - 1] = '\0';
+    vtl_format_tape_path(path, sizeof(path), name);
+    strncpy(tape->path, path, sizeof(tape->path) - 1);
+    tape->path[sizeof(tape->path) - 1] = '\0';
+
+    filp = filp_open(path, O_CREAT | O_RDWR | O_TRUNC | O_LARGEFILE, 0644);
+    if (IS_ERR(filp)) {
+        ret = PTR_ERR(filp);
+        kfree(tape);
+        return ret;
+    }
+
+    if (vfs_fallocate(filp, 0, 0, size) < 0) {
+        filp_close(filp, NULL);
+        kfree(tape);
+        return -EIO;
+    }
+
+    tape->file = filp;
+    tape->position = 0;
+    tape->loaded = false;
+
+    tape->write_protected = false;
+    mutex_init(&tape->lock);
+
+    vtl_generate_serial(tape->meta.serial, sizeof(tape->meta.serial));
+    vtl_generate_barcode(tape->meta.barcode, sizeof(tape->meta.barcode));
+    tape->meta.capacity = size;
+    tape->meta.used = 0;
+    tape->meta.block_size = VTL_DEFAULT_BLOCK_SIZE;
+    tape->meta.created = ktime_get_real_seconds();
+    tape->meta.accessed = tape->meta.created;
+    tape->meta.num_snapshots = 0;
+    tape->meta.density = density;
+    tape->meta.meta_flags = flags;
+    kref_init(&tape->ref);
+
+    /* Write sidecar metadata file (non-fatal on failure) */
+    vtl_meta_write(path, density, flags, 0);
+
+    ret = vtl_tape_table_insert(tape);
+    if (ret < 0) {
+        filp_close(filp, NULL);
+        vtl_tape_put(tape);
+        return ret;
+    }
+
+    pr_info("VTL: Created tape %s (size %llu)\n", name, size);
+    return 0;
+}
+
+struct vtl_tape *vtl_tape_find_by_name(const char *name)
+{
+    int i;
+    struct vtl_tape *t;
+
+    if (!name || !name[0])
+        return NULL;
+
+    mutex_lock(&vtl_tape_lock);
+    for (i = 0; i < VTL_MAX_SLOTS; i++) {
+        t = vtl_tapes[i];
+        if (t && !strcmp(t->name, name)) {
+            kref_get(&t->ref);
+            mutex_unlock(&vtl_tape_lock);
+            return t;
+        }
+    }
+    mutex_unlock(&vtl_tape_lock);
+    return NULL;
+}
+
+struct vtl_tape *vtl_tape_open_existing(const char *name)
+{
+    struct vtl_tape *tape;
+    struct file *filp;
+    char path[256];
+
+    tape = vtl_tape_find_by_name(name);
+    if (tape) {
+        vtl_tape_put(tape);
+        return tape;
+    }
+
+    if (!vtl_tape_name_valid(name))
+        return ERR_PTR(-EINVAL);
+
+    tape = kzalloc(sizeof(*tape), GFP_KERNEL);
+    if (!tape)
+        return NULL;
+
+    strncpy(tape->name, name, sizeof(tape->name) - 1);
+    tape->name[sizeof(tape->name) - 1] = '\0';
+    vtl_format_tape_path(path, sizeof(path), name);
+    strncpy(tape->path, path, sizeof(tape->path) - 1);
+    tape->path[sizeof(tape->path) - 1] = '\0';
+
+    filp = filp_open(path, O_RDWR | O_LARGEFILE, 0);
+    if (IS_ERR(filp)) {
+        pr_err("VTL: filp_open %s failed: %ld\n", path, PTR_ERR(filp));
+        kfree(tape);
+        return ERR_PTR(PTR_ERR(filp));
+    }
+
+    tape->file = filp;
+    tape->position = 0;
+    tape->loaded = false;
+
+    tape->write_protected = false;
+    mutex_init(&tape->lock);
+    memset(&tape->meta, 0, sizeof(tape->meta));
+    tape->meta.capacity = i_size_read(file_inode(filp));
+    /* meta.used starts at 0 and is advanced by writes.
+     * REWIND resets position to 0 but keeps meta.used so
+     * existing data can be read back. */
+    if (tape->meta.capacity < VTL_MIN_TAPE_SIZE) {
+        pr_warn("VTL: tape %s file size %llu below minimum, clamping to %llu\n",
+            name, tape->meta.capacity, (u64)VTL_MIN_TAPE_SIZE);
+        tape->meta.capacity = VTL_MIN_TAPE_SIZE;
+    }
+    if (tape->meta.capacity > VTL_MAX_TAPE_SIZE) {
+        pr_warn("VTL: tape %s file size %llu exceeds maximum, clamping to %llu\n",
+            name, tape->meta.capacity, (u64)VTL_MAX_TAPE_SIZE);
+        tape->meta.capacity = VTL_MAX_TAPE_SIZE;
+    }
+    strncpy(tape->meta.serial, name, sizeof(tape->meta.serial) - 1);
+    tape->meta.serial[sizeof(tape->meta.serial) - 1] = '\0';
+    strncpy(tape->meta.barcode, name, min_t(size_t, 8, strlen(name)));
+    tape->meta.barcode[sizeof(tape->meta.barcode) - 1] = '\0';
+    tape->meta.block_size = VTL_DEFAULT_BLOCK_SIZE;
+    {
+        u8 d = VTL_DEFAULT_DENSITY;
+        u8 f = 0;
+        u64 used = 0;
+        if (vtl_meta_read(path, &d, &f, &used) == 0) {
+            tape->meta.density = d;
+            tape->meta.meta_flags = f;
+            tape->meta.used = used;
+        } else {
+            tape->meta.density = VTL_DEFAULT_DENSITY;
+            tape->meta.meta_flags = 0;
+        }
+    }
+    tape->meta.created = ktime_get_real_seconds();
+    tape->meta.accessed = tape->meta.created;
+    kref_init(&tape->ref);
+
+    if (vtl_tape_table_insert(tape) < 0) {
+        vtl_tape_put(tape);
+        return ERR_PTR(-ENOSPC);
+    }
+    pr_info("VTL: Opened existing tape %s\n", name);
+    return tape;
+}
+
+void vtl_tape_set_barcode(struct vtl_tape *tape, const char *barcode)
+{
+    size_t n;
+
+    if (!tape || !barcode || !barcode[0])
+        return;
+    mutex_lock(&tape->lock);
+    memset(tape->meta.barcode, 0, sizeof(tape->meta.barcode));
+    n = strnlen(barcode, sizeof(tape->meta.barcode) - 1);
+    memcpy(tape->meta.barcode, barcode, n);
+    mutex_unlock(&tape->lock);
+}
+
+int vtl_changer_slot_place(struct vtl_changer *ch, int slot, struct vtl_tape *tape)
+{
+    struct vtl_slot *dst_slot;
+
+    if (!ch || !tape || slot < 0 || slot >= ch->num_slots)
+        return -EINVAL;
+
+    mutex_lock(&ch->lock);
+    dst_slot = &ch->slots[slot];
+    if (dst_slot->occupied && dst_slot->tape != tape) {
+        mutex_unlock(&ch->lock);
+        return -EBUSY;
+    }
+    if (!dst_slot->occupied) {
+        kref_get(&tape->ref);
+    }
+    dst_slot->tape = tape;
+    dst_slot->occupied = true;
+    mutex_unlock(&ch->lock);
+    return 0;
+}
+
+int vtl_changer_load_slot_to_drive(struct vtl_changer *ch, int slot, int drive,
+				   const char *tape_name, const char *barcode)
+{
+    struct vtl_tape *tape;
+    int ret;
+
+    if (!ch || slot < 0 || slot >= ch->num_slots || drive < 0 ||
+	    drive >= ch->num_drives)
+        return -EINVAL;
+
+    mutex_lock(&ch->lock);
+    if (ch->slots[slot].occupied && ch->slots[slot].tape) {
+        if (tape_name && tape_name[0] &&
+            strncmp(ch->slots[slot].tape->name, tape_name,
+                    sizeof(ch->slots[slot].tape->name)) != 0) {
+            mutex_unlock(&ch->lock);
+            return -EBUSY;
+        }
+        if (barcode && barcode[0])
+            vtl_tape_set_barcode(ch->slots[slot].tape, barcode);
+        mutex_unlock(&ch->lock);
+    } else {
+        mutex_unlock(&ch->lock);
+        if (!tape_name || !tape_name[0])
+            return -ENODEV;
+        tape = vtl_tape_open_existing(tape_name);
+        if (IS_ERR(tape))
+            return PTR_ERR(tape);
+        if (!tape)
+            return -ENODEV;
+        if (barcode && barcode[0])
+            vtl_tape_set_barcode(tape, barcode);
+        ret = vtl_changer_slot_place(ch, slot, tape);
+        if (ret) {
+            return ret;
+        }
+        ret = vtl_changer_move_medium(ch, slot,
+                          vtl_elem_drive_base(ch) + drive);
+        return ret;
+    }
+
+    return vtl_changer_move_medium(ch, slot, vtl_elem_drive_base(ch) + drive);
+}
+
+int vtl_changer_unload_drive_to_slot(struct vtl_changer *ch, int drive, int slot)
+{
+    if (!ch || drive < 0 || drive >= ch->num_drives)
+        return -EINVAL;
+    if (slot < 0 || slot >= ch->num_slots)
+        return -EINVAL;
+
+    return vtl_changer_move_medium(ch, vtl_elem_drive_base(ch) + drive, slot);
+}
+
+void vtl_changer_clear_media(struct vtl_changer *ch)
+{
+    int i;
+
+    if (!ch)
+        return;
+
+    /* Clamp to static array sizes as defense-in-depth against corruption. */
+    if (ch->num_drives > VTL_MAX_DRIVES)
+        ch->num_drives = VTL_MAX_DRIVES;
+    if (ch->num_slots > VTL_MAX_SLOTS)
+        ch->num_slots = VTL_MAX_SLOTS;
+    if (ch->num_mailslots > VTL_MAX_MAILSLOTS)
+        ch->num_mailslots = VTL_MAX_MAILSLOTS;
+
+    /* Do not take ch->lock while holding drv->lock (move_medium takes ch->lock first). */
+    for (i = 0; i < ch->num_drives; i++) {
+        struct vtl_drive *d = &ch->drives[i];
+        struct vtl_tape *t;
+
+        mutex_lock(&d->lock);
+        t = d->loaded_tape;
+        if (t) {
+            mutex_lock(&t->lock);
+            /* Persist filemark offsets and EOD position BEFORE clearing
+             * pointers, matching vtladm_unload order.  Crash between here
+             * and vtl_tape_put below may lose the last write position
+             * (same limitation as all tape unload paths — full crash
+             * resilience requires write-through persistence in I/O path). */
+            if (vtl_tape_save_metadata(t) < 0)
+                pr_warn("VTL: failed to save metadata for %s\n", t->name);
+            vtl_meta_write(t->path, t->meta.density,
+                       t->meta.meta_flags, t->meta.used);
+            d->loaded_tape = NULL;
+            t->loaded = false;
+            mutex_unlock(&t->lock);
+            vtl_tape_put(t);
+        }
+        mutex_unlock(&d->lock);
+    }
+
+    mutex_lock(&ch->lock);
+    for (i = 0; i < ch->num_slots; i++) {
+            if (ch->slots[i].occupied && ch->slots[i].tape)
+                vtl_tape_put(ch->slots[i].tape);
+        ch->slots[i].tape = NULL;
+        ch->slots[i].occupied = false;
+    }
+    for (i = 0; i < ch->num_mailslots; i++) {
+            if (ch->mailslots[i].occupied && ch->mailslots[i].tape)
+                vtl_tape_put(ch->mailslots[i].tape);
+        ch->mailslots[i].tape = NULL;
+        ch->mailslots[i].occupied = false;
+    }
+    mutex_unlock(&ch->lock);
+}
+
+void vtl_tapes_release_all(void)
+{
+    int i;
+
+    mutex_lock(&vtl_tape_lock);
+    for (i = 0; i < VTL_MAX_SLOTS; i++) {
+        struct vtl_tape *t = vtl_tapes[i];
+
+        if (!t)
+            continue;
+        vtl_tapes[i] = NULL;
+        vtl_tape_put(t);
+    }
+    mutex_unlock(&vtl_tape_lock);
+}
+
+
+/* Build sidecar path by appending "meta" to the tape file path. */
+/* Build sidecar path by replacing ".vtltape" suffix with ".vtlfm". */
+static void vtl_tape_meta_path(const char *tape_path, char *meta_path, size_t sz)
+{
+	size_t plen;
+
+	strlcpy(meta_path, tape_path, sz);
+	plen = strnlen(meta_path, sz);
+	if (plen > 8 && !strcmp(meta_path + plen - 8, ".vtltape"))
+		snprintf(meta_path + plen - 8, sz - (plen - 8), ".vtlfm");
+}
+
+/* Load filemark offsets from sidecar.  On success *out_loaded is true.
+ * If the sidecar doesn't exist the array is left empty (no error). */
+int vtl_tape_load_metadata(struct vtl_tape *tape, bool *out_loaded)
+{
+    char meta_path[272];
+    struct file *f;
+    struct vtl_fm_header hdr;
+    loff_t pos = 0;
+    ssize_t ret;
+    u32 i, n;
+    u64 *arr = NULL;
+
+    *out_loaded = false;
+
+    vtl_tape_meta_path(tape->path, meta_path, sizeof(meta_path));
+    f = filp_open(meta_path, O_RDONLY, 0);
+    if (IS_ERR(f)) {
+        /* No sidecar yet — not an error */
+        return 0;
+    }
+
+    ret = kernel_read(f, &hdr, sizeof(hdr), &pos);
+    if (ret < (ssize_t)sizeof(hdr))
+        goto out_close;
+    if (be32_to_cpu(hdr.magic) != VTL_FM_MAGIC ||
+        be32_to_cpu(hdr.version) != VTL_FM_VERSION)
+        goto out_close;
+
+    n = be32_to_cpu(hdr.num_filemarks);
+    if (n == 0)
+        goto out_close;
+    if (n > VTL_MAX_FILEMARKS) {
+        pr_warn("VTL: %s filemarks %u exceeds limit %u — ignoring\n",
+            tape->name, n, VTL_MAX_FILEMARKS);
+        goto out_close;
+    }
+
+    arr = vmalloc(n * sizeof(u64));
+    if (!arr)
+        goto out_close;
+
+    /* Free previous allocation now that new one succeeded */
+    if (tape->filemark_offsets) {
+        vfree(tape->filemark_offsets);
+        tape->filemark_offsets = NULL;
+        tape->num_filemarks = 0;
+        tape->filemark_capacity = 0;
+    }
+
+    pos = sizeof(hdr);
+    for (i = 0; i < n; i++) {
+        __be64 val;
+        ret = kernel_read(f, &val, sizeof(val), &pos);
+        if (ret < (ssize_t)sizeof(val)) {
+            vfree(arr);
+            goto out_close;
+        }
+        arr[i] = be64_to_cpu(val);
+    }
+
+    tape->filemark_offsets = arr;
+    tape->num_filemarks = n;
+    tape->filemark_capacity = n;
+    tape->meta_dirty = false;
+    *out_loaded = true;
+
+out_close:
+    filp_close(f, NULL);
+    return 0;
+}
+
+/* Persist filemark offsets to sidecar. */
+int vtl_tape_save_metadata(struct vtl_tape *tape)
+{
+    char meta_path[272];
+    struct file *f;
+    struct vtl_fm_header hdr;
+    loff_t pos = 0;
+    ssize_t ret;
+    u32 i;
+    int err = 0;
+
+    if (!tape->meta_dirty)
+        return 0;
+
+    vtl_tape_meta_path(tape->path, meta_path, sizeof(meta_path));
+    f = filp_open(meta_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (IS_ERR(f))
+        return PTR_ERR(f);
+
+    hdr.magic = cpu_to_be32(VTL_FM_MAGIC);
+    hdr.version = cpu_to_be32(VTL_FM_VERSION);
+    hdr.num_filemarks = cpu_to_be32(tape->num_filemarks);
+    hdr.reserved = 0;
+
+    ret = kernel_write(f, &hdr, sizeof(hdr), &pos);
+    if (ret < (ssize_t)sizeof(hdr)) {
+        err = -EIO;
+        goto out_close;
+    }
+
+    for (i = 0; i < tape->num_filemarks; i++) {
+        __be64 val = cpu_to_be64(tape->filemark_offsets[i]);
+        ret = kernel_write(f, &val, sizeof(val), &pos);
+        if (ret < (ssize_t)sizeof(val)) {
+            err = -EIO;
+            goto out_close;
+        }
+    }
+
+    ret = vfs_fsync(f, 0);
+    if (ret < 0 && err == 0)
+        err = ret;
+    if (err == 0)
+        tape->meta_dirty = false;
+
+out_close:
+    filp_close(f, NULL);
+    return err;
+}
+
+/* Release filemark offset array. */
+void vtl_tape_free_metadata(struct vtl_tape *tape)
+{
+    if (tape->filemark_offsets) {
+        vfree(tape->filemark_offsets);
+        tape->filemark_offsets = NULL;
+    }
+    tape->num_filemarks = 0;
+    tape->filemark_capacity = 0;
+    tape->meta_dirty = false;
+}
+
+static int cmp_u64(const void *a, const void *b)
+{
+    u64 va = *(const u64 *)a;
+    u64 vb = *(const u64 *)b;
+    if (va < vb) return -1;
+    if (va > vb) return 1;
+    return 0;
+}
+
+/* Internal: append a filemark at the current position. */
+static int vtl_tape_append_filemark(struct vtl_tape *tape)
+{
+    if (tape->num_filemarks >= VTL_MAX_FILEMARKS)
+        return -ENOSPC;
+
+    if (tape->num_filemarks >= tape->filemark_capacity) {
+        u32 new_cap = tape->filemark_capacity ? tape->filemark_capacity * 2 : 256;
+        u64 *new_arr;
+
+        if (new_cap > VTL_MAX_FILEMARKS)
+            new_cap = VTL_MAX_FILEMARKS;
+        new_arr = vmalloc(new_cap * sizeof(u64));
+        if (!new_arr)
+            return -ENOMEM;
+        if (tape->filemark_offsets) {
+            memcpy(new_arr, tape->filemark_offsets,
+                   tape->num_filemarks * sizeof(u64));
+            vfree(tape->filemark_offsets);
+        }
+        tape->filemark_offsets = new_arr;
+        tape->filemark_capacity = new_cap;
+    }
+
+    tape->filemark_offsets[tape->num_filemarks] = tape->position;
+    tape->num_filemarks++;
+    tape->meta_dirty = true;
+    return 0;
+}
+int vtl_tape_load(struct vtl_drive *drv, struct vtl_tape *tape)
+{
+    mutex_lock(&drv->lock);
+    mutex_lock(&tape->lock);
+
+    if (drv->loaded_tape) {
+        mutex_unlock(&tape->lock);
+        mutex_unlock(&drv->lock);
+        return -EBUSY;
+    }
+
+    drv->loaded_tape = tape;
+    kref_get(&tape->ref);
+    tape->loaded = true;
+    tape->position = 0;
+    drv->at_bot = true;
+    drv->at_end = false;
+    drv->at_filemark = false;
+    if (tape->meta.block_size >= VTL_MIN_BLOCK_SIZE &&
+        tape->meta.block_size <= VTL_MAX_BLOCK_SIZE)
+        drv->block_size = tape->meta.block_size;
+    drv->density = tape->meta.density;
+    if (tape->meta.meta_flags & VTL_META_FLAG_COMPRESSED) {
+        drv->compression_enabled = false; /* mhVTL-aligned: always off */
+        drv->compression_algorithm =
+            (tape->meta.meta_flags & VTL_META_FLAG_ALGO_MASK) >>
+             VTL_META_FLAG_ALGO_SHIFT;
+        if (drv->compression_algorithm == 0)
+            drv->compression_algorithm = VTL_COMP_LZO;
+
+    } else {
+        drv->compression_enabled = false;
+        drv->compression_algorithm = VTL_COMP_NONE;
+    }
+
+    tape->meta.accessed = ktime_get_real_seconds();
+
+	/* Restore filemark offsets from sidecar (unconditional) */
+	{
+		bool fm_loaded;
+		vtl_tape_load_metadata(tape, &fm_loaded);
+	}
+    tape->meta.mount_count++;
+
+    mutex_unlock(&tape->lock);
+    mutex_unlock(&drv->lock);
+
+    pr_info("VTL: Loaded tape %s into drive %d\n", tape->name, drv->id);
+    return 0;
+}
+
+int vtl_tape_unload(struct vtl_drive *drv)
+{
+    struct vtl_tape *tape;
+    char tape_name[64];
+    int drive_id;
+
+    mutex_lock(&drv->lock);
+
+    tape = drv->loaded_tape;
+    if (!tape) {
+        mutex_unlock(&drv->lock);
+        return -ENODEV;
+    }
+
+    mutex_lock(&tape->lock);
+    strscpy(tape_name, tape->name, sizeof(tape_name));
+    drive_id = drv->id;
+
+    vtl_rec_flush(drv, tape);
+    if (drv->rec_buf) {
+        vfree(drv->rec_buf);
+        drv->rec_buf = NULL;
+        drv->rec_buf_used = 0;
+        drv->rec_count = 0;
+    }
+
+    drv->loaded_tape = NULL;
+    tape->loaded = false;
+
+    /* Persist filemark metadata and EOD position before unloading */
+    if (vtl_tape_save_metadata(tape) < 0)
+        pr_warn("VTL: failed to save metadata for %s\n", tape->name);
+    vtl_meta_write(tape->path, tape->meta.density,
+               tape->meta.meta_flags, tape->meta.used);
+
+    mutex_unlock(&tape->lock);
+    mutex_unlock(&drv->lock);
+
+	/*
+	 * Drop drive ref outside both locks to avoid self-deadlock:
+	 * vtl_tape_put may trigger vtl_tape_release which acquires tape->lock.
+	 */
+	vtl_tape_put(tape);
+
+    pr_info("VTL: Unloaded tape %s from drive %d\n", tape_name, drive_id);
+    return 0;
+}
+
+int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
+{
+    struct vtl_tape *tape;
+    ssize_t ret;
+    loff_t pos;
+
+    mutex_lock(&drv->lock);
+    tape = drv->loaded_tape;
+    if (!tape || !tape->file) {
+        mutex_unlock(&drv->lock);
+        return -ENODEV;
+    }
+    kref_get(&tape->ref);
+    mutex_lock(&tape->lock);
+
+    if (!tape->file) {
+        mutex_unlock(&tape->lock);
+        mutex_unlock(&drv->lock);
+        kref_put(&tape->ref, vtl_tape_release);
+        return -ENODEV;
+    }
+
+    if (drv->at_filemark) {
+        drv->at_filemark = false;
+        *actual = 0;
+        mutex_unlock(&tape->lock);
+        mutex_unlock(&drv->lock);
+        kref_put(&tape->ref, vtl_tape_release);
+        return 0;
+    }
+
+    pos = tape->position;
+    if (pos >= tape->meta.used) {
+        drv->at_end = true;
+        *actual = 0;
+        mutex_unlock(&tape->lock);
+        mutex_unlock(&drv->lock);
+        kref_put(&tape->ref, vtl_tape_release);
+        return 0;
+    }
+
+    /* mhVTL-style: unpack records from multi-record blocks.
+     * If not currently inside a block, peek for a new VLBK header. */
+    if (drv->rec_read_idx >= drv->rec_read_total) {
+        u8 peek[4];
+        loff_t pk_pos = pos;
+
+        ret = kernel_read(tape->file, peek, 4, &pk_pos);
+        if (ret == 4 && be32_to_cpu(*(__be32 *)peek) == VTL_REC_BLOCK_MAGIC) {
+            u16 num_recs;
+
+            pos = pk_pos; /* sync after peek */
+            ret = kernel_read(tape->file, &num_recs, 2, &pos);
+            if (ret != 2) { mutex_unlock(&tape->lock); mutex_unlock(&drv->lock); kref_put(&tape->ref, vtl_tape_release); return -EIO; }
+            num_recs = be16_to_cpu(num_recs);
+            pos += 2; /* skip flags */
+
+            drv->rec_read_total = num_recs;
+            drv->rec_read_idx = 0;
+            tape->position = pos;
+        }
+    }
+
+    /* Read next record from current VLBK block */
+    if (drv->rec_read_idx < drv->rec_read_total) {
+        u32 rec_sz;
+        loff_t rpos = tape->position;
+
+        ret = kernel_read(tape->file, &rec_sz, 4, &rpos);
+        if (ret != 4) { mutex_unlock(&tape->lock); mutex_unlock(&drv->lock); kref_put(&tape->ref, vtl_tape_release); return -EIO; }
+        rec_sz = be32_to_cpu(rec_sz);
+
+        {
+            u32 rd = min(rec_sz, len);
+            ret = kernel_read(tape->file, buffer, rd, &rpos);
+            if (ret < 0) { mutex_unlock(&tape->lock); mutex_unlock(&drv->lock); kref_put(&tape->ref, vtl_tape_release); return -EIO; }
+            if (rd < rec_sz)
+                rpos += (loff_t)(rec_sz - rd);
+            if ((u32)ret < len)
+                memset(buffer + ret, 0, len - (u32)ret);
+
+            *actual = min(rec_sz, len);
+            tape->position = rpos;
+            drv->rec_read_idx++;
+            drv->at_bot = false;
+            drv->at_end = (tape->position >= tape->meta.used);
+            tape->meta.accessed = ktime_get_real_seconds();
+            tape->meta.log_bytes_read += (u64)rec_sz;
+
+            mutex_unlock(&tape->lock);
+            mutex_unlock(&drv->lock);
+            kref_put(&tape->ref, vtl_tape_release);
+            return 0;
+        }
+    }
+
+    /* Try compressed-block read first: peek at 16-byte header */
+    {
+        struct vtl_block_header hdr;
+        loff_t hdr_pos = pos;
+
+        ret = kernel_read(tape->file, &hdr, sizeof(hdr), &hdr_pos);
+        if (ret == sizeof(hdr) &&
+            be32_to_cpu(hdr.magic) == VTL_BLOCK_MAGIC) {
+            u32 comp_sz = be32_to_cpu(hdr.compressed_size);
+            u32 uncomp_sz = be32_to_cpu(hdr.uncompressed_size);
+            u8  algo    = hdr.algorithm;
+            u32 block_total = VTL_BLOCK_HEADER_SIZE + comp_sz;
+            u8 *cbuf;
+
+            /* Uncompressed block (algorithm=0): read data directly,
+             * no decompression needed. Preserves exact SCSI block size. */
+            if (algo == 0 && comp_sz == uncomp_sz) {
+                u32 rd = min(comp_sz, len);
+
+                /* Skip past header to data (hdr_pos already points past header) */
+                pos = hdr_pos;
+                ret = kernel_read(tape->file, buffer, rd, &pos);
+                if (ret < 0) {
+                    mutex_unlock(&tape->lock);
+                    mutex_unlock(&drv->lock);
+                    kref_put(&tape->ref, vtl_tape_release);
+                    return -EIO;
+                }
+                /* Skip any unread remainder beyond caller buffer */
+                if (rd < comp_sz || comp_sz == 0)
+                    pos = hdr_pos + (loff_t)comp_sz;
+
+                /* Kylin 4.19 st sends SILI=0 in variable-block mode — zero-pad
+                 * short blocks to avoid stale buffer data. */
+                if ((u32)ret < len)
+                    memset(buffer + ret, 0, len - (u32)ret);
+
+                *actual = min(uncomp_sz, len);
+                tape->position = pos;
+                drv->at_bot = false;
+                drv->at_end = (tape->position >= tape->meta.used);
+                tape->meta.accessed = ktime_get_real_seconds();
+                tape->meta.log_bytes_read += (u64)uncomp_sz;
+
+                mutex_unlock(&tape->lock);
+                mutex_unlock(&drv->lock);
+                kref_put(&tape->ref, vtl_tape_release);
+                return 0;
+            }
+
+            if (comp_sz > VTL_MAX_BLOCK_SIZE + 1024 ||
+                uncomp_sz > len) {
+                mutex_unlock(&tape->lock);
+                mutex_unlock(&drv->lock);
+                kref_put(&tape->ref, vtl_tape_release);
+                return -EIO;
+            }
+
+            cbuf = vmalloc(block_total);
+            if (!cbuf) {
+                mutex_unlock(&tape->lock);
+                mutex_unlock(&drv->lock);
+                kref_put(&tape->ref, vtl_tape_release);
+                return -ENOMEM;
+            }
+
+            /* Re-read the whole block (header + compressed data) */
+            ret = kernel_read(tape->file, cbuf, block_total, &pos);
+            if (ret < block_total) {
+                vfree(cbuf);
+                mutex_unlock(&tape->lock);
+                mutex_unlock(&drv->lock);
+                kref_put(&tape->ref, vtl_tape_release);
+                return -EIO;
+            }
+
+            ret = vtl_decompress_block(cbuf, block_total,
+                                       buffer, &uncomp_sz);
+            vfree(cbuf);
+            if (ret < 0) {
+                mutex_unlock(&tape->lock);
+                mutex_unlock(&drv->lock);
+                kref_put(&tape->ref, vtl_tape_release);
+                return -EIO;
+            }
+
+            tape->position = pos;
+            *actual = uncomp_sz;
+            drv->at_bot = (pos == 0);
+            drv->at_end = (pos >= tape->meta.used);
+
+            tape->meta.accessed = ktime_get_real_seconds();
+            drv->comp_bytes_read += uncomp_sz;
+            tape->meta.log_bytes_read += (u64)uncomp_sz;
+
+            mutex_unlock(&tape->lock);
+            mutex_unlock(&drv->lock);
+            kref_put(&tape->ref, vtl_tape_release);
+            return 0;
+        }
+    }
+
+
+    /* No VLBK or compressed block found at current position:
+     * treat as end of recorded data — mhVTL has no raw fallback. */
+    *actual = 0;
+    drv->at_end = true;
+    mutex_unlock(&tape->lock);
+    mutex_unlock(&drv->lock);
+    kref_put(&tape->ref, vtl_tape_release);
+    return 0;
+}
+
+int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape)
+{
+    u8 hdr[VTL_REC_HEADER_SIZE];
+    loff_t pos;
+    ssize_t ret;
+    u32 saved_used;
+
+    if (!drv->rec_buf || drv->rec_count == 0)
+        return 0;
+
+    saved_used = drv->rec_buf_used;
+    pos = drv->rec_block_start;
+
+    vtl_put_be32(VTL_REC_BLOCK_MAGIC, hdr);
+    vtl_put_be16(drv->rec_count, hdr + 4);
+    hdr[6] = 0; hdr[7] = 0;
+
+    ret = kernel_write(tape->file, hdr, VTL_REC_HEADER_SIZE, &pos);
+    if (ret != VTL_REC_HEADER_SIZE) {
+        drv->rec_buf_used = 0;
+        drv->rec_count = 0;
+        return ret < 0 ? -EIO : -ENOSPC;
+    }
+
+    ret = kernel_write(tape->file, drv->rec_buf, saved_used, &pos);
+    if (ret < 0) {
+        drv->rec_buf_used = 0;
+        drv->rec_count = 0;
+        return -EIO;
+    }
+
+    tape->position = pos;
+    if (pos > tape->meta.used) {
+        tape->meta.used = pos;
+        vtl_meta_write(tape->path, tape->meta.density,
+                   tape->meta.meta_flags, tape->meta.used);
+    }
+    tape->meta.log_bytes_written += (u64)saved_used;
+    drv->rec_buf_used = 0;
+    drv->rec_count = 0;
+    vfs_fsync(tape->file, 0);
+    return (ret == (ssize_t)saved_used) ? 0 : -ENOSPC;
+}
+
+int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual)
+{
+    struct vtl_tape *tape;
+    u32 to_write;
+    int ret = 0;
+
+    mutex_lock(&drv->lock);
+    tape = drv->loaded_tape;
+    if (!tape || !tape->file) {
+        mutex_unlock(&drv->lock);
+        return -ENODEV;
+    }
+    if (tape->write_protected) {
+        mutex_unlock(&drv->lock);
+        return -EROFS;
+    }
+    kref_get(&tape->ref);
+    mutex_lock(&tape->lock);
+
+    if (tape->position == 0) {
+        tape->num_filemarks = 0;
+        tape->meta.used = 0;
+        tape->meta_dirty = true;
+    }
+
+    if (actual)
+        *actual = 0;
+    if (tape->position >= tape->meta.capacity) {
+        drv->at_end = true;
+        mutex_unlock(&tape->lock);
+        mutex_unlock(&drv->lock);
+        kref_put(&tape->ref, vtl_tape_release);
+        return -ENOSPC;
+    }
+    to_write = ((u64)len > (u64)(tape->meta.capacity - tape->position))
+             ? (u32)(tape->meta.capacity - tape->position) : len;
+
+    if (!drv->rec_buf) {
+        drv->rec_buf = vmalloc(VTL_REC_BUF_SIZE);
+        if (!drv->rec_buf) {
+            mutex_unlock(&tape->lock);
+            mutex_unlock(&drv->lock);
+            kref_put(&tape->ref, vtl_tape_release);
+            return -ENOMEM;
+        }
+        drv->rec_buf_used = 0;
+        drv->rec_count = 0;
+    }
+
+    /* Flush if this record won't fit */
+    if (drv->rec_count > 0 &&
+        drv->rec_buf_used + 4 + to_write > VTL_REC_BUF_SIZE) {
+        ret = vtl_rec_flush(drv, tape);
+        if (ret < 0)
+            goto out;
+    }
+
+    /* First record in a new VLBK block: remember where the block starts */
+    if (drv->rec_count == 0)
+        drv->rec_block_start = tape->position;
+
+    /* Append record: [size:u32 BE][data] */
+    vtl_put_be32(to_write, drv->rec_buf + drv->rec_buf_used);
+    drv->rec_buf_used += 4;
+    memcpy(drv->rec_buf + drv->rec_buf_used, buffer, to_write);
+    drv->rec_buf_used += to_write;
+    drv->rec_count++;
+    tape->position += (loff_t)to_write;
+
+    if (actual) *actual = len;
+    drv->at_bot = false;
+    drv->at_end = (tape->position >= tape->meta.capacity);
+    drv->at_filemark = false;
+    tape->meta.accessed = ktime_get_real_seconds();
+
+out:
+    mutex_unlock(&tape->lock);
+    mutex_unlock(&drv->lock);
+    kref_put(&tape->ref, vtl_tape_release);
+    return ret;
+}
+
+int vtl_tape_space(struct vtl_drive *drv, int code, int count)
+{
+    struct vtl_tape *tape;
+    loff_t delta;
+    loff_t new_pos;
+    s64 max_blocks;
+    int ret = 0;
+
+    mutex_lock(&drv->lock);
+    tape = drv->loaded_tape;
+    if (!tape) {
+        mutex_unlock(&drv->lock);
+        return -ENODEV;
+    }
+
+    mutex_lock(&tape->lock);
+
+    switch (code) {
+    case 0:
+        /* Variable block mode: SPACE blocks is a no-op — there is no
+         * fixed block size to multiply by.  Backup software often sends
+         * SPACE(0) to position the tape before writing. */
+        if (drv->block_size == 0)
+            break;
+        max_blocks = S64_MAX / (s64)drv->block_size;
+        if ((s64)count > max_blocks || (s64)count < -max_blocks) {
+            ret = -EINVAL;
+            break;
+        }
+        delta = (loff_t)((s64)count * (s64)drv->block_size);
+        if ((delta > 0 && tape->position > S64_MAX - delta) ||
+            (delta < 0 && tape->position < S64_MIN - delta)) {
+            ret = -EINVAL;
+            break;
+        }
+        new_pos = tape->position + delta;
+        tape->position = new_pos;
+        break;
+    case 1: {
+        /* Forward over filemarks: skip past the N-th filemark after current pos.
+         * SCSI SSC standard: after SPACE, the logical position is AFTER the
+         * filemark, not on it — next read returns data, not filemark-hit. */
+        u32 i;
+        int found = 0;
+
+        for (i = 0; i < tape->num_filemarks; i++) {
+            if (tape->filemark_offsets[i] >= tape->position) {
+                if (++found == count) {
+                    tape->position = tape->filemark_offsets[i];
+                    break;
+                }
+            }
+        }
+        if (found < count) {
+            tape->position = tape->meta.used;
+            ret = -ENODATA;
+        }
+        drv->at_filemark = false;
+        break;
+    }
+    case 2: {
+        /* Backward over filemarks: move before the N-th filemark before current pos */
+        int remaining = (count < 0) ? -count : count;
+        int matched = 0;
+
+        if (tape->num_filemarks > 0) {
+            s32 idx = (s32)tape->num_filemarks - 1;
+            while (idx >= 0) {
+                if (tape->filemark_offsets[idx] < tape->position) {
+                    if (++matched == remaining) {
+                        tape->position = tape->filemark_offsets[idx];
+                        break;
+                    }
+                }
+                idx--;
+            }
+            if (matched < remaining) {
+                tape->position = 0;
+                ret = -ENODATA;
+            }
+        }
+        drv->at_filemark = false;
+        break;
+    }
+    case 3: /* SPACE to End-of-Data: position at meta.used, not file size */
+        tape->position = tape->meta.used;
+        drv->at_end = true;
+        break;
+    case 4: /* SPACE to End-of-Data then set filemark */
+        tape->position = tape->meta.used;
+        drv->at_filemark = true;
+        drv->at_end = true;
+        break;
+    default:
+        ret = -EINVAL;
+        break;
+    }
+
+    if (ret) {
+        mutex_unlock(&tape->lock);
+        mutex_unlock(&drv->lock);
+        return ret;
+    }
+
+    if (tape->position < 0)
+        tape->position = 0;
+    if (tape->position > tape->meta.capacity)
+        tape->position = tape->meta.capacity;
+
+    drv->at_bot = (tape->position == 0);
+    drv->at_end = (tape->position >= tape->meta.capacity);
+    tape->meta.accessed = ktime_get_real_seconds();
+
+    mutex_unlock(&tape->lock);
+    mutex_unlock(&drv->lock);
+    return 0;
+}
+
+int vtl_tape_write_filemarks(struct vtl_drive *drv, int count)
+{
+    struct vtl_tape *tape;
+    int i, ret = 0;
+
+    mutex_lock(&drv->lock);
+    tape = drv->loaded_tape;
+    if (!tape) {
+        mutex_unlock(&drv->lock);
+        return -ENODEV;
+    }
+    if (tape->write_protected) {
+        mutex_unlock(&drv->lock);
+        return -EROFS;
+    }
+
+    mutex_lock(&tape->lock);
+    ret = vtl_rec_flush(drv, tape);
+    if (ret < 0) {
+        mutex_unlock(&tape->lock);
+        mutex_unlock(&drv->lock);
+        return ret;
+    }
+    for (i = 0; i < count; i++) {
+        ret = vtl_tape_append_filemark(tape);
+        if (ret < 0)
+            break;
+    }
+    if (count > 0 && tape->num_filemarks > 1)
+        sort(tape->filemark_offsets, tape->num_filemarks,
+             sizeof(u64), cmp_u64, NULL);
+    drv->at_filemark = false;
+    tape->meta.accessed = ktime_get_real_seconds();
+    mutex_unlock(&tape->lock);
+    mutex_unlock(&drv->lock);
+
+    return ret;
+}
+
+int vtl_tape_rewind(struct vtl_drive *drv)
+{
+    struct vtl_tape *tape;
+
+    mutex_lock(&drv->lock);
+    tape = drv->loaded_tape;
+    if (!tape) {
+        mutex_unlock(&drv->lock);
+        return -ENODEV;
+    }
+
+    mutex_lock(&tape->lock);
+    vtl_rec_flush(drv, tape);
+    tape->position = 0;
+    tape->num_filemarks = 0;
+    drv->rec_read_idx = 0;
+    drv->rec_read_total = 0;
+    drv->at_bot = true;
+    drv->at_end = false;
+    drv->at_filemark = false;
+    tape->meta.accessed = ktime_get_real_seconds();
+    mutex_unlock(&tape->lock);
+    mutex_unlock(&drv->lock);
+
+    return 0;
+}
+
+int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
+{
+    struct vtl_tape *t = NULL;
+    int ret = 0;
+    int saved_source_slot = -1;
+
+    mutex_lock(&ch->lock);
+
+    if (vtl_elem_is_storage(ch, src)) {
+        int si_src = src - 1;
+        struct vtl_slot *src_slot;
+
+        if (si_src < 0 || si_src >= ch->num_slots) {
+            ret = -EINVAL;
+            goto out;
+        }
+        src_slot = &ch->slots[si_src];
+        if (!src_slot->occupied || !src_slot->tape) {
+            ret = -ENODEV;
+            goto out;
+        }
+        t = src_slot->tape;
+        src_slot->tape = NULL;
+        src_slot->occupied = false;
+        vtl_tape_put(t);
+	    } else if (vtl_elem_is_drive(ch, src)) {
+	        struct vtl_drive *src_drv;
+	        int di = src - vtl_elem_drive_base(ch);
+
+        if (di < 0 || di >= ch->num_drives) {
+            ret = -EINVAL;
+            goto out;
+	        }
+	        src_drv = &ch->drives[di];
+	        mutex_lock(&src_drv->lock);
+	        if (!src_drv->loaded_tape) {
+	            mutex_unlock(&src_drv->lock);
+	            ret = -ENODEV;
+	            goto out;
+	        }
+	        t = src_drv->loaded_tape;
+        saved_source_slot = src_drv->source_slot;
+	        src_drv->loaded_tape = NULL;
+        src_drv->source_slot = -1;
+		vtl_rec_flush(src_drv, t);
+			mutex_lock(&t->lock);
+/* Persist filemark metadata and EOD position when unloading from drive */
+		vtl_tape_save_metadata(t);
+		vtl_meta_write(t->path, t->meta.density,
+		           t->meta.meta_flags, t->meta.used);
+	        			t->loaded = false;
+			mutex_unlock(&t->lock);
+	        src_drv->at_filemark = false;
+	        src_drv->at_end = false;
+	        src_drv->at_bot = true;
+            vtl_tape_put(t);
+	        mutex_unlock(&src_drv->lock);
+    } else if (vtl_elem_is_ie(ch, src)) {
+        struct vtl_slot *ms;
+        int mi = src - vtl_elem_ie_base(ch);
+
+        ms = &ch->mailslots[mi];
+        if (!ms->occupied || !ms->tape) {
+            ret = -ENODEV;
+            goto out;
+        }
+        t = ms->tape;
+        ms->tape = NULL;
+        ms->occupied = false;
+        vtl_tape_put(t);
+    } else {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    /*
+     * Hold a function-scope reference across the extract→place window.
+     * The per-element put above may have released the last element ref;
+     * this pin guarantees t stays alive until we reach out: below.
+     */
+    kref_get(&t->ref);
+
+    if (vtl_elem_is_storage(ch, dst)) {
+        int si_dst = dst - 1;
+        struct vtl_slot *dst_slot;
+
+        if (si_dst < 0 || si_dst >= ch->num_slots) {
+            ret = -EINVAL;
+            goto rollback;
+        }
+        dst_slot = &ch->slots[si_dst];
+        if (dst_slot->occupied) {
+            ret = -EBUSY;
+            goto rollback;
+        }
+        dst_slot->tape = t;
+        dst_slot->occupied = true;
+        kref_get(&t->ref);
+    } else if (vtl_elem_is_drive(ch, dst)) {
+        struct vtl_drive *dst_drv;
+        int di = dst - vtl_elem_drive_base(ch);
+
+        if (di < 0 || di >= ch->num_drives) {
+            ret = -EINVAL;
+            goto rollback;
+	        }
+	        dst_drv = &ch->drives[di];
+	        mutex_lock(&dst_drv->lock);
+	        if (dst_drv->loaded_tape) {
+	            mutex_unlock(&dst_drv->lock);
+	            ret = -EBUSY;
+	            goto rollback;
+	        }
+	 /* re-open tape file to pick up i_size changes (capacity) */
+	 if (t->file) {
+	     filp_close(t->file, NULL);
+	 }
+	 t->file = filp_open(t->path, O_RDWR | O_LARGEFILE, 0);
+	 if (IS_ERR(t->file)) {
+	     mutex_unlock(&dst_drv->lock);
+	     t->file = NULL;
+	     ret = PTR_ERR(t->file);
+	     goto rollback;
+	 }
+	 t->meta.capacity = (u64)i_size_read(file_inode(t->file));
+	        dst_drv->loaded_tape = t;
+	        kref_get(&t->ref);
+        dst_drv->source_slot = vtl_elem_is_storage(ch, src) ? src : saved_source_slot;
+	        t->loaded = true;
+	        t->position = 0;
+	        dst_drv->at_filemark = false;
+	        dst_drv->at_end = false;
+	        dst_drv->at_bot = true;
+	        if (t->meta.block_size >= VTL_MIN_BLOCK_SIZE &&
+	            t->meta.block_size <= VTL_MAX_BLOCK_SIZE)
+	            dst_drv->block_size = t->meta.block_size;
+	        dst_drv->density = t->meta.density;
+	        if (t->meta.meta_flags & VTL_META_FLAG_COMPRESSED) {
+	            dst_drv->compression_enabled = false; /* mhVTL-aligned: always off */
+	            dst_drv->compression_algorithm =
+	                (t->meta.meta_flags & VTL_META_FLAG_ALGO_MASK) >>
+	                 VTL_META_FLAG_ALGO_SHIFT;
+	            if (dst_drv->compression_algorithm == 0)
+	                dst_drv->compression_algorithm = VTL_COMP_LZO;
+
+	        } else {
+	            dst_drv->compression_enabled = false;
+	            dst_drv->compression_algorithm = VTL_COMP_NONE;
+
+	        }
+
+		/* Restore filemark offsets from sidecar (unconditional) */
+		{
+			bool fm_loaded;
+			vtl_tape_load_metadata(t, &fm_loaded);
+		}
+	        mutex_unlock(&dst_drv->lock);
+    } else if (vtl_elem_is_ie(ch, dst)) {
+        struct vtl_slot *ms;
+        int mi = dst - vtl_elem_ie_base(ch);
+
+        ms = &ch->mailslots[mi];
+        if (ms->occupied) {
+            ret = -EBUSY;
+            goto rollback;
+        }
+        ms->tape = t;
+        ms->occupied = true;
+        t->loaded = false;
+        kref_get(&t->ref);
+    } else {
+        ret = -EINVAL;
+        goto rollback;
+    }
+
+    pr_info("VTL: Moved medium from %d to %d\n", src, dst);
+    ret = 0;
+    goto out;
+
+rollback:
+    if (vtl_elem_is_storage(ch, src)) {
+        int si_rb = src - 1;
+        if (si_rb >= 0 && si_rb < ch->num_slots) {
+        ch->slots[si_rb].tape = t;
+        kref_get(&t->ref);
+        ch->slots[si_rb].occupied = (t != NULL);
+        }
+    } else if (vtl_elem_is_drive(ch, src)) {
+        int di = src - vtl_elem_drive_base(ch);
+
+	        if (di >= 0 && di < ch->num_drives && t) {
+	            mutex_lock(&ch->drives[di].lock);
+	            ch->drives[di].loaded_tape = t;
+	            kref_get(&t->ref);
+            ch->drives[di].source_slot = saved_source_slot;
+	            t->loaded = true;
+	            ch->drives[di].at_filemark = false;
+	            ch->drives[di].at_end = false;
+	            ch->drives[di].at_bot = true;
+	            mutex_unlock(&ch->drives[di].lock);
+	        }
+    } else if (src >= vtl_elem_ie_base(ch) &&
+	       src < vtl_elem_ie_base(ch) + ch->num_mailslots) {
+        int mi = src - vtl_elem_ie_base(ch);
+
+        if (mi >= 0 && mi < ch->num_mailslots && t) {
+            ch->mailslots[mi].tape = t;
+            kref_get(&t->ref);
+            ch->mailslots[mi].occupied = true;
+            t->loaded = false;
+        }
+    }
+
+out:
+    if (t)
+        vtl_tape_put(t);
+    mutex_unlock(&ch->lock);
+    if (ret == 0 && vtl_move_delay_ms > 0)
+        msleep(min_t(unsigned int, (unsigned int)vtl_move_delay_ms, 60000U));
+    return ret;
+}
+
+int vtl_changer_remove_medium(struct vtl_changer *ch, int elem)
+{
+    int ret = 0;
+
+    if (!ch)
+        return -EINVAL;
+
+    mutex_lock(&ch->lock);
+
+    if (vtl_elem_is_storage(ch, elem)) {
+        int si_rm = elem - 1;
+        struct vtl_slot *s;
+
+        if (si_rm < 0 || si_rm >= ch->num_slots) {
+            ret = -EINVAL;
+            goto out;
+        }
+        s = &ch->slots[si_rm];
+        if (!s->occupied || !s->tape) {
+            ret = -ENODEV;
+            goto out;
+        }
+            vtl_tape_put(s->tape);
+        s->tape = NULL;
+        s->occupied = false;
+    } else if (vtl_elem_is_drive(ch, elem)) {
+        struct vtl_drive *d;
+        struct vtl_tape *t;
+        int di = elem - vtl_elem_drive_base(ch);
+
+        if (di < 0 || di >= ch->num_drives) {
+            ret = -EINVAL;
+            goto out;
+	        }
+	        d = &ch->drives[di];
+	        mutex_lock(&d->lock);
+	        if (!d->loaded_tape) {
+	            mutex_unlock(&d->lock);
+	            ret = -ENODEV;
+	            goto out;
+	        }
+	        t = d->loaded_tape;
+	        d->loaded_tape->loaded = false;
+
+    /* Persist filemark metadata before unloading */
+    if (vtl_tape_save_metadata(t) < 0)
+        pr_warn("VTL: failed to save metadata for %s\n", t->name);
+    vtl_meta_write(t->path, t->meta.density,
+               t->meta.meta_flags, t->meta.used);
+	        d->loaded_tape = NULL;
+	        d->at_filemark = false;
+	        d->at_end = false;
+	        d->at_bot = true;
+	        mutex_unlock(&d->lock);
+	        vtl_tape_put(t);
+    } else if (vtl_elem_is_ie(ch, elem)) {
+        struct vtl_slot *ms;
+        int mi = elem - vtl_elem_ie_base(ch);
+
+        ms = &ch->mailslots[mi];
+        if (!ms->occupied || !ms->tape) {
+            ret = -ENODEV;
+            goto out;
+        }
+            vtl_tape_put(ms->tape);
+        ms->tape = NULL;
+        ms->occupied = false;
+    } else {
+        ret = -EINVAL;
+    }
+
+    if (ret == 0)
+        pr_info("VTL: Removed medium from element %d\n", elem);
+
+out:
+    mutex_unlock(&ch->lock);
+    return ret;
+}
+
+int vtl_changer_exchange_medium(struct vtl_changer *ch, int src1, int src2, int dst)
+{
+    return -EOPNOTSUPP;
+}
+
+/*
+ * SMC-3 Element Status descriptor with optional Primary Volume Tag.
+ * Non-voltag desc: 12 bytes (8-byte element header + 4-byte SSCA).
+ * Voltag desc:     12-byte header + 4-byte PVolTag length + 36-byte PVolTag
+ *                  (1 reserved + 32-byte volume id + 3 reserved) = 52 bytes.
+ * Use 52 so initiators (mtx/ch) parse the full PVolTag field correctly and
+ * the 32-byte barcode copy at offset 16 does not overflow.
+ */
+#define VTL_RES_DESC_SHORT 12U
+#define VTL_RES_DESC_VOLTAG 52U
+
+static u32 vtl_elem_status_desc(u8 *p, u32 buf_left, u8 elem_type, int addr,
+                bool full, const char *barcode, bool voltag,
+                bool voltag_std, int source_slot)
+{
+    u32 dlen = voltag ? VTL_RES_DESC_VOLTAG : VTL_RES_DESC_SHORT;
+    size_t tag_len;
+
+    if (buf_left < dlen)
+        return 0;
+
+    memset(p, 0, dlen);
+    /* SMC-3 short descriptor: element address BE at bytes 0-1.
+     * Byte 2 status bits: Full(0x01) ImpExp(0x02) Except(0x04) Access(0x08) */
+    p[0] = (addr >> 8) & 0xff;
+    p[1] = addr & 0xff;
+    p[2] = 0x08;                       /* ACCESS — all VTL slots are reachable */
+    if (full)
+        p[2] |= 0x01;                  /* FULL — media present */
+    /* SMC-3: empty slots only set ACCESS; EXCEPT (0x04) means abnormal
+     * condition like damaged media, not merely an empty slot. */
+    p[3] = (elem_type & 0x07) << 5;    /* element type code in bits 5-7 */
+
+    /* Import/Export elements: mark EXENAB, INENAB.
+     * If occupied, also set IMPEXP (media placed by operator). */
+    if (elem_type == VTL_SMC_ELEM_IE) {
+        p[9] |= 0x04;                  /* EXENAB — export supported */
+        p[9] |= 0x08;                  /* INENAB — import supported */
+        if (full) {
+            p[2] &= ~0x04;             /* clear EXCEPT if media present */
+            p[2] |= 0x02;              /* IMPEXP — media placed by operator */
+        }
+    }
+
+    /* Data Transfer element: bytes 10-11 = Source Storage Element Address */
+    if (elem_type == VTL_SMC_ELEM_DT && full && source_slot >= 0) {
+        p[9] |= 0x40;
+        p[10] = (source_slot >> 8) & 0xff;
+        p[11] = source_slot & 0xff;
+    }
+
+    if (voltag && full && barcode && barcode[0]) {
+        tag_len = strnlen(barcode, 36U);
+        if (voltag_std) {
+            /* SMC-3 standard: 4-byte PVolTag header (reserved+length=36),
+             * then 36-byte volume identifier at bytes 16-51. */
+            vtl_put_be32(36, &p[12]);
+            memset(&p[16], ' ', 36);
+            memcpy(&p[16], barcode, tag_len);
+        } else {
+            /* mtx-compatible: barcode directly at byte 12, 36 chars. */
+            memset(&p[12], ' ', 36);
+            memcpy(&p[12], barcode, tag_len);
+        }
+    }
+    return dlen;
+}
+
+static bool vtl_elem_type_wanted(u8 filter, u8 elem_type)
+{
+    if (!filter || filter > 0x04)
+        return true;
+    return filter == elem_type;
+}
+
+static bool vtl_elem_in_range(int addr, int start, int num)
+{
+    if (num <= 0)
+        return true;
+    return addr >= start && addr < start + num;
+}
+
+/*
+ * Append one SMC-3 Element Status Page (8-byte page header + descriptors).
+ * Returns bytes written, or 0 if buffer too small.
+ */
+static u32 vtl_append_elem_status_page(struct vtl_changer *ch, u8 *p, u32 left,
+				       u8 smc_type, bool voltag, bool voltag_std,
+				       int start_elem, int num_elems,
+				       u8 cdb_type_filter)
+{
+    u32 desc_len = voltag ? VTL_RES_DESC_VOLTAG : VTL_RES_DESC_SHORT;
+    u32 page_hdr = 8U;
+    u32 desc_bytes = 0;
+    u32 written;
+    u8 *desc;
+    int drv_source_slot;
+    int i;
+
+    if (!vtl_elem_type_wanted(cdb_type_filter, smc_type))
+        return 0;
+
+    if (left < page_hdr)
+        return 0;
+
+    desc = p + page_hdr;
+
+    if (smc_type == VTL_SMC_ELEM_ST) {
+        for (i = 0; i < ch->num_slots; i++) {
+            struct vtl_slot *slot = &ch->slots[i];
+            u32 n;
+
+            if (!vtl_elem_in_range(i + 1, start_elem, num_elems))
+                continue;
+            if (left < page_hdr + desc_bytes + desc_len)
+                break;
+            n = vtl_elem_status_desc(desc + desc_bytes,
+					     left - page_hdr - desc_bytes,
+					     smc_type, i + 1,
+					     slot->occupied && slot->tape != NULL,
+					     slot->tape ? slot->tape->meta.barcode : NULL,
+					     voltag, voltag_std, -1);
+            if (!n)
+                break;
+            desc_bytes += n;
+        }
+	    } else if (smc_type == VTL_SMC_ELEM_DT) {
+	        for (i = 0; i < ch->num_drives; i++) {
+	            struct vtl_drive *drv = &ch->drives[i];
+	            struct vtl_tape *tape;
+	            char barcode[sizeof(drv->loaded_tape->meta.barcode)];
+	            int addr = vtl_elem_drive_base(ch) + i;
+	            u32 n;
+
+            if (!vtl_elem_in_range(addr, start_elem, num_elems))
+                continue;
+	            if (left < page_hdr + desc_bytes + desc_len)
+	                break;
+	            mutex_lock(&drv->lock);
+	            tape = drv->loaded_tape;
+	            drv_source_slot = drv->source_slot;
+	            if (tape)
+	                strscpy(barcode, tape->meta.barcode, sizeof(barcode));
+	            mutex_unlock(&drv->lock);
+	            n = vtl_elem_status_desc(desc + desc_bytes,
+						     left - page_hdr - desc_bytes,
+						     smc_type, addr,
+						     tape != NULL,
+						     tape ? barcode : NULL,
+						     voltag, voltag_std, drv_source_slot);
+            if (!n)
+                break;
+            desc_bytes += n;
+        }
+    } else if (smc_type == VTL_SMC_ELEM_IE) {
+        for (i = 0; i < ch->num_mailslots; i++) {
+            struct vtl_slot *ms = &ch->mailslots[i];
+            int addr = vtl_elem_ie_base(ch) + i;
+            u32 n;
+
+            if (!vtl_elem_in_range(addr, start_elem, num_elems))
+                continue;
+            if (left < page_hdr + desc_bytes + desc_len)
+                break;
+            n = vtl_elem_status_desc(desc + desc_bytes,
+					     left - page_hdr - desc_bytes,
+					     smc_type, addr,
+					     ms->occupied && ms->tape != NULL,
+					     ms->tape ? ms->tape->meta.barcode : NULL,
+					     voltag, voltag_std, -1);
+            if (!n)
+                break;
+            desc_bytes += n;
+        }
+    }
+
+    memset(p, 0, page_hdr);
+    /*
+     * Element Status Page header byte 0: mtx/ch expect the SMC element type code
+     * (2=ST, 3=IE, 4=DT) in the low byte, not (type<<5) in bits 5-7 only.
+     * Byte 1: mtx Element2StatusPage uses E2_PVOLTAG (0x80) when voltag set.
+     * Per-descriptor byte 3 still uses (type<<5) for initiators that read it.
+     */
+    p[0] = smc_type & 0x07;
+    if (voltag)
+        p[1] = 0x80;
+    vtl_put_be16((u16)desc_len, &p[2]);
+    vtl_put_be32(desc_bytes, &p[4]);
+
+    written = page_hdr + desc_bytes;
+    return written;
+}
+
+/*
+ * Walk Element Status Pages after build; count descriptors and first address
+ * for the 8-byte Element Status Data header (mtx decrements byte 2-3 per desc).
+ */
+static u16 vtl_res_count_descriptors(const u8 *pages, u32 pages_len, u16 *first_addr)
+{
+    u32 off = 0;
+    u16 count = 0;
+    u16 first = 0xffff;
+
+    while (off + 8 <= pages_len) {
+        u32 dbytes = ((u32)pages[off + 4] << 24) | ((u32)pages[off + 5] << 16) |
+		     ((u32)pages[off + 6] << 8) | pages[off + 7];
+        u16 dlen = ((u16)pages[off + 2] << 8) | pages[off + 3];
+
+        off += 8;
+        if (!dlen) {
+            if (dbytes)
+                off += dbytes;
+            continue;
+        }
+        {
+            u32 dend = off + dbytes;
+
+            while (off + dlen <= dend && off + dlen <= pages_len) {
+                u16 addr = ((u16)pages[off] << 8) | pages[off + 1];
+
+                if (first == 0xffff)
+                    first = addr;
+                count++;
+                off += dlen;
+            }
+        }
+    }
+
+    *first_addr = (first == 0xffff) ? 0 : first;
+    return count;
+}
+
+static void vtl_res_write_data_header(u8 *buffer, u32 pages_len, u16 first_addr,
+				     u16 num_desc)
+{
+    buffer[0] = (first_addr >> 8) & 0xff;
+    buffer[1] = first_addr & 0xff;
+    buffer[2] = (num_desc >> 8) & 0xff;
+    buffer[3] = num_desc & 0xff;
+    buffer[4] = 0;
+    buffer[5] = (pages_len >> 16) & 0xff;
+    buffer[6] = (pages_len >> 8) & 0xff;
+    buffer[7] = pages_len & 0xff;
+}
+
+int vtl_changer_read_element_status(struct vtl_changer *ch, u8 *buffer, u32 len,
+				    bool voltag, bool voltag_std, u8 elem_type,
+				    int start_elem, int num_elems)
+{
+    u8 *p;
+    u32 pages_len = 0;
+    u32 total;
+    u32 n;
+
+    if (!buffer || len < 8)
+        return -EINVAL;
+
+    mutex_lock(&ch->lock);
+
+    p = buffer + 8;
+
+    n = vtl_append_elem_status_page(ch, p, len - 8, VTL_SMC_ELEM_ST, voltag, voltag_std,
+				    start_elem, num_elems, elem_type);
+    pages_len += n;
+    p += n;
+
+    n = vtl_append_elem_status_page(ch, p, len - 8 - pages_len, VTL_SMC_ELEM_DT,
+				    voltag, voltag_std, start_elem, num_elems, elem_type);
+    pages_len += n;
+    p += n;
+
+    n = vtl_append_elem_status_page(ch, p, len - 8 - pages_len, VTL_SMC_ELEM_IE,
+				    voltag, voltag_std, start_elem, num_elems, elem_type);
+    pages_len += n;
+
+    mutex_unlock(&ch->lock);
+
+    {
+        u16 first_addr = 0;
+        u16 num_desc = vtl_res_count_descriptors(buffer + 8, pages_len, &first_addr);
+
+        memset(buffer, 0, 8);
+        vtl_res_write_data_header(buffer, pages_len, first_addr, num_desc);
+    }
+
+    total = 8 + pages_len;
+    return min_t(u32, total, len);
+}
+
+int vtl_changer_collect_inventory(struct vtl_changer *ch, int *num_drives,
+				  int *num_slots, int *num_mailslots,
+				  int *count, int *truncated, int elements[],
+				  char names[][64], int max_items)
+{
+    int i, n = 0, total = 0;
+
+    if (!ch || !count || !elements || !names || max_items <= 0)
+        return -EINVAL;
+
+    mutex_lock(&ch->lock);
+    if (num_drives)
+        *num_drives = ch->num_drives;
+    if (num_slots)
+        *num_slots = ch->num_slots;
+    if (num_mailslots)
+        *num_mailslots = ch->num_mailslots;
+
+    for (i = 0; i < ch->num_slots; i++) {
+        if (ch->slots[i].occupied && ch->slots[i].tape)
+            total++;
+    }
+	    for (i = 0; i < ch->num_drives; i++) {
+	        mutex_lock(&ch->drives[i].lock);
+	        if (ch->drives[i].loaded_tape)
+	            total++;
+	        mutex_unlock(&ch->drives[i].lock);
+	    }
+    for (i = 0; i < ch->num_mailslots; i++) {
+        if (ch->mailslots[i].occupied && ch->mailslots[i].tape)
+            total++;
+    }
+
+    for (i = 0; i < ch->num_slots && n < max_items; i++) {
+        if (ch->slots[i].occupied && ch->slots[i].tape) {
+            elements[n] = i + 1;
+            strscpy(names[n], ch->slots[i].tape->name, 64);
+            n++;
+        }
+    }
+	    for (i = 0; i < ch->num_drives && n < max_items; i++) {
+	        mutex_lock(&ch->drives[i].lock);
+	        if (ch->drives[i].loaded_tape) {
+	            elements[n] = vtl_elem_drive_base(ch) + i;
+	            strscpy(names[n], ch->drives[i].loaded_tape->name, 64);
+	            n++;
+	        }
+	        mutex_unlock(&ch->drives[i].lock);
+	    }
+    for (i = 0; i < ch->num_mailslots && n < max_items; i++) {
+        if (ch->mailslots[i].occupied && ch->mailslots[i].tape) {
+            elements[n] = vtl_elem_ie_base(ch) + i;
+            strscpy(names[n], ch->mailslots[i].tape->name, 64);
+            n++;
+        }
+    }
+    mutex_unlock(&ch->lock);
+    *count = n;
+    if (truncated)
+        *truncated = total > max_items ? 1 : 0;
+    return 0;
+}
