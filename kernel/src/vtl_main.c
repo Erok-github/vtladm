@@ -742,6 +742,16 @@ static int vtl_resize_host_geometry(int instance, int drives, int slots)
 	}
 
 	mutex_lock(&ch->lock);
+	/* M8: num_drives/num_slots are plain ints written here without io_sem
+	 * while queuecommand reads them under the io_sem read lock for LUN
+	 * bounds checks.  An int store is atomic on supported platforms and
+	 * ch->lock serialises resizes, so a racing reader at worst sees a
+	 * stale or half-new geometry for one LUN lookup — requests outside
+	 * the valid range get LUN NOT SUPPORTED, never an out-of-bounds
+	 * access.  A backup session that keeps issuing commands across a
+	 * shrink can therefore observe a transient, self-consistent-next-
+	 * command inconsistency; this is accepted by design (mhVTL-style
+	 * runtime resize), not a memory-safety issue. */
 	ch->num_drives = drives;
 	ch->num_slots = slots;
 	mutex_unlock(&ch->lock);

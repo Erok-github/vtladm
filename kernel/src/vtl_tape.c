@@ -903,7 +903,7 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
         mutex_unlock(&tape->lock);
         mutex_unlock(&drv->lock);
         kref_put(&tape->ref, vtl_tape_release);
-        return 0;
+        return VTL_READ_STOP_FILEMARK;
     }
 
     pos = tape->position;
@@ -1523,6 +1523,11 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
             goto out;
         }
         t = src_slot->tape;
+        /* L5: pin before dropping the element reference so the object
+         * stays alive across the whole extract→place window even if the
+         * element ref was the last one — no reliance on the global tape
+         * table holding a reference. */
+        kref_get(&t->ref);
         src_slot->tape = NULL;
         src_slot->occupied = false;
         vtl_tape_put(t);
@@ -1542,6 +1547,8 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 	            goto out;
 	        }
 	        t = src_drv->loaded_tape;
+        /* L5: pin before dropping the element reference (see storage branch). */
+        kref_get(&t->ref);
         saved_source_slot = src_drv->source_slot;
 	        src_drv->loaded_tape = NULL;
         src_drv->source_slot = -1;
@@ -1575,6 +1582,8 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
             goto out;
         }
         t = ms->tape;
+        /* L5: pin before dropping the element reference (see storage branch). */
+        kref_get(&t->ref);
         ms->tape = NULL;
         ms->occupied = false;
         vtl_tape_put(t);
@@ -1583,12 +1592,8 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
         goto out;
     }
 
-    /*
-     * Hold a function-scope reference across the extract→place window.
-     * The per-element put above may have released the last element ref;
-     * this pin guarantees t stays alive until we reach out: below.
-     */
-    kref_get(&t->ref);
+    /* The function-scope pin was taken in the extract branch, before the
+     * element reference was dropped; out: releases it. */
 
     if (vtl_elem_is_storage(ch, dst)) {
         int si_dst = dst - 1;

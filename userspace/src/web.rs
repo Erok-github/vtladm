@@ -1165,12 +1165,15 @@ async fn api_login(
     Json(body): Json<LoginBody>,
 ) -> impl IntoResponse {
     let login_key = login_rate_key(&headers, Some(remote_addr));
+    // M7: login_key (X-Forwarded-For on loopback) and the user name are
+    // attacker-influenced; sanitize before they reach the log lines below.
+    let login_key_log = super::sanitize_for_log(&login_key);
     if let Err(wait) = st.login_allowed(&login_key) {
         super::log_error(
             "api_login",
             &format!(
                 "登录频率限制：IP={} 剩余锁定 {}s",
-                login_key,
+                login_key_log,
                 wait.as_secs()
             ),
         );
@@ -1186,8 +1189,8 @@ async fn api_login(
             "api_login",
             &format!(
                 "验证码校验失败：IP={} user={}",
-                login_key,
-                body.username.trim()
+                login_key_log,
+                super::sanitize_for_log(body.username.trim())
             ),
         );
         return json_cookie_response(
@@ -1200,10 +1203,11 @@ async fn api_login(
     // 密码不 trim：与 web_auth::change_password 一致；保留前后空格的合法密码字符。
     // 旧版 .trim() 会让 "mypass " 被改成 "mypass"，与 bcrypt 写入路径不一致导致永远登录失败。
     let password = body.password.as_str();
+    let username_log = super::sanitize_for_log(username);
     match st.login(username, password) {
         Ok((tok, csrf_tok)) => {
             st.record_login_success(&login_key);
-            super::log_message(&format!("Web 登录成功：user={} IP={}", username, login_key));
+            super::log_message(&format!("Web 登录成功：user={} IP={}", username_log, login_key_log));
             let must_change = st.must_change_password();
             let sc = session_cookie(&tok, super::web_auth::SESSION_SECS);
             let cc = csrf_cookie(&csrf_tok, super::web_auth::SESSION_SECS);
@@ -1218,8 +1222,8 @@ async fn api_login(
                 "api_login",
                 &format!(
                     "无法读取认证文件 web_admin.json：IP={} user={} path={}",
-                    login_key,
-                    username,
+                    login_key_log,
+                    username_log,
                     st.auth_file.display()
                 ),
             );
@@ -1235,7 +1239,7 @@ async fn api_login(
             st.record_login_failure(&login_key);
             super::log_error(
                 "api_login",
-                &format!("用户名或密码错误：IP={} user={}", login_key, username),
+                &format!("用户名或密码错误：IP={} user={}", login_key_log, username_log),
             );
             json_cookie_response(
                 StatusCode::UNAUTHORIZED,

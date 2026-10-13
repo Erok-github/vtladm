@@ -136,6 +136,12 @@ void vtl_build_sense_buffer(struct scsi_cmnd *cmd, struct vtl_sense_data *sense)
 #ifndef VOLUME_OVERFLOW
 #define VOLUME_OVERFLOW 0x0d
 #endif
+/* SPC fixed-format sense byte 2 bit 7: FILEMARK.  SSC expects a read that
+ * stops at a filemark to return CHECK CONDITION with NO SENSE (0/0) and
+ * this bit set — st uses it to advance its file counter. */
+#ifndef VTL_SENSE_FILEMARK
+#define VTL_SENSE_FILEMARK 0x80
+#endif
 
 static bool vtl_drive_has_tape(struct vtl_drive *drv)
 {
@@ -1085,11 +1091,23 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         return SAM_STAT_CHECK_CONDITION;
     }
 
-    /* End of data: SSC tape targets signal EOD via CHECK CONDITION
-     * with BLANK CHECK (0x00/0x00/0x05), not via GOOD+residual.
-     * Both Kylin 4.19 SILI=0 and openEuler 6.6 st drivers recognise
-     * this as end-of-recorded-data and stop reading. */
+    /* A zero-length result is either a filemark or end-of-data. */
     if (actual == 0) {
+        if (ret == VTL_READ_STOP_FILEMARK) {
+            /* L4: read stopped at a filemark — SSC-3 §sense expects a
+             * FILEMARK sense (NO SENSE 0/0 with the filemark bit set),
+             * not BLANK CHECK, so st advances its file counter and
+             * mt/weof-based tooling sees the mark. */
+            vtl_set_sense(&drv->sense, 0, 0x00, 0x00);
+            vtl_build_sense_buffer(cmd, &drv->sense);
+            cmd->sense_buffer[2] |= VTL_SENSE_FILEMARK;
+            vtl_xfer_buf_free(buffer);
+            return SAM_STAT_CHECK_CONDITION;
+        }
+        /* End of data: SSC tape targets signal EOD via CHECK CONDITION
+         * with BLANK CHECK (0x00/0x00/0x05), not via GOOD+residual.
+         * Both Kylin 4.19 SILI=0 and openEuler 6.6 st drivers recognise
+         * this as end-of-recorded-data and stop reading. */
         vtl_set_sense(&drv->sense, 0, 0x00, 0x05);
         vtl_build_sense_buffer(cmd, &drv->sense);
         vtl_xfer_buf_free(buffer);

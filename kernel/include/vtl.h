@@ -396,6 +396,11 @@ void vtl_changer_put_instance(struct vtl_host *vhost);
 int vtl_tape_load(struct vtl_drive *drive, struct vtl_tape *tape);
 int vtl_tape_unload(struct vtl_drive *drive);
 int vtl_tape_read(struct vtl_drive *drive, u8 *buffer, u32 len, u32 *actual);
+/* vtl_tape_read() positive return: the read stopped at a filemark
+ * (*actual == 0).  Distinct from 0 (data read, or end-of-data) so the
+ * SCSI layer can answer with an SSC FILEMARK sense instead of BLANK
+ * CHECK (EOD). */
+#define VTL_READ_STOP_FILEMARK 1
 int vtl_tape_write(struct vtl_drive *drive, const u8 *buffer, u32 len, u32 *actual);
 int vtl_tape_space(struct vtl_drive *drive, int code, int count);
 int vtl_tape_write_filemarks(struct vtl_drive *drive, int count);

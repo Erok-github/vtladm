@@ -2983,6 +2983,17 @@ fn log_error(msg: &str, error: &str) {
     }
 }
 
+/// M7: make an attacker-influenced value safe to embed in a log line.
+/// Control characters (newline, NUL, ESC, DEL, C1 range) are replaced
+/// with '?' so fields like login user names or X-Forwarded-For cannot
+/// forge or inject extra log entries. Printable text, CJK included, is
+/// passed through unchanged.
+pub(crate) fn sanitize_for_log(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
 #[derive(Parser)]
 #[command(name = "vtladm")]
 #[command(about = "VTL (Virtual Tape Library) Administration Tool")]
