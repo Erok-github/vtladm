@@ -4359,6 +4359,25 @@ pub(crate) fn delete_tape_in_library(
 
     // DB 已提交——磁带记录已不可逆删除。镜像清理失败只是 warning，不应报 Err。
     if is_file_backend {
+        // 同时清理侧文件（.vtlmeta = EOD/used，.vtlfm = filemark 偏移），
+        // 否则它们会以孤儿文件留在 tape_dir，并可能在其它场景被误当作
+        // 该名字的磁带元数据读回。
+        for ext in ["vtlmeta", "vtlfm"] {
+            let sidecar = image_path_buf.with_extension(ext);
+            if sidecar.exists() {
+                if let Err(e) = fs::remove_file(&sidecar) {
+                    log_error(
+                        "delete_tape_in_library",
+                        &format!(
+                            "DB 已删除磁带 '{}'，但侧文件清理失败（{}）：{}",
+                            name,
+                            e,
+                            sidecar.display()
+                        ),
+                    );
+                }
+            }
+        }
         if let Err(e) = fs::remove_file(&deleted_path) {
             let warning = format!(
                 "DB 已删除磁带 '{}'，但镜像文件清理失败（{}）；请手工删除: {}",
@@ -4467,6 +4486,23 @@ pub(crate) fn init_tape_in_library(library: &str, name: &str) -> Result<(), VtlE
             let _ = f.set_len(prev_len);
         }
         return Err(VtlError::TapeNotFound(name.to_string()));
+    }
+
+    if backend_type != "zvol" {
+        // 空白带：删除侧文件，避免内核在下次装载时从 .vtlmeta 复活旧
+        // EOD（used）、从 .vtlfm 复活旧 filemark。内核侧另有装载时
+        // magic 自检兜底（见 vtl_changer_move_medium）。
+        for ext in ["vtlmeta", "vtlfm"] {
+            let sidecar = Path::new(&image_path).with_extension(ext);
+            if sidecar.exists() {
+                if let Err(e) = fs::remove_file(&sidecar) {
+                    log_error(
+                        "init_tape_in_library",
+                        &format!("无法删除侧文件 {}: {}", sidecar.display(), e),
+                    );
+                }
+            }
+        }
     }
 
     log_message(&format!(

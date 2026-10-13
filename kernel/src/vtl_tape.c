@@ -1337,7 +1337,13 @@ int vtl_tape_rewind(struct vtl_drive *drv)
     mutex_lock(&tape->lock);
     vtl_rec_flush(drv, tape);
     tape->position = 0;
-    tape->num_filemarks = 0;
+    /*
+     * SSC semantics: REWIND does not erase filemarks on the medium — it
+     * only moves the logical position to BOT. Keep num_filemarks intact
+     * (they were loaded from / will be saved to the .vtlfm sidecar);
+     * clearing them here made SPACE-back-after-rewind a no-op while the
+     * sidecar resurrected the old set on the next load.
+     */
     drv->rec_read_idx = 0;
     drv->rec_read_total = 0;
     drv->at_bot = true;
@@ -1478,6 +1484,31 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 	     goto rollback;
 	 }
 	 t->meta.capacity = (u64)i_size_read(file_inode(t->file));
+	 /*
+	  * Self-heal stale in-memory EOD: this driver always writes a
+	  * VLBK/VTLB block magic at offset 0, so an image whose first
+	  * bytes are not a known magic contains no readable data. Typical
+	  * trigger: `vtladm init-tape` truncated the image while the kernel
+	  * still caches this tape object (the sidecar is gone, and
+	  * vtl_tape_open_existing would return the cached object anyway).
+	  * Without this, meta.used / filemark_offsets from before the
+	  * init would shadow the now-blank tape.
+	  */
+	 if (t->meta.used > 0) {
+	     u8 magic_peek[4];
+	     loff_t mpos = 0;
+
+	     if (kernel_read(t->file, magic_peek, 4, &mpos) == 4) {
+	         u32 mg = be32_to_cpu(*(__be32 *)magic_peek);
+
+	         if (mg != VTL_REC_BLOCK_MAGIC && mg != VTL_BLOCK_MAGIC) {
+	             pr_info("VTL: tape %s image has no block magic (used=%llu) — resetting EOD/filemarks\n",
+	                 t->name, t->meta.used);
+	             t->meta.used = 0;
+	             vtl_tape_free_metadata(t);
+	         }
+	     }
+	 }
 	        dst_drv->loaded_tape = t;
 	        kref_get(&t->ref);
         dst_drv->source_slot = vtl_elem_is_storage(ch, src) ? src : saved_source_slot;

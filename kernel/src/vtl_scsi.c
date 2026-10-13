@@ -1287,6 +1287,16 @@ static int vtl_handle_erase(struct scsi_cmnd *cmd, struct vtl_drive *drv)
     drv->at_filemark = false;
     /* Clear filemarks */
     vtl_tape_free_metadata(tape);
+    /*
+     * Persist the now-empty filemark set. free_metadata() also clears
+     * meta_dirty, which would skip the sidecar write and leave the old
+     * .vtlfm in place — stale filemarks would resurrect on the next
+     * load even though the tape data is gone.
+     */
+    tape->meta_dirty = true;
+    if (vtl_tape_save_metadata(tape) < 0)
+        pr_warn("VTL: ERASE failed to persist empty filemark set for %s\n",
+            tape->name);
     tape->meta.accessed = ktime_get_real_seconds();
     mutex_unlock(&tape->lock);
     mutex_unlock(&drv->lock);
