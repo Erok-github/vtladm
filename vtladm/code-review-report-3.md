@@ -9,17 +9,19 @@
 
 ## 一、本轮新发现
 
-### L14（低危，建议修复）：遗留管理页将服务器错误消息未转义插入 innerHTML
+### L14（低危，已修复）~~遗留管理页将服务器错误消息未转义插入 innerHTML~~
 
-`userspace/src/web.rs` 遗留 server-rendered 管理页（`BROWSE_TAPES_HTML`、`ADMIN_TAPES_HTML` 等）约 6 处错误分支把 `j.error` 直接拼入 `innerHTML`（如 `innerHTML='<p class="err">'+(j.error||r.status)+'</p>'`，约 4429/4439/4494 行附近），未走同文件已定义的 `escapeHtml()`。
+> **状态更新**：已在 `59871db` 修复——`web.rs` 遗留页 3 处错误分支（约 4429/4439/4494 行）的 `j.error`/`tj.error` 渲染统一加 `escapeHtml()`（`showToast` 路径本就走 `textContent`，无需改）。
 
-服务器错误消息会回显用户输入：典型链路是货架名——`create_shelf`（`main.rs:6059`）对货架名**无任何字符白名单**（仅空名/保留名检查），创建重名货架时错误消息为 `Shelf '<name>' may already exist`，其中 `<name>` 可含任意 HTML。该错误经 API 回到管理页后以 `innerHTML` 渲染，构成**已认证场景下的反射型 XSS 通道**（管理员自伤或配合 CSRF 会话固定）。
+`userspace/src/web.rs` 遗留 server-rendered 管理页（`BROWSE_TAPES_HTML`、`ADMIN_TAPES_HTML` 等）约 6 处错误分支曾把 `j.error` 直接拼入 `innerHTML`（如 `innerHTML='<p class="err">'+(j.error||r.status)+'</p>'`），未走同文件已定义的 `escapeHtml()`。
 
-当前库名/磁带名已分别禁止 `<>`（`validate_library_name` / `validate_tape_name`），故利用面仅限货架名等未校验字段。建议：错误渲染统一走 `escapeHtml()`（与数据行渲染保持一致）。
+服务器错误消息会回显用户输入：典型链路是货架名——`create_shelf`（`main.rs:6059`）对货架名**原本无任何字符白名单**（仅空名/保留名检查），创建重名货架时错误消息为 `Shelf '<name>' may already exist`，其中 `<name>` 可含任意 HTML。该错误经 API 回到管理页后以 `innerHTML` 渲染，构成**已认证场景下的反射型 XSS 通道**（管理员自伤或配合 CSRF 会话固定）。修复后该链路关闭。
 
-### L15（低危，一致性）：货架名缺失字符白名单
+### L15（低危，已修复）~~货架名缺失字符白名单~~
 
-`main.rs:6059 create_shelf` 与 web 层 `create_shelf_in_library` 对货架名无字符校验，与库名（ASCII 字母数字 `- _`，且 canonical 一致性校验）、磁带名（禁 `<>"/\:|*?` 与控制字符）的白名单策略不一致。货架名会进入：错误消息（见 L14）、Web API JSON、SQLite、`operation_events` 日志。建议补白名单（推荐与库名一致），或至少禁止 `<>` 与控制字符。
+> **状态更新**：已在 `59871db` 修复——新增 `validate_shelf_name`（ASCII 字母数字 + `-` `_`，≤64 字符），`create_shelf` 与 `create_offline_shelf` 统一入口校验，CLI 与 Web 同时生效。
+
+`main.rs create_shelf` 与 web 层货架创建此前对货架名无字符校验，与库名（ASCII 字母数字 `- _`，且 canonical 一致性校验）、磁带名（禁 `<>"/\:|*?` 与控制字符）的白名单策略不一致。货架名会进入：错误消息（见 L14）、Web API JSON、SQLite、`operation_events` 日志。修复后货架名白名单与库名对齐。
 
 ### L16（提示级）：`/api/setup/complete` 存在 TOCTOU 小窗口
 
@@ -110,8 +112,8 @@
 | M8 | 提示 | RESIZE_GEOMETRY int 级瞬时不一致 | 加注释说明 |
 | L4 | 低 | filemark 读返回报 BLANK CHECK 而非 FILEMARK sense | st 可容忍，SSC 严格语义待加固 |
 | L5 | 低 | move_medium ref 时序依赖隐式不变式 | 改为显式托底 |
-| L14 | 低 | 遗留页 `j.error` 未转义入 innerHTML | 统一 escapeHtml |
-| L15 | 低 | 货架名无字符白名单 | 与库名对齐 |
+| L14 | 低（已修复 `59871db`） | ~~遗留页 `j.error` 未转义入 innerHTML~~ | 统一 escapeHtml，已落实 |
+| L15 | 低（已修复 `59871db`） | ~~货架名无字符白名单~~ | 与库名对齐，已落实 |
 | L16 | 提示 | setup complete TOCTOU 小窗口 | 可不改 |
 
 高危（H1–H3）与可修中危（M1–M4、M6、M9–M11）已全部闭环；低危项按批次持续收敛。
