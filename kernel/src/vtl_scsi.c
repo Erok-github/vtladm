@@ -1428,7 +1428,6 @@ static int vtl_handle_synchronize_cache(struct scsi_cmnd *cmd, struct vtl_drive 
 {
     int ret = 0;
     struct vtl_tape *tape;
-    struct file *filp;
 
     mutex_lock(&drv->lock);
     tape = drv->loaded_tape;
@@ -1439,11 +1438,17 @@ static int vtl_handle_synchronize_cache(struct scsi_cmnd *cmd, struct vtl_drive 
         return SAM_STAT_CHECK_CONDITION;
     }
     kref_get(&tape->ref);
-    filp = tape->file;
+    /*
+     * fsync under drv->lock + tape->lock: vtl_changer_move_medium() closes
+     * and reopens tape->file while holding the drive lock (load path), so
+     * dropping drv->lock before the fsync raced a struct file teardown —
+     * the kref pins the tape object, not its file.
+     */
+    mutex_lock(&tape->lock);
+    if (tape->file && !IS_ERR(tape->file))
+        ret = vfs_fsync(tape->file, 0);
+    mutex_unlock(&tape->lock);
     mutex_unlock(&drv->lock);
-
-    if (filp && !IS_ERR(filp))
-        ret = vfs_fsync(filp, 0);
 
     vtl_tape_put(tape);
 
@@ -1472,15 +1477,11 @@ static int vtl_handle_load_unload(struct scsi_cmnd *cmd, struct vtl_drive *drv,
             return SAM_STAT_GOOD;
     } else {
         /* Load=0: REWIND only (SSC-3 Position to BOP semantics).
-         * Physical unload is SMC MOVE_MEDIUM, not LOAD_UNLOAD. */
-        mutex_lock(&drv->lock);
-        if (drv->loaded_tape) {
-            drv->loaded_tape->position = 0;
-            drv->at_bot = true;
-            drv->at_end = false;
-            drv->at_filemark = false;
-        }
-        mutex_unlock(&drv->lock);
+         * Physical unload is SMC MOVE_MEDIUM, not LOAD_UNLOAD.
+         * Reuse vtl_tape_rewind() so staged records are flushed and the
+         * read cursors are reset; the previous inline position=0 left
+         * buffered records to land at a stale block offset. */
+        (void)vtl_tape_rewind(drv);
     }
 
     return SAM_STAT_GOOD;

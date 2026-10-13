@@ -5666,7 +5666,12 @@ fn import_tape(path: &str, slot: i32) -> Result<(), VtlError> {
         )));
     }
 
-    let file_name = source_path.file_name().unwrap().to_string_lossy();
+    let file_name = source_path
+        .file_name()
+        .ok_or_else(|| {
+            VtlError::InvalidParameter(format!("Invalid tape path: {}", path))
+        })?
+        .to_string_lossy();
     let tape_name = file_name
         .strip_suffix(".vtltape")
         .unwrap_or(&file_name)
@@ -5690,14 +5695,22 @@ fn import_tape(path: &str, slot: i32) -> Result<(), VtlError> {
     fs::create_dir_all(&lib_dir)?;
 
     let dest_path = tape_image_path(&lib_name, &tape_name);
-    fs::copy(source_path, &dest_path)?;
-    File::open(&dest_path)?.sync_all()?;
+    // Stage the copy and rename it into place: a failed copy must not
+    // truncate an existing tape image, and a failed DB transaction must
+    // not delete one (the old fs::copy + remove_file pair did both).
+    let tmp_path = lib_dir.join(format!(
+        ".import-{}.{}.tmp",
+        tape_name,
+        std::process::id()
+    ));
+    fs::copy(source_path, &tmp_path)?;
+    File::open(&tmp_path)?.sync_all()?;
 
     // Copy sidecar .vtlmeta if it exists alongside the source
     let src_meta = meta_image_path(source_path);
+    let tmp_meta = meta_image_path(&tmp_path);
     if src_meta.exists() {
-        let dst_meta = meta_image_path(&dest_path);
-        let _ = fs::copy(&src_meta, &dst_meta);
+        let _ = fs::copy(&src_meta, &tmp_meta);
     }
     let (density, _flags) = read_vtlmeta(source_path).unwrap_or((DENSITY_DEFAULT, 0));
 
@@ -5743,8 +5756,18 @@ fn import_tape(path: &str, slot: i32) -> Result<(), VtlError> {
         Ok(())
     })();
     if let Err(e) = tx_result {
-        let _ = fs::remove_file(&dest_path);
+        // Remove the staged copy only — the pre-existing image (if any)
+        // must survive a failed import.
+        let _ = fs::remove_file(&tmp_path);
+        let _ = fs::remove_file(&tmp_meta);
         return Err(e);
+    }
+
+    // Publish the staged image atomically; the pre-existing image (if any)
+    // is replaced only after the DB transaction committed.
+    fs::rename(&tmp_path, &dest_path)?;
+    if tmp_meta.exists() {
+        fs::rename(&tmp_meta, meta_image_path(&dest_path))?;
     }
 
     log_message(&format!(

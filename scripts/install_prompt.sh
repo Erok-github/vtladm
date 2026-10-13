@@ -37,6 +37,17 @@ vtladm_validate_ipv4() {
   done
 }
 
+# POSIX sh has no namerefs; assign via eval only after verifying the value
+# is a plain word (letters, digits, dots, colons, dashes, underscores) so a
+# crafted prompt answer can never be re-parsed as shell syntax. IPv4 and
+# portal values fit this alphabet; anything else must be rejected here.
+vtladm_set_safe_var() {
+  case $2 in
+    *[!A-Za-z0-9.:_-]*|'') return 1 ;;
+  esac
+  eval "$1=\$2"
+}
+
 vtladm_prompt_ipv4() {
   # vtladm_prompt_ipv4 VAR_NAME "prompt" [default]
   _var="$1"
@@ -50,7 +61,7 @@ vtladm_prompt_ipv4() {
   [ -z "$_default" ] && _default="0.0.0.0"
 
   if ! vtladm_is_interactive; then
-    eval "$_var=\$_default"
+    vtladm_set_safe_var "$_var" "$_default" || return 1
     return 0
   fi
 
@@ -59,7 +70,7 @@ vtladm_prompt_ipv4() {
     IFS= read -r _val || _val=""
     _val=${_val:-$_default}
     if vtladm_validate_ipv4 "$_val"; then
-      eval "$_var=\$_val"
+      vtladm_set_safe_var "$_var" "$_val" || return 1
       return 0
     fi
     echo "Invalid IPv4 address: $_val" >&2

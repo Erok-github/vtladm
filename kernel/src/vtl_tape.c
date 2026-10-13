@@ -1538,6 +1538,13 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
         struct vtl_slot *ms;
         int mi = src - vtl_elem_ie_base(ch);
 
+        /* Lower-bound guard matching the storage/drive branches: addr 0 is
+         * an element alias, so mi can be negative if this branch is ever
+         * reached with it (e.g. branch reorder or num_slots == 0). */
+        if (mi < 0 || mi >= ch->num_mailslots) {
+            ret = -EINVAL;
+            goto out;
+        }
         ms = &ch->mailslots[mi];
         if (!ms->occupied || !ms->tape) {
             ret = -ENODEV;
@@ -1666,6 +1673,10 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
         struct vtl_slot *ms;
         int mi = dst - vtl_elem_ie_base(ch);
 
+        if (mi < 0 || mi >= ch->num_mailslots) {
+            ret = -EINVAL;
+            goto rollback;
+        }
         ms = &ch->mailslots[mi];
         if (ms->occupied) {
             ret = -EBUSY;
@@ -1786,6 +1797,12 @@ int vtl_changer_remove_medium(struct vtl_changer *ch, int elem)
         struct vtl_slot *ms;
         int mi = elem - vtl_elem_ie_base(ch);
 
+        /* Lower-bound guard matching the storage/drive branches (see
+         * vtl_changer_move_medium for the rationale). */
+        if (mi < 0 || mi >= ch->num_mailslots) {
+            ret = -EINVAL;
+            goto out;
+        }
         ms = &ch->mailslots[mi];
         if (!ms->occupied || !ms->tape) {
             ret = -ENODEV;

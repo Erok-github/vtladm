@@ -321,8 +321,12 @@ file_level_compare() {
     log_info "=== 文件级别比对 ==="
 
     # 从归档中提取文件与恢复目录比对 (避免实时日志干扰)
-    local tmpdir="/tmp/vtl_test_orig_extract_$$"
-    mkdir -p "$tmpdir"
+    # mktemp -d 创建不可预测目录名，避免 /tmp 下符号链接预置竞态
+    local tmpdir
+    tmpdir=$(mktemp -d /tmp/vtl_test_orig_extract_XXXXXX) || {
+        log_fail "创建临时目录失败"
+        return 1
+    }
     tar xf "$ARCHIVE_FILE" -C "$tmpdir" 2>/dev/null
 
     local all_match=true
