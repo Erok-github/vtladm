@@ -76,14 +76,14 @@ db 路径存在但不是有效库（损坏 / 非 db 文件）时，`Connection::
 
 | 条目 | 级别 | 说明 | 建议 |
 |------|------|------|------|
-| M12 | 中（M5 引入） | 审计 `log_event` 在 setup 门前经 `init_db()` 创建 catalog 库 | `log_event` 加 db 存在性检查 |
-| M13 | 低（M5 引入） | 审计重 IO 内联于 async handler，每次登录尝试触发 | 连接缓存或 `spawn_blocking` |
+| M12 | 中（已修复 `2c6b8fc`） | ~~审计 `log_event` 在 setup 门前经 `init_db()` 创建 catalog 库~~ | db 存在性门已落实（事件路径永不建库） |
+| M13 | 低（已修复 `2c6b8fc`） | ~~审计重 IO 内联于 async handler，每次登录尝试触发~~ | 进程级连接缓存已落实（测试绕过） |
 | L16 | 提示 | `/api/setup/complete` TOCTOU 小窗口 | 维持记录不改（前轮结论） |
 | L17 | 提示（M5 引入） | ping 路径过期行残留至 restart | 保持现状，加注释 |
 | L18 | 提示（M5 引入） | `SessionStore::open` 不探测有效 SQLite | 打开时 `PRAGMA schema_version` 探测 |
 | L19 | 提示（M5 引入） | setup 前启动的 web 持久化不生效 | 文档注明 / setup 后重启 web |
 
-M1–M11 已闭环（M5 于 `632bbdf` 修复并标记于第三轮报告），L1–L15 已闭环。H1–H3 复核完好。
+M1–M11 已闭环（M5 于 `632bbdf` 修复并标记于第三轮报告），L1–L15 已闭环，M12/M13 于 `2c6b8fc` 修复。H1–H3 复核完好。
 
 ---
 
