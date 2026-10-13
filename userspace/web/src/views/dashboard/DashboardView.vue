@@ -32,6 +32,7 @@ interface LibSummary {
   drives: number;
   slots: number;
   tapes: number;
+  loaded_in_drives: number;
   transport: string;
 }
 
@@ -56,7 +57,12 @@ const libColumns: DataTableColumns<LibSummary> = [
   { title: '磁带', key: 'tapes', width: 60, render: (r) => `${r.tapes}` },
   {
     title: '占用', key: 'usage', width: 80,
-    render(r) { return r.slots > 0 ? `${Math.round((r.tapes / r.slots) * 100)}%` : '0%'; },
+    // 与库概览"空槽位"口径一致：占用槽位的磁带 = 磁带总数 − 已装入驱动器的，
+    // 驱动器里的磁带不占插槽。
+    render(r) {
+      const inSlots = Math.max(r.tapes - r.loaded_in_drives, 0);
+      return r.slots > 0 ? `${Math.round((inSlots / r.slots) * 100)}%` : '0%';
+    },
   },
   { title: '传输', key: 'transport', width: 70 },
   {
@@ -110,6 +116,7 @@ onMounted(async () => {
       drives: st?.drives ?? 0,
       slots: st?.data_slots ?? 0,
       tapes: st?.tape_count ?? 0,
+      loaded_in_drives: st?.loaded_in_drives ?? 0,
       transport: fabricTransport.value || '——',
     };
   });

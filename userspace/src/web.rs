@@ -596,6 +596,7 @@ async fn api_empty_slots(Query(q): Query<LibraryQuery>) -> impl IntoResponse {
 
 #[derive(Serialize)]
 struct LibraryStatusRow {
+    library_id: i64,
     library: String,
     tape_count: i64,
     loaded_in_drives: i64,
@@ -608,7 +609,7 @@ async fn api_libraries_status() -> impl IntoResponse {
         let conn = super::init_db().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT l.name,
+                "SELECT l.id, l.name,
                  (SELECT COUNT(*) FROM tapes WHERE library_id = l.id),
                  (SELECT COUNT(*) FROM drives WHERE library_id = l.id AND tape_id IS NOT NULL),
                  (SELECT COUNT(*) FROM drives WHERE library_id = l.id),
@@ -619,11 +620,12 @@ async fn api_libraries_status() -> impl IntoResponse {
         let rows = stmt
             .query_map([], |r| {
                 Ok(LibraryStatusRow {
-                    library: r.get(0)?,
-                    tape_count: r.get(1)?,
-                    loaded_in_drives: r.get(2)?,
-                    drives: r.get(3)?,
-                    data_slots: r.get(4)?,
+                    library_id: r.get(0)?,
+                    library: r.get(1)?,
+                    tape_count: r.get(2)?,
+                    loaded_in_drives: r.get(3)?,
+                    drives: r.get(4)?,
+                    data_slots: r.get(5)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -637,10 +639,21 @@ async fn api_libraries_status() -> impl IntoResponse {
         }
         let mut libs_json: Vec<serde_json::Value> = Vec::new();
         for row in v {
+            // 与 api_library_detail 口径一致：内核导出库的"runtime truth"是内核
+            // 机械手盘点（备份模式下 initiator 侧 MOVE MEDIUM 只改内核不改 DB，
+            // DB 的 drives.tape_id 会永久滞后），内核可用时按内核盘点计数，
+            // 否则（离线库/内核不可用）退回 DB。
+            let loaded_in_drives =
+                match super::robot_sync::changer_inventory_display(&conn, row.library_id) {
+                    Ok(inv) if inv.source == "kernel" => {
+                        inv.drives.iter().filter(|d| d.tape_name.is_some()).count() as i64
+                    }
+                    _ => row.loaded_in_drives,
+                };
             let mut obj = serde_json::Map::new();
             obj.insert("library".into(), json!(row.library));
             obj.insert("tape_count".into(), json!(row.tape_count));
-            obj.insert("loaded_in_drives".into(), json!(row.loaded_in_drives));
+            obj.insert("loaded_in_drives".into(), json!(loaded_in_drives));
             obj.insert("drives".into(), json!(row.drives));
             obj.insert("data_slots".into(), json!(row.data_slots));
             match super::iscsi_export::load_iscsi_library_export_by_name(&conn, &row.library) {
