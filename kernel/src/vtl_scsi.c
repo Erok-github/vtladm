@@ -1551,13 +1551,16 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         }
     }
 
-    /* Pre-validate so empty/missing source returns MEDIUM NOT PRESENT
-     * instead of ILLEGAL REQUEST, which avoids Kylin st offline cascade. */
+    /* Pre-validate so an empty source reports MEDIUM SOURCE ELEMENT EMPTY
+     * (SMC-3 3B/0D, NOT READY) instead of ILLEGAL REQUEST — same sense key
+     * family as the old 3A/00 MEDIUM NOT PRESENT, so the Kylin st offline
+     * cascade workaround is preserved, while backup software can now tell
+     * "source empty" apart from "bad address". */
     if (vtl_elem_is_storage(ch, src)) {
         int si = src - 1;
         if (si >= 0 && si < ch->num_slots &&
             (!ch->slots[si].occupied || !ch->slots[si].tape)) {
-            vtl_set_sense(&ch->sense, NOT_READY, 0x3a, 0x00);
+            vtl_set_sense(&ch->sense, NOT_READY, 0x3b, 0x0d);
             vtl_build_sense_buffer(cmd, &ch->sense);
             return SAM_STAT_CHECK_CONDITION;
         }
@@ -1566,7 +1569,7 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         int di = src - vtl_elem_drive_base(ch);
         if (di >= 0 && di < ch->num_drives &&
             !ch->drives[di].loaded_tape) {
-            vtl_set_sense(&ch->sense, NOT_READY, 0x3a, 0x00);
+            vtl_set_sense(&ch->sense, NOT_READY, 0x3b, 0x0d);
             vtl_build_sense_buffer(cmd, &ch->sense);
             return SAM_STAT_CHECK_CONDITION;
         }
@@ -1575,7 +1578,7 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         int mi = src - vtl_elem_ie_base(ch);
         if (mi >= 0 && mi < ch->num_mailslots &&
             !ch->mailslots[mi].occupied) {
-            vtl_set_sense(&ch->sense, NOT_READY, 0x3a, 0x00);
+            vtl_set_sense(&ch->sense, NOT_READY, 0x3b, 0x0d);
             vtl_build_sense_buffer(cmd, &ch->sense);
             return SAM_STAT_CHECK_CONDITION;
         }
@@ -1583,7 +1586,22 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
 
     ret = vtl_changer_move_medium(ch, src, dst);
     if (ret < 0) {
-        vtl_set_sense(&ch->sense, ILLEGAL_REQUEST, 0x21, 0);
+        /* SMC-3: do not fold these into 21/xx INVALID ELEMENT ADDRESS —
+         * backup software misreads that as "bad address" instead of
+         * "retry or free the destination".
+         *   -ENODEV: source element holds no medium      -> 3B/0D
+         *   -EBUSY:  destination element already full    -> 3B/0E
+         *   -EINVAL: element address out of range        -> 21/01
+         *   other (e.g. tape image open I/O error)       -> 04/00
+         */
+        if (ret == -ENODEV)
+            vtl_set_sense(&ch->sense, NOT_READY, 0x3b, 0x0d);
+        else if (ret == -EBUSY)
+            vtl_set_sense(&ch->sense, NOT_READY, 0x3b, 0x0e);
+        else if (ret == -EINVAL)
+            vtl_set_sense(&ch->sense, ILLEGAL_REQUEST, 0x21, 0x01);
+        else
+            vtl_set_sense(&ch->sense, HARDWARE_ERROR, 0x04, 0x00);
         vtl_build_sense_buffer(cmd, &ch->sense);
         return SAM_STAT_CHECK_CONDITION;
     }
