@@ -41,13 +41,15 @@ vtl_loaded() {
 vtl_vtladm_timers_stop() {
   command -v systemctl >/dev/null 2>&1 || return 0
   systemctl stop vtl-robot-sync.timer vtl-robot-sync.service \
+    vtl-robot-align.timer vtl-robot-align.service \
     vtl-patrol.timer vtl-patrol.service 2>/dev/null || true
-  echo "stopped vtl-robot-sync.timer and vtl-patrol.timer (if present)"
+  echo "stopped vtl-robot-sync / vtl-robot-align / vtl-patrol timers (if present)"
 }
 
 vtl_vtladm_timers_start() {
   command -v systemctl >/dev/null 2>&1 || return 0
   systemctl enable --now vtl-patrol.timer 2>/dev/null || true
+  systemctl enable --now vtl-robot-align.timer 2>/dev/null || true
   if [ -f "${VTL_CONF_PATH:-$PREFIX/var/vtl.conf}" ] \
     && grep -qE '^[[:space:]]*robot_sync[[:space:]]*=[[:space:]]*true' \
     "${VTL_CONF_PATH:-$PREFIX/var/vtl.conf}" 2>/dev/null \
