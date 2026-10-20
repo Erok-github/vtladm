@@ -19,9 +19,8 @@ vtladm 是一个基于 Linux 内核模块的虚拟磁带库 (VTL) 实现。内�
 
 ### SCSI EH (Error Handling) — 2026-06-12 新增
 - `kernel/src/vtl_main.c`: `vtl_eh_abort` / `vtl_eh_device_reset` / `vtl_eh_host_reset`
-- 三个处理器均返回 `SUCCESS`（VTL 命令永不挂起）
-- **作用**：阻止 Kylin 4.19 st 驱动的 "Device offlined - not ready after error recovery" 链式反应
-- mhVTL 也有这三个回调，没有就会触发 SCSI 中间层升级到 bus reset → st 离线
+- 三个处理器均返回 `SUCCESS`（VTL 命令永不挂起；mhVTL 同款做法，避免中间层对虚拟目标升级 reset）
+- **归因更正（2026-10-20）**：早先记录的"阻止 Kylin st offline 链式反应"是误判。Kylin 宕机/设备离线的真实根因是**安装/卸载脚本在 `/dev/st*|sg*` 仍被占用时强制 rmmod vtl.ko**；现由 `vtl-kernel-safe.sh:vtl_preflight_before_rmmod()` 的 holder/LIO 预检阻断（`VTL_FORCE_RMMOD=1` 除外）
 
 ### st 驱动 DMA Alignment — 2026-06-12 新增
 - `kernel/src/vtl_scsi.c`: `vtl_slave_alloc` + `vtl_slave_configure` 中调用 `blk_queue_dma_alignment(sdev->request_queue, 511)`
@@ -29,13 +28,13 @@ vtladm 是一个基于 Linux 内核模块的虚拟磁带库 (VTL) 实现。内�
 - 未设置时 st 报告 `"try direct i/o: no (alignment 4 B)"`，所有读写被缓冲绕过 SCSI
 
 ### Kylin 4.19 st 驱动行为
-- **SILI=0 bug**：Kylin 4.19 st 在变长块模式下发送 `SILI=0`，忽略 SCSI residual
+- **SILI=0 bug**（实测确认，与宕机问题无关）：Kylin 4.19 st 在变长块模式下发送 `SILI=0`，忽略 SCSI residual
 - 短块读取时 st 用缓冲区旧数据填充到请求大小
 - **解决方案** (`kernel/src/vtl_scsi.c:vtl_handle_read`)：
   - TUR/READ/REWIND/SPACE/LOAD 对空驱动器返回 SAM_STAT_GOOD
   - 短块读取时用 `memset` zero-padding 补齐（避免旧缓冲数据污染）
-- **mt 命令恢复**：MOVE MEDIUM 后第一个 mt 命令返回 ENXIO，第二个成功（st 错误恢复周期）
-- **install.sh**：warmup 时做 `mt status` + 双重 `mt rewind` 确保 st 恢复
+- **mt 预热**（防御性，保留）：insmod/MOVE 后首个 `mt` 命令可能返回 ENXIO，第二个成功；`install.sh` warmup 对每个 st 节点跑 `mt status` + 双重 `mt rewind`。
+  - 注意：早先把这类现象归因为 "st error recovery / offline 级联" 是误判——真实根因是脚本强制 rmmod（见 SCSI EH 一节的归因更正）。
 
 ### 磁带数据存储
 - 磁带文件：`*.vtltape`，VTL_BLOCK_HEADER(16B) + 压缩数据

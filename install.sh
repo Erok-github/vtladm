@@ -708,8 +708,11 @@ if [ "$ENABLE_SYSTEMD" -eq 1 ]; then
       _t=$(cat "$_sd/type" 2>/dev/null) || continue
       [ "$_t" = "1" ] && echo running > "$_sd/state" 2>/dev/null || true
     done
-    # Warm up st driver: first mt command triggers error recovery on Kylin 4.19
-    # ("Device offlined - not ready after error recovery"), second succeeds.
+    # Warm up st driver: the first mt command after insmod may return ENXIO
+    # (st re-init window); a second succeeds. Defensive — kept from the
+    # Kylin bring-up. (Earlier "Device offlined after error recovery"
+    # attribution was a misdiagnosis; root cause was forced rmmod in
+    # scripts, now blocked by vtl_preflight_before_rmmod.)
     # Must run AFTER device state restore so devices are online.
     sleep 1
     for _st in /dev/st[0-9]* /dev/nst[0-9]*; do

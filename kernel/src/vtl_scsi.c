@@ -403,13 +403,17 @@ static int vtl_handle_test_unit_ready(struct scsi_cmnd *cmd, struct vtl_host *vh
 
     /*
      * Always report ready for virtual tape drives.
-     * Returning NOT_READY when no tape is loaded is correct per SSC,
-     * but Kylin 4.19's st driver offlines the device after repeated
-     * NOT_READY responses ("Device offlined - not ready after error
-     * recovery"), permanently blocking all SG_IO passthrough (ENXIO).
+     * Returning NOT_READY when no tape is loaded is what a physical drive
+     * does, but mhVTL-compatible behaviour (and several backup packages'
+     * drive polling) expects GOOD; READ/WRITE handlers still enforce
+     * loaded_tape checks, so backup apps get proper errors when accessing
+     * an empty drive.
      *
-     * READ/WRITE handlers still enforce loaded_tape checks, so backup
-     * apps get proper errors when accessing an empty drive.
+     * Historical note: this used to cite "Kylin 4.19 st offlines the device
+     * after repeated NOT_READY". That was a misdiagnosis — the observed
+     * Kylin crashes came from install/unload scripts rmmod'ing vtl.ko while
+     * /dev/st*|sg* were still open, not from TUR sense. The forced-rmmod
+     * path is now blocked by vtl_preflight_before_rmmod().
      */
     return SAM_STAT_GOOD;
 }
@@ -1607,7 +1611,11 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
     }
 
     /* After successful tape load, ensure all drives are online.
-     * Kylin st may offline drives during background probing. */
+     * Defensive: restore any offlined drives after a successful move so
+     * the drive is usable immediately. (Earlier this cited "Kylin st may
+     * offline drives during background probing" — that was a misdiagnosis
+     * of the script forced-rmmod crashes; the restore itself is cheap and
+     * harmless, so it stays as a safety net.) */
     {
         struct scsi_device *sdev;
         shost_for_each_device(sdev, cmd->device->host) {

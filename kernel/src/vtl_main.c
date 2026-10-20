@@ -1066,8 +1066,10 @@ static void vtl_host_scan_handler(struct work_struct *work)
 
 /*
  * Periodic offline-device safety net: restores any accidentally-offlined
- * SCSI devices every 30 seconds.  Primary offline prevention is via SCSI
- * EH handlers (eh_abort/device_reset/host_reset all return SUCCESS).
+ * SCSI devices every 30 seconds. Belt-and-braces only — the historical
+ * "Kylin st offlines VTL devices" issue was traced to install/unload
+ * scripts force-rmmod'ing vtl.ko with open /dev/st*|sg* (now blocked by
+ * vtl_preflight_before_rmmod()), not to anything a sense code could fix.
  */
 static void vtl_offline_guard_work_fn(struct work_struct *work)
 {
@@ -1527,8 +1529,12 @@ MODULE_PARM_DESC(pvoltag_format,
     "PVolTag barcode format: 0=auto (heuristic, default), 1=standard SMC-3, 2=mtx");
 
 
-/* SCSI EH handlers: return SUCCESS to prevent mid-layer escalation to bus reset
- * which triggers Kylin 4.19 st driver offline ("not ready after error recovery"). */
+/* SCSI EH handlers: return SUCCESS so the mid-layer never escalates to
+ * device/host reset against a virtual target whose commands never hang
+ * (mhVTL takes the same approach). The earlier claim that this "prevents
+ * Kylin 4.19 st offline" was a misdiagnosis — those crashes were caused by
+ * scripts rmmod'ing vtl.ko while device nodes were still open; the real
+ * guard is vtl_preflight_before_rmmod() in vtl-kernel-safe.sh. */
 int vtl_eh_abort(struct scsi_cmnd *cmd)
 {
     return SUCCESS;
