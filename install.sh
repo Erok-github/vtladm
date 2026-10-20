@@ -310,6 +310,17 @@ _krel="$(uname -r)"
 _extradir="/lib/modules/${_krel}/extra"
 if [ -d "/lib/modules/${_krel}" ]; then
   rm -f /lib/modules/${_krel}/extra/vtl.ko 2>/dev/null || true
+  # Remove stale vtl.ko copies from locations modprobe prefers over extra/
+  # (updates/ has higher priority in depmod.conf defaults; old DKMS/manual
+  # copies there would shadow our extra/ module on any 'modprobe vtl').
+  # We insmod by absolute path ($PREFIX/ko/vtl.ko), so only modprobe users
+  # are affected — but a silently stale modprobe hit is worse than none.
+  for _stale in "/lib/modules/${_krel}/updates/vtl.ko" \
+                "/lib/modules/${_krel}/updates/dkms/vtl.ko"; do
+    if [ -f "$_stale" ]; then
+      rm -f "$_stale" && echo "removed stale $_stale (not managed by this installer)"
+    fi
+  done
   mkdir -p "$_extradir"
   install -m 0644 "$PREFIX/ko/vtl.ko" "$_extradir/vtl.ko"
   if command -v depmod >/dev/null 2>&1; then

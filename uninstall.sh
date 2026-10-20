@@ -176,6 +176,13 @@ if [ -n "$_krel" ] && [ -f "/lib/modules/${_krel}/extra/vtl.ko" ]; then
   command -v depmod >/dev/null 2>&1 && depmod -a "$_krel" 2>/dev/null || depmod -a 2>/dev/null || true
   echo "removed /lib/modules/${_krel}/extra/vtl.ko"
 fi
+# Also drop stale copies modprobe would prefer over extra/ (see install.sh).
+if [ -n "$_krel" ] && [ -d "/lib/modules/${_krel}" ]; then
+  for _stale in "/lib/modules/${_krel}/updates/vtl.ko" \
+                "/lib/modules/${_krel}/updates/dkms/vtl.ko"; do
+    [ -f "$_stale" ] && rm -f "$_stale" && echo "removed stale $_stale"
+  done
+fi
 
 rm -f /usr/local/bin/vtladm /usr/local/bin/vtladm-iscsi /usr/local/sbin/vtl-kernelctl 2>/dev/null || true
 
