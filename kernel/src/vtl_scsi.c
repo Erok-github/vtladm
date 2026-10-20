@@ -1552,10 +1552,10 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
     }
 
     /* Pre-validate so an empty source reports MEDIUM SOURCE ELEMENT EMPTY
-     * (SMC-3 3B/0D, NOT READY) instead of ILLEGAL REQUEST — same sense key
-     * family as the old 3A/00 MEDIUM NOT PRESENT, so the Kylin st offline
-     * cascade workaround is preserved, while backup software can now tell
-     * "source empty" apart from "bad address". */
+     * (SMC-3 3B/0D, NOT READY) — backup software can then tell "source
+     * empty" apart from "bad address". (Earlier this pre-check used
+     * 3A/00 and cited a "Kylin st offline cascade"; that diagnosis was
+     * wrong — st never sees changer sense — and has been dropped.) */
     if (vtl_elem_is_storage(ch, src)) {
         int si = src - 1;
         if (si >= 0 && si < ch->num_slots &&
