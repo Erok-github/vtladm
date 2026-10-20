@@ -1610,19 +1610,14 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         return SAM_STAT_CHECK_CONDITION;
     }
 
-    /* After successful tape load, ensure all drives are online.
-     * Defensive: restore any offlined drives after a successful move so
-     * the drive is usable immediately. (Earlier this cited "Kylin st may
-     * offline drives during background probing" — that was a misdiagnosis
-     * of the script forced-rmmod crashes; the restore itself is cheap and
-     * harmless, so it stays as a safety net.) */
-    {
-        struct scsi_device *sdev;
-        shost_for_each_device(sdev, cmd->device->host) {
-            if (sdev->sdev_state == SDEV_OFFLINE)
-                scsi_device_set_state(sdev, SDEV_RUNNING);
-        }
-    }
+    /* After a successful move, poke the offline guard so offlined drives
+     * come back online promptly. Done via mod_delayed_work (workqueue
+     * context) rather than touching sdev->sdev_state here: queuecommand
+     * runs under shost->host_lock with irqs off, and sdev_state is owned
+     * by the mid-layer (state_mutex). Skip while unloading — the remove
+     * path cancels the guard with cancel_delayed_work_sync(). */
+    if (!vtl_module_is_unloading())
+        mod_delayed_work(system_wq, &vhost->offline_guard_work, 0);
 
     /* Unit Attention: real SCSI drives ALWAYS report UA after MOVE MEDIUM.
      * st driver relies on this to detect media change and re-initialize. */
@@ -2324,14 +2319,11 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
     struct vtl_changer *ch;
     int result;
 
-    /* Auto-restore VTL devices that Kylin st driver offlines */
-    {
-        struct scsi_device *sdev;
-        shost_for_each_device(sdev, shost) {
-            if (sdev->sdev_state == SDEV_OFFLINE)
-                scsi_device_set_state(sdev, SDEV_RUNNING);
-        }
-    }
+    /* NOTE: no per-command device-state poking here. queuecommand runs in
+     * scsi_dispatch_cmd() with shost->host_lock held (irqs off) on every
+     * kernel in the 4.18-6.10 window, and sdev->sdev_state is owned by the
+     * mid-layer (state_mutex). Offline-drive restore is handled solely by
+     * vtl_offline_guard_work_fn() in workqueue context. */
 
     if (vtl_reconfig_in_progress()) {
         cmd->result = (DID_NO_CONNECT << 16);
