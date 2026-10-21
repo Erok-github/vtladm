@@ -3,7 +3,8 @@ Description=Periodic VTL kernel to DB sync (backup software inventory)
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=5min
+OnUnitActiveSec=10min
+RandomizedDelaySec=60
 Persistent=true
 
 [Install]
