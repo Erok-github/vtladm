@@ -263,7 +263,65 @@ ls -la /opt/vtladm/var/tapes/*.vtltape
 2. 磁带数据未损坏：`mt rewind && tar -tvf /dev/st0`（注意用**回绕设备 /dev/st0** 而非 nst0）应能完整列出 831MB 档案；
 3. 以后 `mt erase` 后务必用 `mtx -f /dev/sg6 status` 或 dmesg 验证，不要以 mt 的静默返回为准。
 
-## 十一、本轮审查的诚实边界
+## 十一、最终定音（2026-10-21 sg_raw sense 数据）：EOD sense key 写错
 
-- EIO 归因（第九节主假设）已能解释全部观测，但"sidecar used > 文件大小"尚未经第九节命令对证实；sg_raw sense 数据可最终定音。
-- W1/R1/W2/W3 为静态确认的代码缺陷；W4/W5 的修复方案以待现场确认后定稿。
+### 11.1 一锤定音的证据
+
+`sg_raw -v -r 32768 /dev/sg7 08 00 00 00 00 00`（磁带在驱动器、BOT 位置）返回：
+
+```
+SCSI Status: Check Condition
+Sense key: No Sense
+Additional sense: End-of-data detected   (0x00 / 0x00 / 0x05)
+```
+
+对照 `vtl_scsi.c:1111-1115`：
+
+```c
+/* End of data: SSC tape targets signal EOD via CHECK CONDITION
+ * with BLANK CHECK (0x00/0x00/0x05), not via GOOD+residual.
+ * Both Kylin 4.19 SILI=0 and openEuler 6.6 st drivers recognise
+ * this as end-of-recorded-data and stop reading. */
+vtl_set_sense(&drv->sense, 0, 0x00, 0x05);   /* ← key=0 (NO SENSE)，注释写的是 BLANK CHECK */
+```
+
+**注释声明的行为（BLANK CHECK）与代码实现（NO SENSE）不一致**——这是本案最后一个、也是最隐蔽的一个 bug：openEuler 6.6 的 st 驱动对 `NO SENSE 0/0/05` 不识别为 EOD，向上层返回 **-EIO**（现场实测：tar 报 "Cannot read: Input/output error"）；而 `BLANK_CHECK(0x08)/0/05` 才会被 st 识别为 EOF（st.c 对 BLANK_CHECK 特判置 `STp->eof = ST_EOD` 并返回 0 字节）。全仓库无 `BLANK_CHECK` 定义，修复即在 EOD 分支把 key 从 0 改为 0x08（mhVTL 的 `mkSenseBuf(BLANK_CHECK, E_END_OF_DATA, ...)` 即此语义）。
+
+### 11.2 事故全貌（全部观测闭合）
+
+| 时刻 | 观测 | 归因 |
+|------|------|------|
+| 09:21–09:32 | tar 写 831MB，内核零报错 | 写入本身完全正常 |
+| 09:32:19 | WRITE 收到 `Medium not present` | **R2**：robot-sync（5min 周期）ioctl 抽带，写到一半介质消失 |
+| 09:32:18 / 09:36:16 | 两次 ERASE 均 CC（medium not present），mt 未呈现错误 | 驱动器已空，erase 从未执行；"erase 成功"是错觉 |
+| 09:44:32 | tar -tvf 列出全部 ~831MB 文件后，11 条 READ CC → EIO×11 | **F1**：读完数据撞 EOD，st 把 0/0/05 误译为 EIO。磁带内容完好，"Skipping to next header"为 tar 从中断位置重新同步的正常行为 |
+| 09:45/09:53 | 单条 READ CC | 对空驱动器/空带的重复尝试，同 F1 |
+| 10:23 / 10:40 | TUR GOOD；READ=0/0/05 EOD | 当前 DTE0 装载的是**空带（used=0）**——sync 来回装卸把磁带洗牌了；档案磁带在槽位里。空带 BOT 即 EOD 属正确行为，但 st 仍报 EIO（F1） |
+
+**用户数据完好**：831MB 档案在磁带上原封未动，erase 从未成功；读出全部内容的唯一障碍是 F1 的 sense key。
+
+### 11.3 修复清单（定稿）
+
+| # | 级别 | 位置 | 修复 |
+|---|------|------|------|
+| **F1** | **高（本案主修复）** | `vtl_scsi.c:1115` | EOD sense key `0` → `BLANK_CHECK(0x08)`；同时更正 1113 行错误注释（"Kylin/openEuler st 均识别"与实测相反，openEuler 6.6 不识别 NO SENSE） |
+| **R2** | **高（写中断根因）** | `userspace/src/robot_sync.rs`、`/dev/vtl` UNLOAD/LOAD 路径 | 卸载/装载前检查驱动器占用（用户态查 `/proc/*/fd`→`/dev/nst*`，内核态 ioctl 加"近期有 I/O 则 -EBUSY"闸门）；反向纠错默认降级为告警 |
+| W1 | 中 | `vtl_tape.c:1130-1137,1264-1270` | 透传 `kernel_write` 的 -ENOSPC，不再折叠为 -EIO |
+| R1 | 高 | `vtl_tape.c` load/unload/erase/locate/space | 读游标 `rec_read_idx/total` 在非读路径位置变更处统一复位 |
+| W2 | 中 | `vtl_tape.c:1279,1301` | 容量钳制时 `*actual = to_write` |
+| W3 | 低 | `vtl_scsi.c:1302` | erase 前丢弃 rec_buf 而非 flush |
+| W5 | 中 | `vtl_meta_write` 各调用点 | 检查返回值并 pr_warn |
+| S1 | 低 | `vtl_scsi.c:2380-2383` | 逐命令 pr_info 降为 pr_debug 或限流 |
+| S2 | 低 | `vtl_tape.c:646-652` | .vtlfm 单条 0 偏移容忍/过滤，装载告警限流 |
+
+### 11.4 用户侧即时处置
+
+1. 找到档案磁带：对比各 `.vtlmeta` 的 used（第九节 xxd 命令），used≈831MB 的就是；用 mtx 装入驱动器 0 后 `mt rewind && tar -tvf /dev/st0`（修好 F1 前，读完 EOF 处仍会报一次 EIO，属预期，可忽略或 `tar -tvf ... 2>/dev/null`）；
+2. 测试/备份窗口内保持 `vtl-robot-sync.timer`、`vtl-robot-align.timer` 停止；
+3. F1 修复重装后，同样场景 st 会正确返回 EOF，tar 行为恢复正常。
+
+## 十二、本轮审查的诚实边界
+
+- F1 有现场 sg_raw sense + st 行为实证，定音；R2 有 dmesg medium-not-present 时间线实证。
+- W4（零填充）撤销：skip 模式由 11.2 的非 BOT 起点完整解释，无独立证据支持，维持现状观察。
+- W1/W2/W3/R1/W5/S1/S2 为静态确认的独立缺陷，修复不影响 F1/R2 的验证。
