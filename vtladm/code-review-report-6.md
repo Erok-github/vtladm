@@ -285,7 +285,27 @@ Additional sense: End-of-data detected   (0x00 / 0x00 / 0x05)
 vtl_set_sense(&drv->sense, 0, 0x00, 0x05);   /* ← key=0 (NO SENSE)，注释写的是 BLANK CHECK */
 ```
 
-**注释声明的行为（BLANK CHECK）与代码实现（NO SENSE）不一致**——这是本案最后一个、也是最隐蔽的一个 bug：openEuler 6.6 的 st 驱动对 `NO SENSE 0/0/05` 不识别为 EOD，向上层返回 **-EIO**（现场实测：tar 报 "Cannot read: Input/output error"）；而 `BLANK_CHECK(0x08)/0/05` 才会被 st 识别为 EOF（st.c 对 BLANK_CHECK 特判置 `STp->eof = ST_EOD` 并返回 0 字节）。全仓库无 `BLANK_CHECK` 定义，修复即在 EOD 分支把 key 从 0 改为 0x08（mhVTL 的 `mkSenseBuf(BLANK_CHECK, E_END_OF_DATA, ...)` 即此语义）。
+**注释声明的行为（BLANK CHECK）与代码实现（NO SENSE）不一致**——这是本案最后一个、也是最隐蔽的一个 bug：openEuler 6.6 的 st 对 `NO SENSE 0/0/05` 不识别为 EOD，向上层返回 **-EIO**（现场实测：tar 报 "Cannot read: Input/output error"）。
+
+**源码级核实（2026-10-21，拉取 torvalds/linux v4.19 与 v6.6 的 drivers/scsi/st.c 逐行对比）**：
+
+1. 两个版本 `read_tape()` 的 sense 处理**完全相同**：`st_analyze_sense()` 从 sense byte2 取 FM/EOM/ILI 标志（`flags = sense[2] & 0xe0`），残余量只认 sense 信息字段（VALID 位 + bytes 3-6）；随后 `if (flags != 0)` 走 ILI/FMK/EOM 分支，**`else`（flags==0）一律 `retval = -EIO`**，唯一的例外是"BLANK_CHECK 且恰在文件标之后"（置 `ST_EOD_2`）。
+2. 因此 **`NO SENSE 0/0/05` 在 4.19 上同样返回 EIO**——代码注释中"Kylin 4.19 st 可识别"的说法**从来不成立**（当年 Kylin 测试应未读到 EOD，例如只读了已知字节数即停止）。st 是上游通用驱动，发行版无补丁，差异只可能来自内核版本，而此处 4.19/6.6 无差异。
+3. st 唯一能翻译成干净 EOF（read()=0）的磁带结束信号是：**sense byte2 的 EOM 标志位 + VALID 信息字段（残余量）** → 走 `SENSE_EOM` 分支，`buffer_bytes = bytes - uremainder = 0`。纯 `BLANK_CHECK/0/0/05`（无 EOM 位）在普通位置首次读取同样落 `-EIO` 分支。
+4. 真实磁带的行为（HP LTO Ultrium 5 技术手册卷 2）：READ 遇 EOD 返回 **sense key 8h（BLANK CHECK）、ASC/ASCQ 00/05**；EOT 类条件明确"**The EOM flag will be set**"并附残余量；st 源码中 `flags &= 0xcf; /* No need for EOM in this case */`（BLANK_CHECK 时清除 EOM）也证明 st 作者预期 BLANK_CHECK 常与 EOM 位同现。三者互证：**真实 LTO 在 EOD 时返回 BLANK_CHECK + EOM 位 + 有效残余量**。
+
+### 11.1a F1 修复配方（修正初版"仅改 key"的不足）
+
+`vtl_build_sense_buffer()` 目前只写 0x70/key/ASC/ASCQ，不带标志位与信息字段。EOD 分支应构造与真实 LTO 等价的 sense：
+
+| 字节 | 现值 | 应改为 | 含义 |
+|------|------|--------|------|
+| byte 0 | 0x70 | **0xF0** | VALID 位置 1（信息字段有效） |
+| byte 2 | key=0x00 | **0x48** | key=BLANK_CHECK(0x08) + **EOM 位(0x40)** |
+| bytes 3–6 | 0 | **剩余未传输字节数（BE）** | 一次 READ 请求长度（0 字节已传输） |
+| byte 12/13 | 0/5 | 0/5 | ASC/ASCQ 不变 |
+
+预期 st 行为（4.19/6.6 一致）：read() 返回 0（EOF），`eof=EOM_OK`；后续 read 重复同 sense、继续返回 0，tar/备份软件正常收尾。修复同时需更正 1113 行错误注释。
 
 ### 11.2 事故全貌（全部观测闭合）
 
@@ -304,7 +324,7 @@ vtl_set_sense(&drv->sense, 0, 0x00, 0x05);   /* ← key=0 (NO SENSE)，注释写
 
 | # | 级别 | 位置 | 修复 |
 |---|------|------|------|
-| **F1** | **高（本案主修复）** | `vtl_scsi.c:1115` | EOD sense key `0` → `BLANK_CHECK(0x08)`；同时更正 1113 行错误注释（"Kylin/openEuler st 均识别"与实测相反，openEuler 6.6 不识别 NO SENSE） |
+| **F1** | **高（本案主修复）** | `vtl_scsi.c:1115`、`vtl_build_sense_buffer()` | EOD sense 按 §11.1a 配方构造：BLANK_CHECK(0x08) + EOM 位 + VALID + 信息字段=未传输字节数；更正 1113 行错误注释 |
 | **R2** | **高（写中断根因）** | `userspace/src/robot_sync.rs`、`/dev/vtl` UNLOAD/LOAD 路径 | 卸载/装载前检查驱动器占用（用户态查 `/proc/*/fd`→`/dev/nst*`，内核态 ioctl 加"近期有 I/O 则 -EBUSY"闸门）；反向纠错默认降级为告警 |
 | W1 | 中 | `vtl_tape.c:1130-1137,1264-1270` | 透传 `kernel_write` 的 -ENOSPC，不再折叠为 -EIO |
 | R1 | 高 | `vtl_tape.c` load/unload/erase/locate/space | 读游标 `rec_read_idx/total` 在非读路径位置变更处统一复位 |
