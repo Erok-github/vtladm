@@ -2457,11 +2457,23 @@ int vtl_slave_configure(struct scsi_device *sdev)
      * Without this, st disables direct I/O ("alignment 4 B"). */
     blk_queue_dma_alignment(q, 511);
 
-    /* Diagnostic: dump the effective blk queue limits once per LUN.
-     * 2026-10-21 incident: st translated blk_rq_map_user failures into
-     * instant -EBUSY on writes >= 512KB with zero trace reaching this
-     * driver (no op=0x0a log line, no st KERN_ERR). st devices have no
-     * gendisk, so these limits are invisible in /sys — print them here.
+    /* 2026-10-21 incident, root cause: the effective max_hw_sectors came
+     * up 512 (256KB) on this distro 6.6 kernel even though the host
+     * template declares 4096 (2MiB) — the scsi-core/blk chain between
+     * template and queue clamps it (exact clamp site distro-specific,
+     * not yet pinned in the oe2403sp2 tree). st's blk_rq_map_user then
+     * rejected any single request above 256KB and st surfaced the
+     * -EINVAL as an instant "Device or resource busy" that never
+     * reached vtl.ko: measured boundary 256KB pass / 288KB fail, zero
+     * op=0x0a trace, zero st KERN_ERR, segs=2048 and seg_size=64K were
+     * never the binding limit. Raise the field explicitly: it exists
+     * unchanged across the 4.18-6.10 compat window, unlike the
+     * blk_queue_max_hw_sectors() setter that 6.10+ removed. */
+    q->limits.max_hw_sectors = 4096;  /* 2 MiB, matches template max_sectors */
+
+    /* Diagnostic: dump the effective blk queue limits once per LUN (after
+     * the raise above, so the log confirms the value actually in force).
+     * st devices have no gendisk, so these limits are invisible in /sys.
      * Fields used exist across the whole 4.18-6.10 compat window. */
     pr_info("VTL: LUN%u queue limits: hw_sectors=%llu segs=%u seg_size=%u dma_align=%#x\n",
         sdev->lun,

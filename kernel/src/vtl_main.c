@@ -189,14 +189,14 @@ static struct scsi_host_template vtl_sht = {
     .cmd_per_lun = 8,
     .can_queue = 32,
     /*
-     * 2026-10-21 incident: sg_tablesize=256 surfaced as intermittent
-     * "Device or resource busy" on st read/write — st maps any request
-     * allocation/map failure to -EBUSY, and the block layer needs one
-     * scatterlist entry per non-contiguous page. Transfers above ~256KB
-     * (empirical boundary: 512KB failed, 256KB passed) could exceed the
-     * effective segment budget once dd/hbuffer-style large records meet
-     * non-contiguous user pages. max_sectors (2MiB) bounds real requests
-     * to ~514 entries, so 2048 is pure headroom with no memory cost.
+     * 2026-10-21 incident, corrected attribution: the "Device or
+     * resource busy" on st writes >= 256KB was NOT a sg_tablesize
+     * problem. The queue's max_hw_sectors was clamped to 512 (256KB)
+     * by the distro 6.6 scsi-core chain despite this template's 4096;
+     * st maps blk_rq_map_user failures to -EBUSY before commands reach
+     * vtl.ko. Fix lives in vtl_slave_configure (direct limits field
+     * write, which 6.10+ removed setters for). 2048 segments stay as
+     * harmless headroom.
      */
     .sg_tablesize = 2048,
     .max_sectors = 4096,
