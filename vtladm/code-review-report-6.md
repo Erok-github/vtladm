@@ -205,7 +205,65 @@ ls -la /opt/vtladm/var/tapes/*.vtltape
 - **新增 W4（中危，待现场确认后定级）**：读路径将短记录零填充到 SCSI 缓冲区全长并虚报传输长度（三处）。若 sg_raw 实测证实，应改为按真实记录长度传输并设置 `scsi_set_resid`，由 initiator 按 SSC 变量块语义处理短块（SILI/residual），而不是替 st 做主。
 - **新增 W5（中危）**：`vtl_meta_write` 返回值在 erase（`vtl_scsi.c:1305-1306`）、flush（`vtl_tape.c:1170-1171、1275-1276`）等路径全部未检查——sidecar 静默过期正是"used 与真实文件撕裂"且无任何日志的直接原因。至少应 pr_warn。
 
-## 十、本轮审查的诚实边界
+## 十、现场数据定音（2026-10-21 dmesg / df / ls / sg_raw 全套记录）
+
+用户提供 `dmesg -T | tail -100`、`df -h`、`ls -la /opt/vtladm/var/tapes/`、`sg_raw READ(6)` 原始记录后，本次事故的根因可以**闭合**，且与第五节假设（磁盘满/撕裂）不同——**磁盘没有满，磁带数据没有撕裂，VTL 读写路径全程健康**。真正的元凶是用户空间同步守护进程与操作员/备份作业的竞态。
+
+### 10.1 记录中的硬事实
+
+1. **`df -h /opt/vtladm/var/tapes`：69G 总量、20G 可用（70%）——磁盘从未满**。W1（ENOSPC 误映射）不是本次事故触发点（仍是应修的潜伏缺陷）。
+2. **全部 5 块磁带镜像均为精确的 1073741824 字节（1GiB 预分配），且 .vtltape/.vtlmeta 硬链接数=2**（`mars/` 子目录与 `__offline__/` 各持一份引用）——按容量预分配的文件，"文件大小"不反映 used，第九节"used vs 文件大小"比对法对本部署不适用。
+3. **内核留有逐命令日志**（`vtl_scsi.c:2380-2383`，非 GOOD 即 pr_info）：09:32:18 ERASE → CC；**紧随其后的 st sense 打印：`Sense Key: Not Ready / Medium not present`**；09:32:19 WRITE → CC（同样 medium not present）；09:36:16/17 重复一次。——**用户两次 `mt erase` 全部失败（驱动器内无带），"erase 成功"是错觉**；mt 未把错误呈现给用户（或未被注意）。
+4. **09:32 之前驱动器 0 最后一次装载是 09:21:37，此后到 09:32:18 之间 dmesg 没有任何 `Moved medium` 记录**——驱动器从"有带"变成"空"没有经过 MOVE MEDIUM 路径。
+5. 09:44:32 **连续 11 条 READ CC**（与 tar 输出 "Cannot read" ×11 逐条对应，位置不前进）；09:45:01、09:53:12 各一条 READ CC。
+6. 10:23 sg_raw READ(6)：sense = **NO SENSE 0x00/0x05（End-of-data）**，32KB 全零——磁带在 10:23 时已在驱动器内、位置=数据尾（831MB 档案仍在带上，erase 从未执行成功）。
+7. dmesg 全段无一条 I/O error / fs error / `rec block header fixup failed` / `Short write on meta file`——内核写路径零报错。
+8. `vtl-robot-sync.timer`：**每 5 分钟**一次（`OnBootSec=2min, OnUnitActiveSec=5min`）；守护进程（`userspace/src/robot_sync.rs`）经 `/dev/vtl` ioctl 直接下发 `VTL_IOCTL_LOAD_TAPE / UNLOAD_TAPE / SLOT_PLACE / MOVE_MEDIUM`（`robot_sync.rs:313/336/354/531`）。**ioctl 卸载不经过 MOVE MEDIUM，不打 "Moved medium" 日志**——这正是事实 4 的解释。
+
+### 10.2 事故时间线（与全部观测自洽）
+
+| 时刻 | 事件 |
+|------|------|
+| 09:21:37 | 磁带装入驱动器 0（机械手面操作，伴随 .vtlfm 告警）；随后 tar 开始写档案 |
+| 09:21–09:32 | 写入 ~831MB，**全部 GOOD**（dmesg 无任何 WRITE CC）——数据完好落盘 |
+| ~09:32 | **robot-sync 5 分钟周期到点**：DB 认为该带应在槽位，下发 UNLOAD_TAPE ioctl，**把正在写入的磁带从驱动器里抽走（无日志）** |
+| 09:32:19 | tar 的下一条 WRITE 收到 `Medium not present` → **"写入 831MB 报错"** |
+| 09:32:18 / 09:36:16 | 用户两次 `mt erase`：驱动器已空 → CC（mt 未呈现错误）→ 用户误以为 erase 成功 |
+| ~09:41–09:44 前 | 下一轮 sync 按 DB 映射把磁带装回驱动器 0 |
+| 09:44:32 | tar -tvf 正在读档列举文件（故用户看到了大量文件清单）；**sync 再次到点抽带** → 随后 11 条 READ 全部 `Medium not present` → tar 报 EIO ×11 放弃。此前间歇出现的 "Skipping to next header" 是 tar 从非 BOT 位置/中断点重新同步的正常行为 |
+| 09:45 / 09:53 | 用户对空驱动器的两次读尝试 → CC |
+| 10:23 | 磁带已被装回，位置在数据尾 → sg_raw 读到 EOD sense、全零数据 |
+
+### 10.3 根因裁定
+
+**R2（本次事故根因，高危）：`vtl-robot-sync.timer`（5 分钟周期）在驱动器被占用时直接卸载/装载磁带。**
+
+- 同步守护进程的语义本是"kernel → DB 盘点回填"，但它同时做反向纠错（DB → kernel 强制执行槽位/驱动器映射，`robot_sync.rs:336/354`），且**没有任何"驱动器是否被占用"的检查**；
+- 卸载走私有 ioctl，绕过 MOVE MEDIUM 路径，**内核与用户都无日志可查**（`Moved medium` 与 web 审计均不覆盖），排障时完全隐形；
+- 5 分钟周期对"纠错"行为而言过于激进；操作员手工操作/备份作业的时间窗必然与其碰撞；
+- 与 10-13 的"web 仪表盘数据和库管理对不上"同源：DB 与内核双写真相，互为纠错源。
+
+**修复方向（按优先级）**：
+1. sync 守护进程下发 LOAD/UNLOAD 前必须检查驱动器占用：用户态可查 `/proc/*/fd` 指向 `/dev/nst*`、或经 ioctl 查询驱动器最近 I/O 时间，近期有活动则跳过本轮纠错（下次再试）；
+2. 内核 `VTL_IOCTL_UNLOAD_TAPE` 路径增加同等的"近期有 I/O 则 -EBUSY"闸门（与 `vtl_preflight_before_rmmod()` 同一思路）；
+3. 反向纠错（DB→kernel）默认改为只告警不执行；确需强制执行时走带审计日志的通道；
+4. 备份窗口内由部署脚本停掉 sync/align 定时器（install.sh 已具备停 timer 的能力，补一条文档/运维建议即可）。
+
+### 10.4 其他发现（独立于事故）
+
+- **S1（低）**：`vtl_scsi.c:2381` 每条非 GOOD 磁带命令 pr_info——错误风暴期刷 dmesg 且拖慢 I/O；应降为 `pr_debug` 或限流。
+- **S2（低）**：mars_Tape01 的 `.vtlfm` 含一条 offset=0 的文件标（`idx 0 off 0`），触发 `vtl_tape.c:646-652` 整组拒绝 + 每次装载告警。建议：校验时跳过/容忍单条 0 偏移（或落盘时过滤），且同一张带重复装载时告警限流。
+- **S3（观察）**：磁带镜像与 .vtlmeta 均为硬链接（link=2），`mars/` 与顶层目录各持一份——需确认 web 面/离线目录操作不会经第二条路径改写同一 inode（内容共享，O_TRUNC 会互相影响）。
+- **W4 降级为"未证实"**：skip 模式可由 10.2 的非 BOT 起点解释，不再作为疑似根因；是否保留零填充行为待 sg_raw 在数据区段直接验证（BOT 处 `sg_raw -v -r 32768 /dev/sg7 08 00 00 00 00 00`，若 10KB 记录返回 32KB 全填充则另议）。
+- **W1/W2/W3/R1/W5 维持原判**：静态确认的潜伏缺陷，与本次事故无关，仍应修复。
+
+### 10.5 用户侧即时处置
+
+1. 手工测试/备份窗口内停掉同步：`systemctl stop vtl-robot-sync.timer vtl-robot-align.timer`（测试完再 start）；
+2. 磁带数据未损坏：`mt rewind && tar -tvf /dev/st0`（注意用**回绕设备 /dev/st0** 而非 nst0）应能完整列出 831MB 档案；
+3. 以后 `mt erase` 后务必用 `mtx -f /dev/sg6 status` 或 dmesg 验证，不要以 mt 的静默返回为准。
+
+## 十一、本轮审查的诚实边界
 
 - EIO 归因（第九节主假设）已能解释全部观测，但"sidecar used > 文件大小"尚未经第九节命令对证实；sg_raw sense 数据可最终定音。
 - W1/R1/W2/W3 为静态确认的代码缺陷；W4/W5 的修复方案以待现场确认后定稿。
