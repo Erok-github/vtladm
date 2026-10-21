@@ -434,8 +434,11 @@ int vtl_tape_write_filemarks(struct vtl_drive *drive, int count);
 int vtl_tape_rewind(struct vtl_drive *drive);
 /* Flush buffered records to the medium.  When retain is true (write path)
  * a failed flush keeps the buffered records so the caller can retry; when
- * false (rewind/erase/unload) the buffer is dropped as before. */
-int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape, bool retain);
+ * false (rewind/erase/unload) the buffer is dropped as before.  force_sync
+ * overrides the fsync throttle for session boundaries (unload/rewind/
+ * filemark/move/evacuation). */
+int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape,
+          bool retain, bool force_sync);
 
 void vtl_changer_clear_media(struct vtl_changer *ch);
 void vtl_tapes_release_all(void);
