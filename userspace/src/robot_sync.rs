@@ -638,6 +638,16 @@ pub(crate) fn warn_kernel_sync_failed(op: &str, e: &io::Error) {
     log_error("robot_sync", &format!("{}: {}", op, e));
 }
 
+/// N4: true when the kernel refused an element mutation because the target
+/// drive saw SCSI activity within the R2 busy-gate window. The DB update is
+/// already committed at the call sites and is authoritative — the periodic
+/// sync re-applies it once the drive goes idle, so this is a *deferred*
+/// operation, not a failed one. Callers should say so instead of emitting
+/// the generic "kernel robot sync failed" warning.
+pub(crate) fn is_kernel_busy(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(libc::EBUSY)
+}
+
 /// One row for CLI/Web changer inventory (slot / drive / mailslot).
 #[derive(Debug, Clone)]
 pub struct ChangerRow {

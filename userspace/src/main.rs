@@ -4990,7 +4990,20 @@ fn load_tape(slot: i32, drive: i32) -> Result<(), VtlError> {
             &tape_name,
             barcode.as_deref(),
         ) {
-            robot_sync::warn_kernel_sync_failed("load", &e);
+            if robot_sync::is_kernel_busy(&e) {
+                // N4: R2 busy gate — deferred, not failed (DB is committed
+                // and authoritative; next sync round applies the move).
+                println!(
+                    "note: drive {} has recent I/O — load recorded in database and will be applied by the next robot sync round",
+                    drive
+                );
+                log_message(&format!(
+                    "kernel load deferred by busy gate (drive {}): {}",
+                    drive, e
+                ));
+            } else {
+                robot_sync::warn_kernel_sync_failed("load", &e);
+            }
         }
     }
     if robot_sync::robot_sync_enabled() {
@@ -5084,7 +5097,19 @@ fn unload_tape(drive: i32) -> Result<i32, VtlError> {
 
     if robot_sync::robot_ioctl_enabled() {
         if let Err(e) = robot_sync::kernel_unload(&conn, library_id, drive, target_slot) {
-            robot_sync::warn_kernel_sync_failed("unload", &e);
+            if robot_sync::is_kernel_busy(&e) {
+                // N4: R2 busy gate — deferred, not failed.
+                println!(
+                    "note: drive {} has recent I/O — unload recorded in database and will be applied by the next robot sync round",
+                    drive
+                );
+                log_message(&format!(
+                    "kernel unload deferred by busy gate (drive {}): {}",
+                    drive, e
+                ));
+            } else {
+                robot_sync::warn_kernel_sync_failed("unload", &e);
+            }
         }
     }
     if robot_sync::robot_sync_enabled() {
@@ -5165,7 +5190,18 @@ fn eject_tape(slot: i32) -> Result<i32, VtlError> {
     if robot_sync::robot_ioctl_enabled() {
         let dst = robot_sync::db_mailslot_to_element(mailslot);
         if let Err(e) = robot_sync::kernel_move_medium(&conn, library_id, slot, dst) {
-            robot_sync::warn_kernel_sync_failed("eject", &e);
+            if robot_sync::is_kernel_busy(&e) {
+                // N4: R2 busy gate — deferred, not failed.
+                println!(
+                    "note: changer has recent drive I/O — eject recorded in database and will be applied by the next robot sync round"
+                );
+                log_message(&format!(
+                    "kernel eject deferred by busy gate (slot {}): {}",
+                    slot, e
+                ));
+            } else {
+                robot_sync::warn_kernel_sync_failed("eject", &e);
+            }
         }
     }
     if robot_sync::robot_sync_enabled() {
