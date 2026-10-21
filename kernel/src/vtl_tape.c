@@ -1136,7 +1136,10 @@ int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape, bool retain)
             drv->rec_buf_used = 0;
             drv->rec_count = 0;
         }
-        return ret < 0 ? -EIO : -ENOSPC;
+        /* N3: preserve the errno like the data-area path (W1) — a full
+         * backing fs must surface as -ENOSPC -> VOLUME_OVERFLOW, not be
+         * folded into -EIO -> MEDIUM_ERROR. */
+        return ret < 0 ? ret : -ENOSPC;
     }
 
     pos = data_start;
@@ -1584,7 +1587,27 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
         saved_source_slot = src_drv->source_slot;
 	        src_drv->loaded_tape = NULL;
         src_drv->source_slot = -1;
-		vtl_rec_flush(src_drv, t, false);
+		/* N2: retain=true keeps staged records in rec_buf on failure so
+		 * the rollback below can put the tape back with its data intact;
+		 * the old unchecked/dropping flush let a full backing fs (or any
+		 * write error) silently discard initiator-confirmed writes while
+		 * the move reported success. */
+		{
+			int fr = vtl_rec_flush(src_drv, t, true);
+
+			if (fr < 0) {
+				pr_warn("VTL: move_medium: flush %s failed (%d) — move aborted, tape stays in drive\n",
+				    t->name, fr);
+				/* Drop the drive element reference BEFORE rollback, exactly
+				 * as the storage/IE extract branches do at extract time —
+				 * rollback's kref_get restores the element ref.  Without
+				 * this put the rollback would leave one extra reference. */
+				vtl_tape_put(t);
+				mutex_unlock(&src_drv->lock);
+				ret = fr;
+				goto rollback;
+			}
+		}
 			mutex_lock(&t->lock);
 /* Persist filemark metadata and EOD position when unloading from drive */
 		vtl_tape_save_metadata(t);
@@ -1707,6 +1730,10 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 	        dst_drv->at_filemark = false;
 	        dst_drv->at_end = false;
 	        dst_drv->at_bot = true;
+	        /* R1: drive load via MOVE MEDIUM must invalidate the VLBK read
+	         * cursor exactly like vtl_tape_load() — a stale cursor from a
+	         * previous tape on this drive would mis-parse the new medium. */
+	        vtl_read_cursor_reset(dst_drv);
 	        if (t->meta.block_size >= VTL_MIN_BLOCK_SIZE &&
 	            t->meta.block_size <= VTL_MAX_BLOCK_SIZE)
 	            dst_drv->block_size = t->meta.block_size;
@@ -1842,6 +1869,25 @@ int vtl_changer_remove_medium(struct vtl_changer *ch, int elem)
 	            goto out;
 	        }
 	        t = d->loaded_tape;
+	        /* N1: flush staged writes BEFORE vacating the drive.  This is
+	         * the silent path (no "Moved medium"/"Unloaded" log) that
+	         * auto-align/sync evacuation uses via ELEM_REMOVE — without
+	         * the flush, records the initiator saw GOOD for were dropped
+	         * with the drive state.  retain=false: the remove is aborted
+	         * on failure, so a retained buffer is not needed. */
+	        {
+	            int fr = vtl_rec_flush(d, t, false);
+
+	            if (fr < 0) {
+	                pr_warn("VTL: remove_medium: flush %s failed (%d) — remove aborted, tape stays in drive\n",
+	                    t->name, fr);
+	                mutex_unlock(&d->lock);
+	                ret = fr;
+	                goto out;
+	            }
+	        }
+	        /* R1: media leaving the drive invalidates the VLBK read cursor */
+	        vtl_read_cursor_reset(d);
 	        d->loaded_tape->loaded = false;
 
     /* Persist filemark metadata before unloading */
