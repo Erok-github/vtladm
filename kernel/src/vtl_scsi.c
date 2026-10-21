@@ -1338,6 +1338,9 @@ static int vtl_handle_erase(struct scsi_cmnd *cmd, struct vtl_drive *drv)
                tape->meta.meta_flags, tape->meta.used) < 0)
         pr_warn("VTL: ERASE failed to persist empty meta for %s\n",
             tape->name);
+    /* The sidecar was just written directly — the deferred sidecar write
+     * (meta_used_dirty) has nothing left to persist. */
+    tape->meta_used_dirty = false;
     drv->at_bot = true;
     drv->at_end = false;
     drv->at_filemark = false;
