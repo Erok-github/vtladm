@@ -216,6 +216,12 @@ struct vtl_tape {
     u32   filemark_capacity;
     bool  meta_dirty;
 
+    /* Large-capacity streaming: throttle data-image fsyncs. The meta
+     * sidecar is only persisted together with a data fsync so a crash
+     * never leaves "used" durable ahead of durable image bytes. */
+    unsigned long last_data_fsync; /* jiffies of last data-image fsync */
+    bool          meta_used_dirty; /* meta.used advanced, sidecar stale */
+
     struct mutex lock;
     struct kref ref;
 };

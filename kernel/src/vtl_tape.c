@@ -9,8 +9,23 @@
 #include <linux/limits.h>
 #include <linux/sort.h>
 #include <linux/vmalloc.h>
+#include <linux/jiffies.h>
+#include <linux/moduleparam.h>
 
-int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape, bool retain);
+/*
+ * Min interval between data-image fsyncs while streaming writes (ms).
+ * Large-capacity backups turn the per-64KB-block fsync into tens of
+ * thousands of sync I/Os; throttling bounds that to one fsync per
+ * interval while session boundaries (unload/rewind/filemark/move/erase)
+ * always sync. 0 restores the old fsync-every-block behavior.
+ */
+static uint fsync_interval_ms = 5000;
+module_param(fsync_interval_ms, uint, 0644);
+MODULE_PARM_DESC(fsync_interval_ms,
+    "min interval between data-image fsyncs during streaming writes, ms; 0 = fsync every block");
+
+int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape,
+          bool retain, bool force_sync);
 static struct vtl_tape *vtl_tapes[VTL_MAX_SLOTS];
 static DEFINE_MUTEX(vtl_tape_lock);
 
@@ -169,6 +184,36 @@ int vtl_meta_write(const char *tape_path, u8 density, u8 flags, u64 used)
 
     vfs_fsync(filp, 0);
     filp_close(filp, NULL);
+    return 0;
+}
+
+/*
+ * Fsync the data image, throttled to one sync per fsync_interval_ms for
+ * streaming writes unless force_sync (session boundary: unload, rewind,
+ * filemark, move/erase evacuation). The meta sidecar is persisted ONLY
+ * together with a successful data fsync: its "used" describes image
+ * bytes, so letting the sidecar get durable ahead of the image would
+ * resurrect unwritten space after a crash.
+ */
+static int vtl_tape_sync_data(struct vtl_tape *tape, bool force_sync)
+{
+    unsigned long interval = msecs_to_jiffies(fsync_interval_ms);
+    int ret;
+
+    if (!force_sync && interval &&
+        !time_after(jiffies, tape->last_data_fsync + interval))
+        return 0;
+
+    ret = vfs_fsync(tape->file, 0);
+    if (ret)
+        return ret;
+    tape->last_data_fsync = jiffies;
+
+    if (tape->meta_used_dirty) {
+        tape->meta_used_dirty = false;
+        return vtl_meta_write(tape->path, tape->meta.density,
+                      tape->meta.meta_flags, tape->meta.used);
+    }
     return 0;
 }
 
@@ -855,7 +900,9 @@ int vtl_tape_unload(struct vtl_drive *drv)
     strscpy(tape_name, tape->name, sizeof(tape_name));
     drive_id = drv->id;
 
-    vtl_rec_flush(drv, tape, false);
+    /* Session boundary: force the throttled fsync (and pending sidecar)
+     * before the media leaves the drive. */
+    vtl_rec_flush(drv, tape, false, true);
     if (drv->rec_buf) {
         vfree(drv->rec_buf);
         drv->rec_buf = NULL;
@@ -1108,7 +1155,8 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
     return 0;
 }
 
-int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape, bool retain)
+int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape,
+          bool retain, bool force_sync)
 {
     u8 hdr[VTL_REC_HEADER_SIZE];
     loff_t pos, data_start;
@@ -1188,11 +1236,10 @@ int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape, bool retain)
     tape->position = data_start + (loff_t)complete;
     if (tape->position > tape->meta.used) {
         tape->meta.used = tape->position;
-        /* W5: a silently stale sidecar desyncs used from the image on the
-         * next open — surface the failure instead of swallowing it. */
-        if (vtl_meta_write(tape->path, tape->meta.density,
-                   tape->meta.meta_flags, tape->meta.used) < 0)
-            pr_warn("VTL: failed to persist meta for %s\n", tape->name);
+        /* The sidecar is persisted only together with a data fsync
+         * (vtl_tape_sync_data), so a crash never leaves "used" durable
+         * ahead of durable image bytes. */
+        tape->meta_used_dirty = true;
     }
     tape->meta.log_bytes_written += (u64)complete;
 
@@ -1204,13 +1251,16 @@ int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape, bool retain)
         drv->rec_buf_used = saved_used - complete;
         drv->rec_count -= nfull;
         drv->rec_block_start = data_start + (loff_t)complete;
-        vfs_fsync(tape->file, 0);
+        /* Terminal error: force the sync (and the pending sidecar). */
+        if (vtl_tape_sync_data(tape, true) < 0)
+            pr_warn("VTL: failed to sync %s\n", tape->name);
         return -ENOSPC;
     }
 
     drv->rec_buf_used = 0;
     drv->rec_count = 0;
-    vfs_fsync(tape->file, 0);
+    if (vtl_tape_sync_data(tape, force_sync) < 0)
+        pr_warn("VTL: failed to sync %s\n", tape->name);
     return 0;
 }
 
@@ -1266,10 +1316,11 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
         drv->rec_count = 0;
     }
 
-    /* Flush if this record won't fit */
+    /* Flush if this record won't fit; hot streaming path — fsync stays
+     * throttled (session boundaries force it). */
     if (drv->rec_buf_used > 0 &&
         drv->rec_buf_used + 4 + to_write > VTL_REC_BUF_SIZE) {
-        ret = vtl_rec_flush(drv, tape, true);
+        ret = vtl_rec_flush(drv, tape, true, false);
         if (ret < 0)
             goto out;
     }
@@ -1300,11 +1351,12 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
             tape->position = pos;
             if (pos > tape->meta.used) {
                 tape->meta.used = pos;
-                if (vtl_meta_write(tape->path, tape->meta.density,
-                           tape->meta.meta_flags, tape->meta.used) < 0)
-                    pr_warn("VTL: failed to persist meta for %s\n",
-                        tape->name);
+                /* Sidecar goes out with the next throttled/forced
+                 * data fsync (vtl_tape_sync_data), never ahead of it. */
+                tape->meta_used_dirty = true;
             }
+            if (vtl_tape_sync_data(tape, false) < 0)
+                pr_warn("VTL: failed to sync %s\n", tape->name);
             tape->meta.log_bytes_written += (u64)to_write;
             /* W2: report the clamped length, not the request length */
             if (actual) *actual = to_write;
@@ -1481,7 +1533,9 @@ int vtl_tape_write_filemarks(struct vtl_drive *drv, int count)
     }
 
     mutex_lock(&tape->lock);
-    ret = vtl_rec_flush(drv, tape, true);
+    /* A filemark is a session boundary: force the fsync so the filemark
+     * offset lands on durable bytes. */
+    ret = vtl_rec_flush(drv, tape, true, true);
     if (ret < 0) {
         mutex_unlock(&tape->lock);
         mutex_unlock(&drv->lock);
@@ -1515,7 +1569,8 @@ int vtl_tape_rewind(struct vtl_drive *drv)
     }
 
     mutex_lock(&tape->lock);
-    vtl_rec_flush(drv, tape, false);
+    /* Session boundary: land all staged bytes durably before rewind. */
+    vtl_rec_flush(drv, tape, false, true);
     tape->position = 0;
     /*
      * SSC semantics: REWIND does not erase filemarks on the medium — it
@@ -1593,7 +1648,8 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 		 * write error) silently discard initiator-confirmed writes while
 		 * the move reported success. */
 		{
-			int fr = vtl_rec_flush(src_drv, t, true);
+			/* Media leaves the drive on success: force the fsync. */
+			int fr = vtl_rec_flush(src_drv, t, true, true);
 
 			if (fr < 0) {
 				pr_warn("VTL: move_medium: flush %s failed (%d) — move aborted, tape stays in drive\n",
@@ -1876,7 +1932,8 @@ int vtl_changer_remove_medium(struct vtl_changer *ch, int elem)
 	         * with the drive state.  retain=false: the remove is aborted
 	         * on failure, so a retained buffer is not needed. */
 	        {
-	            int fr = vtl_rec_flush(d, t, false);
+	            /* Media leaves the drive: force the fsync. */
+	            int fr = vtl_rec_flush(d, t, false, true);
 
 	            if (fr < 0) {
 	                pr_warn("VTL: remove_medium: flush %s failed (%d) — remove aborted, tape stays in drive\n",
