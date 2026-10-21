@@ -550,10 +550,26 @@ pub(crate) fn kernel_elem_remove(
 }
 
 /// Best-effort: `ELEM_REMOVE` on new kernels; empty mailslot park on older `vtl.ko`.
+///
+/// R2: the kernel refuses to pull a medium out of a drive that saw SCSI
+/// traffic within the busy-gate window (-EBUSY).  That is not an error for
+/// the sync loop — the tape stays in the (legitimately busy) drive and the
+/// next 5-minute round retries once the drive goes idle.  Log and skip
+/// instead of surfacing a hard failure.
 fn evacuate_element(conn: &Connection, library_id: i64, element: i32) -> io::Result<()> {
     match kernel_elem_remove(conn, library_id, element) {
         Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::ENODEV) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(libc::EBUSY) => {
+            log_error(
+                "robot_sync",
+                &format!(
+                    "elem {}: drive busy (SCSI activity within gate window) — skipping this round",
+                    element
+                ),
+            );
+            Ok(())
+        }
         Err(e)
             if e.raw_os_error() == Some(libc::ENOTTY) || e.raw_os_error() == Some(libc::EINVAL) =>
         {

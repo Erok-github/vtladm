@@ -136,6 +136,9 @@ void vtl_build_sense_buffer(struct scsi_cmnd *cmd, struct vtl_sense_data *sense)
 #ifndef VOLUME_OVERFLOW
 #define VOLUME_OVERFLOW 0x0d
 #endif
+#ifndef BLANK_CHECK
+#define BLANK_CHECK 0x08
+#endif
 /* SPC fixed-format sense byte 2 bit 7: FILEMARK.  SSC expects a read that
  * stops at a filemark to return CHECK CONDITION with NO SENSE (0/0) and
  * this bit set — st uses it to advance its file counter. */
@@ -1108,12 +1111,29 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
             vtl_xfer_buf_free(buffer);
             return SAM_STAT_CHECK_CONDITION;
         }
-        /* End of data: SSC tape targets signal EOD via CHECK CONDITION
-         * with BLANK CHECK (0x00/0x00/0x05), not via GOOD+residual.
-         * Both Kylin 4.19 SILI=0 and openEuler 6.6 st drivers recognise
-         * this as end-of-recorded-data and stop reading. */
-        vtl_set_sense(&drv->sense, 0, 0x00, 0x05);
+        /* End of data (F1). Verified against drivers/scsi/st.c (v4.19 and
+         * v6.6 are identical here) and HP LTO drive manuals: a bare
+         * NO SENSE 0/0/05 lands in st's "unknown sense -> -EIO" branch,
+         * and even a bare BLANK CHECK does, unless it follows a filemark.
+         * st only translates end-of-data into a clean read()==0 EOF when
+         * the sense carries the EOM flag together with a VALID information
+         * field holding the residual (bytes not transferred) — which is
+         * exactly what real LTO drives emit at EOD:
+         *   byte0 |= VALID, key = BLANK_CHECK, byte2 |= EOM, info = residual.
+         * Older comment claiming 4.19/6.6 st both accept NO SENSE 0/0/05
+         * was wrong on both versions (tested on openEuler 6.6: tar got
+         * "Cannot read: Input/output error" for every EOD hit). */
+        vtl_set_sense(&drv->sense, BLANK_CHECK, 0x00, 0x05);
         vtl_build_sense_buffer(cmd, &drv->sense);
+        {
+            u32 resid = blocks * block_len; /* 0 bytes transferred */
+            cmd->sense_buffer[0] |= 0x80;   /* VALID: info field meaningful */
+            cmd->sense_buffer[2] |= 0x40;   /* EOM: end-of-medium condition */
+            cmd->sense_buffer[3] = (resid >> 24) & 0xff;
+            cmd->sense_buffer[4] = (resid >> 16) & 0xff;
+            cmd->sense_buffer[5] = (resid >> 8) & 0xff;
+            cmd->sense_buffer[6] = resid & 0xff;
+        }
         vtl_xfer_buf_free(buffer);
         return SAM_STAT_CHECK_CONDITION;
     }
@@ -1202,6 +1222,10 @@ static int vtl_handle_locate(struct scsi_cmnd *cmd, struct vtl_drive *drv)
         return SAM_STAT_CHECK_CONDITION;
     }
     mutex_lock(&tape->lock);
+
+    /* R1: LOCATE repositions the medium — VLBK read cursor is void.
+     * (Also covers the partition-change no-op path: harmless.) */
+    vtl_read_cursor_reset(drv);
 
     bt = (cdb[1] >> 1) & 1;
     cp = cdb[1] & 1;
@@ -1299,14 +1323,26 @@ static int vtl_handle_erase(struct scsi_cmnd *cmd, struct vtl_drive *drv)
     /* Short/long erase: reset data boundary.
      * LONG bit (cdb[1] & 0x20) for thorough erase — same outcome in VTL. */
     mutex_lock(&tape->lock);
-    vtl_rec_flush(drv, tape, false);
+    /* W3: drop staged records without flushing them to the image first —
+     * ERASE discards all data, so writing the staged block out and then
+     * resetting the boundary is wasted I/O (and fails on a full backing
+     * fs, with the error invisible). */
+    drv->rec_buf_used = 0;
+    drv->rec_count = 0;
     tape->position = 0;
     tape->meta.used = 0;
-    vtl_meta_write(tape->path, tape->meta.density,
-               tape->meta.meta_flags, tape->meta.used);
+    /* W5: a failed persist here leaves the sidecar claiming stale data —
+     * the next open would resurrect "used" and reads would walk into
+     * unwritten space. Warn loudly. */
+    if (vtl_meta_write(tape->path, tape->meta.density,
+               tape->meta.meta_flags, tape->meta.used) < 0)
+        pr_warn("VTL: ERASE failed to persist empty meta for %s\n",
+            tape->name);
     drv->at_bot = true;
     drv->at_end = false;
     drv->at_filemark = false;
+    /* R1: media content changed — VLBK read cursor is void */
+    vtl_read_cursor_reset(drv);
     /* Clear filemarks */
     vtl_tape_free_metadata(tape);
     /*
@@ -2249,6 +2285,10 @@ static int vtl_tape_scsi(struct scsi_cmnd *cmd, struct vtl_host *vhost,
 
     drv = &ch->drives[drive_idx];
 
+    /* R2 anti-yank gate input: any command means the drive has an active
+     * session — element-mutation ioctls stay away for the busy window. */
+    WRITE_ONCE(drv->last_cmd_jiffies, jiffies);
+
     switch (cdb[0]) {
     case INQUIRY:
         return vtl_handle_inquiry(cmd, vhost);
@@ -2378,7 +2418,11 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
     } else {
         result = vtl_tape_scsi(cmd, vhost, lun - 1, cdb);
         if (result != SAM_STAT_GOOD) {
-            pr_info("VTL: tape LUN%u op=0x%02x result=0x%x\n",
+            /* S1: an error storm (e.g. an initiator polling a faulted
+             * condition) would pr_info on every command and jitter the
+             * data path — ratelimit, don't remove (this log was the key
+             * diagnostic in the 2026-10-21 incident). */
+            pr_info_ratelimited("VTL: tape LUN%u op=0x%02x result=0x%x\n",
                 lun, cdb[0], result);
         }
     }

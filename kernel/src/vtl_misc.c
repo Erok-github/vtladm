@@ -2,6 +2,7 @@
 
 #include <linux/capability.h>
 #include <linux/ioctl.h>
+#include <linux/jiffies.h>
 #include <linux/miscdevice.h>
 #include <linux/uaccess.h>
 
@@ -167,6 +168,41 @@ static long vtl_ioctl_create_tape(void __user *uarg)
 			       create_req.density, create_req.flags);
 }
 
+/* R2: refuse element mutations on a drive that served any SCSI command
+ * within VTL_DRIVE_BUSY_GATE_SECS. The periodic reconcile daemons
+ * (vtl-robot-sync/align) and the web UI reach the changer through these
+ * ioctls; without the gate they could unload/remove media from under an
+ * active backup or operator session — the 2026-10-21 incident: auto-align
+ * "orphan evacuation" ELEM_REMOVE'd the tape mid-write via the silent
+ * vtl_changer_remove_medium path. The SCSI MOVE MEDIUM CDB path (mtx,
+ * backup software) is deliberately NOT gated: it is the operator's own
+ * action and happens at their own risk. Heuristic — jiffies are sampled
+ * lockless; a stale "busy" only delays reconcile by one round. */
+static bool vtl_drive_busy_gate(const struct vtl_changer *ch, int drive_idx)
+{
+	const struct vtl_drive *drv;
+
+	if (!ch || drive_idx < 0 || drive_idx >= ch->num_drives)
+		return false;
+	drv = &ch->drives[drive_idx];
+	return READ_ONCE(drv->last_cmd_jiffies) != 0 &&
+	       time_before(jiffies, READ_ONCE(drv->last_cmd_jiffies) +
+				 (unsigned long)VTL_DRIVE_BUSY_GATE_SECS * HZ);
+}
+
+/* True if either element endpoint is a recently-active drive. */
+static bool vtl_move_endpoints_busy(const struct vtl_changer *ch,
+				    int src, int dst)
+{
+	if (vtl_elem_is_drive(ch, src) &&
+	    vtl_drive_busy_gate(ch, src - vtl_elem_drive_base(ch)))
+		return true;
+	if (vtl_elem_is_drive(ch, dst) &&
+	    vtl_drive_busy_gate(ch, dst - vtl_elem_drive_base(ch)))
+		return true;
+	return false;
+}
+
 static long vtl_ioctl_load_tape(void __user *uarg)
 {
 	struct vtl_load_req load_req;
@@ -183,6 +219,10 @@ static long vtl_ioctl_load_tape(void __user *uarg)
 	ch = vtl_changer_get_instance(load_req.instance, &vhost);
 	if (!ch)
 		return -ENODEV;
+	if (vtl_drive_busy_gate(ch, load_req.drive)) {
+		vtl_changer_put_instance(vhost);
+		return -EBUSY;
+	}
 	ret = vtl_changer_load_slot_to_drive(ch, load_req.slot, load_req.drive,
 					      load_req.tape_name, load_req.barcode);
 	vtl_changer_put_instance(vhost);
@@ -206,6 +246,10 @@ static long vtl_ioctl_unload_tape(void __user *uarg)
 	if (unload_req.slot < 0) {
 		vtl_changer_put_instance(vhost);
 		return -EINVAL;
+	}
+	if (vtl_drive_busy_gate(ch, unload_req.drive)) {
+		vtl_changer_put_instance(vhost);
+		return -EBUSY;
 	}
 	ret = vtl_changer_unload_drive_to_slot(ch, unload_req.drive,
 						unload_req.slot);
@@ -260,6 +304,10 @@ static long vtl_ioctl_move_medium(void __user *uarg)
 	ch = vtl_changer_get_instance(move_req.instance, &vhost);
 	if (!ch)
 		return -ENODEV;
+	if (vtl_move_endpoints_busy(ch, move_req.src, move_req.dst)) {
+		vtl_changer_put_instance(vhost);
+		return -EBUSY;
+	}
 	ret = vtl_changer_move_medium(ch, move_req.src, move_req.dst);
 	vtl_changer_put_instance(vhost);
 	return ret;
@@ -279,6 +327,16 @@ static long vtl_ioctl_elem_remove(void __user *uarg)
 	ch = vtl_changer_get_instance(remove_req.instance, &vhost);
 	if (!ch)
 		return -ENODEV;
+	/* R2: ELEM_REMOVE on a drive element goes through
+	 * vtl_changer_remove_medium — the silent path (no "Moved medium" /
+	 * "Unloaded" log) that emptied drive 0 mid-write in the 2026-10-21
+	 * incident. Gate it like the other drive-vacating ioctls. */
+	if (vtl_elem_is_drive(ch, remove_req.element) &&
+	    vtl_drive_busy_gate(ch,
+			remove_req.element - vtl_elem_drive_base(ch))) {
+		vtl_changer_put_instance(vhost);
+		return -EBUSY;
+	}
 	ret = vtl_changer_remove_medium(ch, remove_req.element);
 	vtl_changer_put_instance(vhost);
 	return ret;

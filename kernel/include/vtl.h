@@ -253,10 +253,31 @@ struct vtl_drive {
     u16  rec_read_total; /* total records in current block */
     loff_t rec_block_start; /* file offset where current block data begins */
 
+    /* R2 anti-yank gate: jiffies of the last SCSI command this drive served.
+     * Element-mutation ioctls (load/unload/move/remove) refuse to touch a
+     * drive with recent I/O so periodic reconcile daemons cannot pull media
+     * out from under an active backup/operator session. Heuristic only —
+     * read lockless. */
+    unsigned long last_cmd_jiffies;
+
     struct vtl_sense_data sense;
     struct mutex lock;
     struct work_struct work;
 };
+
+/* R2: a drive that served any SCSI command within this window is considered
+ * in use; element-mutation ioctls targeting it return -EBUSY. */
+#define VTL_DRIVE_BUSY_GATE_SECS 120
+
+/* R1: the multi-record read cursor (rec_read_idx/rec_read_total) is only
+ * meaningful while consuming one VLBK block. Any position change or media
+ * change outside the read path must reset it, or the next read on this
+ * drive mis-parses the new position through stale block state. */
+static inline void vtl_read_cursor_reset(struct vtl_drive *drv)
+{
+    drv->rec_read_idx = 0;
+    drv->rec_read_total = 0;
+}
 
 #define VTL_EARLY_WARN_MARGIN (512ULL * 1024 * 1024)  /* 512 MiB */
 

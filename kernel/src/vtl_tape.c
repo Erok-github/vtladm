@@ -643,8 +643,16 @@ int vtl_tape_load_metadata(struct vtl_tape *tape, bool *out_loaded)
         u64 prev = 0;
 
         for (i = 0; i < n; i++) {
+            /* S2: tolerate bogus zero offsets in-place instead of rejecting
+             * the whole sidecar.  Older builds (and interrupted saves) could
+             * leave stale zeros interleaved with real offsets; each zero
+             * simply means "no filemark recorded at this slot", so skip it
+             * without advancing prev (zeros must not weaken the strictly-
+             * increasing check for the real offsets). */
+            if (arr[i] == 0)
+                continue;
             if (arr[i] <= prev || arr[i] > tape->meta.used) {
-                pr_warn("VTL: %s filemark sidecar offsets invalid (idx %u off %llu EOD %llu) — ignoring\n",
+                pr_warn_ratelimited("VTL: %s filemark sidecar offsets invalid (idx %u off %llu EOD %llu) — ignoring\n",
                     tape->name, i,
                     (unsigned long long)arr[i],
                     (unsigned long long)tape->meta.used);
@@ -794,6 +802,8 @@ int vtl_tape_load(struct vtl_drive *drv, struct vtl_tape *tape)
     drv->at_bot = true;
     drv->at_end = false;
     drv->at_filemark = false;
+    /* R1: any tape change invalidates the VLBK read cursor */
+    vtl_read_cursor_reset(drv);
     if (tape->meta.block_size >= VTL_MIN_BLOCK_SIZE &&
         tape->meta.block_size <= VTL_MAX_BLOCK_SIZE)
         drv->block_size = tape->meta.block_size;
@@ -852,6 +862,8 @@ int vtl_tape_unload(struct vtl_drive *drv)
         drv->rec_buf_used = 0;
         drv->rec_count = 0;
     }
+    /* R1: media leaving the drive invalidates the VLBK read cursor */
+    vtl_read_cursor_reset(drv);
 
     drv->loaded_tape = NULL;
     tape->loaded = false;
@@ -859,8 +871,9 @@ int vtl_tape_unload(struct vtl_drive *drv)
     /* Persist filemark metadata and EOD position before unloading */
     if (vtl_tape_save_metadata(tape) < 0)
         pr_warn("VTL: failed to save metadata for %s\n", tape->name);
-    vtl_meta_write(tape->path, tape->meta.density,
-               tape->meta.meta_flags, tape->meta.used);
+    if (vtl_meta_write(tape->path, tape->meta.density,
+               tape->meta.meta_flags, tape->meta.used) < 0)
+        pr_warn("VTL: failed to persist meta for %s\n", tape->name);
 
     mutex_unlock(&tape->lock);
     mutex_unlock(&drv->lock);
@@ -1129,11 +1142,16 @@ int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape, bool retain)
     pos = data_start;
     ret = kernel_write(tape->file, drv->rec_buf, saved_used, &pos);
     if (ret < 0) {
+        /* W1: preserve the errno (e.g. -ENOSPC from a full backing
+         * filesystem). Folding it into -EIO made the SCSI layer report
+         * MEDIUM ERROR, hiding "disk full" from the backup software;
+         * the -ENOSPC -> VOLUME_OVERFLOW mapping in vtl_handle_write
+         * only works if the errno survives. */
         if (!retain) {
             drv->rec_buf_used = 0;
             drv->rec_count = 0;
         }
-        return -EIO;
+        return ret;
     }
 
     complete = saved_used;
@@ -1167,8 +1185,11 @@ int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape, bool retain)
     tape->position = data_start + (loff_t)complete;
     if (tape->position > tape->meta.used) {
         tape->meta.used = tape->position;
-        vtl_meta_write(tape->path, tape->meta.density,
-                   tape->meta.meta_flags, tape->meta.used);
+        /* W5: a silently stale sidecar desyncs used from the image on the
+         * next open — surface the failure instead of swallowing it. */
+        if (vtl_meta_write(tape->path, tape->meta.density,
+                   tape->meta.meta_flags, tape->meta.used) < 0)
+            pr_warn("VTL: failed to persist meta for %s\n", tape->name);
     }
     tape->meta.log_bytes_written += (u64)complete;
 
@@ -1214,6 +1235,9 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
         tape->meta.used = 0;
         tape->meta_dirty = true;
     }
+    /* R1: a write overwrites from the current position — stale read
+     * cursor state must not survive into the next read. */
+    vtl_read_cursor_reset(drv);
 
     if (actual)
         *actual = 0;
@@ -1264,19 +1288,23 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
         ret = kernel_write(tape->file, shdr, sizeof(shdr), &pos);
         if (ret == (ssize_t)sizeof(shdr))
             ret = kernel_write(tape->file, buffer, to_write, &pos);
-        if (ret < 0)
-            ret = -EIO;
-        else if (ret != (ssize_t)to_write)
+        if (ret < 0) {
+            /* W1: keep kernel_write's errno (e.g. -ENOSPC) for the
+             * VOLUME_OVERFLOW mapping in vtl_handle_write. */
+        } else if (ret != (ssize_t)to_write) {
             ret = -ENOSPC;
-        else {
+        } else {
             tape->position = pos;
             if (pos > tape->meta.used) {
                 tape->meta.used = pos;
-                vtl_meta_write(tape->path, tape->meta.density,
-                           tape->meta.meta_flags, tape->meta.used);
+                if (vtl_meta_write(tape->path, tape->meta.density,
+                           tape->meta.meta_flags, tape->meta.used) < 0)
+                    pr_warn("VTL: failed to persist meta for %s\n",
+                        tape->name);
             }
             tape->meta.log_bytes_written += (u64)to_write;
-            if (actual) *actual = len;
+            /* W2: report the clamped length, not the request length */
+            if (actual) *actual = to_write;
             drv->at_bot = false;
             drv->at_end = (tape->position >= tape->meta.capacity);
             drv->at_filemark = false;
@@ -1298,7 +1326,8 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
     drv->rec_count++;
     tape->position += (loff_t)to_write;
 
-    if (actual) *actual = len;
+    /* W2: report the clamped length, not the request length */
+    if (actual) *actual = to_write;
     drv->at_bot = false;
     drv->at_end = (tape->position >= tape->meta.capacity);
     drv->at_filemark = false;
@@ -1327,6 +1356,9 @@ int vtl_tape_space(struct vtl_drive *drv, int code, int count)
     }
 
     mutex_lock(&tape->lock);
+
+    /* R1: SPACE moves the position — any in-block read state is void */
+    vtl_read_cursor_reset(drv);
 
     switch (code) {
     case 0:
@@ -1556,8 +1588,9 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 			mutex_lock(&t->lock);
 /* Persist filemark metadata and EOD position when unloading from drive */
 		vtl_tape_save_metadata(t);
-		vtl_meta_write(t->path, t->meta.density,
-		           t->meta.meta_flags, t->meta.used);
+		if (vtl_meta_write(t->path, t->meta.density,
+		           t->meta.meta_flags, t->meta.used) < 0)
+			pr_warn("VTL: failed to persist meta for %s\n", t->name);
 	        			t->loaded = false;
 			mutex_unlock(&t->lock);
 	        src_drv->at_filemark = false;
@@ -1814,8 +1847,9 @@ int vtl_changer_remove_medium(struct vtl_changer *ch, int elem)
     /* Persist filemark metadata before unloading */
     if (vtl_tape_save_metadata(t) < 0)
         pr_warn("VTL: failed to save metadata for %s\n", t->name);
-    vtl_meta_write(t->path, t->meta.density,
-               t->meta.meta_flags, t->meta.used);
+    if (vtl_meta_write(t->path, t->meta.density,
+               t->meta.meta_flags, t->meta.used) < 0)
+        pr_warn("VTL: failed to persist meta for %s\n", t->name);
 	        d->loaded_tape = NULL;
 	        d->at_filemark = false;
 	        d->at_end = false;
