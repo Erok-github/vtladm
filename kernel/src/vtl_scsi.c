@@ -2451,9 +2451,24 @@ void vtl_slave_destroy(struct scsi_device *sdev)
 
 int vtl_slave_configure(struct scsi_device *sdev)
 {
+    struct request_queue *q = sdev->request_queue;
+
     /* 512-byte DMA alignment: enables st driver direct I/O (try_direct_io=1).
      * Without this, st disables direct I/O ("alignment 4 B"). */
-    blk_queue_dma_alignment(sdev->request_queue, 511);
+    blk_queue_dma_alignment(q, 511);
+
+    /* Diagnostic: dump the effective blk queue limits once per LUN.
+     * 2026-10-21 incident: st translated blk_rq_map_user failures into
+     * instant -EBUSY on writes >= 512KB with zero trace reaching this
+     * driver (no op=0x0a log line, no st KERN_ERR). st devices have no
+     * gendisk, so these limits are invisible in /sys — print them here.
+     * Fields used exist across the whole 4.18-6.10 compat window. */
+    pr_info("VTL: LUN%u queue limits: hw_sectors=%u segs=%u seg_size=%u dma_align=%#lx\n",
+        sdev->lun,
+        q->limits.max_hw_sectors,
+        q->limits.max_segments,
+        q->limits.max_segment_size,
+        queue_dma_alignment(q));
     return 0;
 }
 
