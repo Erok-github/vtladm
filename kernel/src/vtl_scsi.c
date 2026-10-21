@@ -2463,12 +2463,12 @@ int vtl_slave_configure(struct scsi_device *sdev)
      * driver (no op=0x0a log line, no st KERN_ERR). st devices have no
      * gendisk, so these limits are invisible in /sys — print them here.
      * Fields used exist across the whole 4.18-6.10 compat window. */
-    pr_info("VTL: LUN%u queue limits: hw_sectors=%u segs=%u seg_size=%u dma_align=%#lx\n",
+    pr_info("VTL: LUN%u queue limits: hw_sectors=%llu segs=%u seg_size=%u dma_align=%#x\n",
         sdev->lun,
-        q->limits.max_hw_sectors,
-        q->limits.max_segments,
-        q->limits.max_segment_size,
-        queue_dma_alignment(q));
+        (unsigned long long)q->limits.max_hw_sectors,
+        (unsigned int)q->limits.max_segments,
+        (unsigned int)q->limits.max_segment_size,
+        (unsigned int)queue_dma_alignment(q));
     return 0;
 }
 
