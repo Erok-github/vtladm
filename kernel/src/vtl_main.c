@@ -188,10 +188,20 @@ static struct scsi_host_template vtl_sht = {
     .eh_host_reset_handler = vtl_eh_host_reset,
     .cmd_per_lun = 8,
     .can_queue = 32,
-    .sg_tablesize = 256,
+    /*
+     * 2026-10-21 incident: sg_tablesize=256 surfaced as intermittent
+     * "Device or resource busy" on st read/write — st maps any request
+     * allocation/map failure to -EBUSY, and the block layer needs one
+     * scatterlist entry per non-contiguous page. Transfers above ~256KB
+     * (empirical boundary: 512KB failed, 256KB passed) could exceed the
+     * effective segment budget once dd/hbuffer-style large records meet
+     * non-contiguous user pages. max_sectors (2MiB) bounds real requests
+     * to ~514 entries, so 2048 is pure headroom with no memory cost.
+     */
+    .sg_tablesize = 2048,
     .max_sectors = 4096,
     .this_id = -1,
-    .sg_prot_tablesize = 256,
+    .sg_prot_tablesize = 2048,
     .emulated = 1,
 };
 
