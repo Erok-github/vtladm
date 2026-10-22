@@ -1138,12 +1138,26 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         return SAM_STAT_CHECK_CONDITION;
     }
 
-    /* Kylin 4.19 st sends SILI=0 in variable-block mode, ignoring SCSI
-     * residual and padding short blocks with stale buffer data. Zero-pad
-     * the block ourselves so the returned data matches exact file size. */
+    /* Kylin 4.19 st sends SILI=0 in variable-block mode, so keep
+     * zero-padding the payload tail — but ALSO report the true residual.
+     * The old code padded and then claimed the full request size with no
+     * residual, so initiators saw each short record as data+zeros:
+     * bs=256k readback of 64KB records differed at byte 65537, and 8KB
+     * pump-chunk tapes at byte 8193 (2026-10-22, image-on-disk verified
+     * innocent). resid must be set AFTER copy_to_sg, which also sets
+     * resid when the sg list itself truncates the copy. */
     if (actual < blocks * block_len) {
-        memset(buffer + actual, 0, blocks * block_len - actual);
-        actual = blocks * block_len;
+        u32 req_len = blocks * block_len;
+        u32 real = actual;
+
+        memset(buffer + real, 0, req_len - real);
+        if (vtl_scsi_copy_to_sg(cmd, buffer, req_len, &drv->sense)) {
+            vtl_xfer_buf_free(buffer);
+            return SAM_STAT_CHECK_CONDITION;
+        }
+        scsi_set_resid(cmd, req_len - real);
+        vtl_xfer_buf_free(buffer);
+        return SAM_STAT_GOOD;
     }
     if (vtl_scsi_copy_to_sg(cmd, buffer, actual, &drv->sense)) {
         vtl_xfer_buf_free(buffer);
