@@ -97,7 +97,15 @@ static inline void vtl_put_be64(u64 v, u8 *p)
 #define VTL_INST_SPEC_MAX 384
 
 #define VTL_MIN_BLOCK_SIZE 512
-#define VTL_MAX_BLOCK_SIZE (1024 * 1024)
+/* 8 MiB single-command READ/WRITE ceiling (mode-page advertised, SET BLOCK
+ * SIZE validated, rw_prepare_xfer enforced — one macro drives all three).
+ * Raised from 1 MiB on 2026-10-22: the 1 MiB wall made every read request
+ * above 1 MiB fail outright (field issue #3, "bs=2M/4M return 0 bytes")
+ * although real LTO drives in variable-block mode accept far larger
+ * transfers and our staging layer (VTL_XFER_BUF_MAX = 64 MiB, vmalloc)
+ * was never the limit.  8 MiB covers large direct-I/O reads with bounded
+ * per-command memory (can_queue=32 -> worst case 256 MiB of vmalloc). */
+#define VTL_MAX_BLOCK_SIZE (8 * 1024 * 1024)
 #define VTL_DEFAULT_BLOCK_SIZE 0 /* variable — mhVTL hybrid: SCSI var, I/O fixed */
 #define VTL_DEFAULT_DENSITY 0x40 /* Default LTO (Ultrium) */
 
