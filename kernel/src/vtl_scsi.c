@@ -1138,24 +1138,40 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         return SAM_STAT_CHECK_CONDITION;
     }
 
-    /* Kylin 4.19 st sends SILI=0 in variable-block mode, so keep
-     * zero-padding the payload tail — but ALSO report the true residual.
-     * The old code padded and then claimed the full request size with no
-     * residual, so initiators saw each short record as data+zeros:
-     * bs=256k readback of 64KB records differed at byte 65537, and 8KB
-     * pump-chunk tapes at byte 8193 (2026-10-22, image-on-disk verified
-     * innocent). resid must be set AFTER copy_to_sg, which also sets
-     * resid when the sg list itself truncates the copy. */
+    /* Short record vs. the initiator's request: real drive semantics
+     * (SSC) — CHECK CONDITION with NO SENSE + ILI and a VALID information
+     * field holding req_len - actual. Both 4.19 and 6.6 st only correct
+     * the read length in their ILI branch: st_chk_result returns
+     * immediately on GOOD status, so a bare resid is ignored and the
+     * initiator keeps seeing data+zeros (2026-10-22: bs=256k readback of
+     * 64KB records differed at byte 65537; 8KB pump-chunk tapes at byte
+     * 8193; image-on-disk verified byte-identical). The zero tail and
+     * resid stay as secondary signals for SILI=0 tooling. Variable-block
+     * mode only; fixed-mode short reads keep the GOOD path. */
     if (actual < blocks * block_len) {
         u32 req_len = blocks * block_len;
         u32 real = actual;
+        u32 diff = req_len - real;
 
-        memset(buffer + real, 0, req_len - real);
+        memset(buffer + real, 0, diff);
         if (vtl_scsi_copy_to_sg(cmd, buffer, req_len, &drv->sense)) {
             vtl_xfer_buf_free(buffer);
             return SAM_STAT_CHECK_CONDITION;
         }
-        scsi_set_resid(cmd, req_len - real);
+        scsi_set_resid(cmd, diff);
+
+        if ((cmd->cmnd[1] & 0x01) == 0) {   /* READ(6) fixed bit: variable mode */
+            vtl_set_sense(&drv->sense, 0, 0x00, 0x00);
+            vtl_build_sense_buffer(cmd, &drv->sense);
+            cmd->sense_buffer[0] |= 0x80;      /* VALID: info field present */
+            cmd->sense_buffer[2] |= 0x20;      /* ILI */
+            cmd->sense_buffer[3] = (diff >> 24) & 0xff;
+            cmd->sense_buffer[4] = (diff >> 16) & 0xff;
+            cmd->sense_buffer[5] = (diff >> 8) & 0xff;
+            cmd->sense_buffer[6] = diff & 0xff;
+            vtl_xfer_buf_free(buffer);
+            return SAM_STAT_CHECK_CONDITION;
+        }
         vtl_xfer_buf_free(buffer);
         return SAM_STAT_GOOD;
     }
