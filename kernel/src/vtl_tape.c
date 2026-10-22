@@ -1185,8 +1185,8 @@ int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape,
             drv->rec_count = 0;
         }
         /* N3: preserve the errno like the data-area path (W1) — a full
-         * backing fs must surface as -ENOSPC -> VOLUME_OVERFLOW, not be
-         * folded into -EIO -> MEDIUM_ERROR. */
+         * backing fs must surface as -ENOSPC -> EOM early-warning sense,
+         * not be folded into -EIO -> MEDIUM_ERROR. */
         return ret < 0 ? ret : -ENOSPC;
     }
 
@@ -1196,8 +1196,8 @@ int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape,
         /* W1: preserve the errno (e.g. -ENOSPC from a full backing
          * filesystem). Folding it into -EIO made the SCSI layer report
          * MEDIUM ERROR, hiding "disk full" from the backup software;
-         * the -ENOSPC -> VOLUME_OVERFLOW mapping in vtl_handle_write
-         * only works if the errno survives. */
+         * the -ENOSPC -> EOM (NO SENSE 0x00/0x02 + EOM bit) mapping in
+         * vtl_handle_write only works if the errno survives. */
         if (!retain) {
             drv->rec_buf_used = 0;
             drv->rec_count = 0;
@@ -1294,15 +1294,20 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
 
     if (actual)
         *actual = 0;
-    if (tape->position >= tape->meta.capacity) {
+    /* W2 (2026-10-22 revision): refuse the WHOLE record when it does
+     * not fit. The previous clamp wrote a silently truncated record at
+     * the capacity boundary, corrupting the stream; real drive
+     * semantics (SSC) reject the WRITE at end-of-medium and let the
+     * handler return the EOM early-warning sense. */
+    if (tape->position >= tape->meta.capacity ||
+        (u64)len > (u64)(tape->meta.capacity - tape->position)) {
         drv->at_end = true;
         mutex_unlock(&tape->lock);
         mutex_unlock(&drv->lock);
         kref_put(&tape->ref, vtl_tape_release);
         return -ENOSPC;
     }
-    to_write = ((u64)len > (u64)(tape->meta.capacity - tape->position))
-             ? (u32)(tape->meta.capacity - tape->position) : len;
+    to_write = len;
 
     if (!drv->rec_buf) {
         drv->rec_buf = vmalloc(VTL_REC_BUF_SIZE);
@@ -1344,7 +1349,7 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
             ret = kernel_write(tape->file, buffer, to_write, &pos);
         if (ret < 0) {
             /* W1: keep kernel_write's errno (e.g. -ENOSPC) for the
-             * VOLUME_OVERFLOW mapping in vtl_handle_write. */
+             * EOM early-warning mapping in vtl_handle_write. */
         } else if (ret != (ssize_t)to_write) {
             ret = -ENOSPC;
         } else {
@@ -1358,7 +1363,6 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
             if (vtl_tape_sync_data(tape, false) < 0)
                 pr_warn("VTL: failed to sync %s\n", tape->name);
             tape->meta.log_bytes_written += (u64)to_write;
-            /* W2: report the clamped length, not the request length */
             if (actual) *actual = to_write;
             drv->at_bot = false;
             drv->at_end = (tape->position >= tape->meta.capacity);
@@ -1381,7 +1385,6 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
     drv->rec_count++;
     tape->position += (loff_t)to_write;
 
-    /* W2: report the clamped length, not the request length */
     if (actual) *actual = to_write;
     drv->at_bot = false;
     drv->at_end = (tape->position >= tape->meta.capacity);

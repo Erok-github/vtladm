@@ -1216,9 +1216,24 @@ static int vtl_handle_write(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         }
         if (ret == -EROFS)
             vtl_set_sense(&drv->sense, DATA_PROTECT, 0x27, 0);
-        else if (ret == -ENOSPC)
-            vtl_set_sense(&drv->sense, VOLUME_OVERFLOW, 0x00, 0);
-        else
+        else if (ret == -ENOSPC) {
+            /* EOM at end of writable medium. st only converts a write
+             * error into -ENOSPC when the sense key is NO_SENSE (or
+             * RECOVERED_ERROR) with the EOM bit set and no residual
+             * information field (drivers/scsi/st.c write_behind_check /
+             * st_flush_write_buffer, identical in 4.19 and 6.6). The
+             * old VOLUME_OVERFLOW key landed in st_chk_result's generic
+             * -EIO branch, so tar died with "Cannot write:
+             * Input/output error" the moment a tape filled up
+             * (2026-10-22: 2.9G tar to a 2G tape). NO SENSE +
+             * ASC 0x00/0x02 (End-of-partition/medium detected) + EOM
+             * is the early-warning frame real LTO drives use, and the
+             * only frame st turns into ENOSPC. */
+            vtl_set_sense(&drv->sense, 0, 0x00, 0x02);
+            vtl_build_sense_buffer(cmd, &drv->sense);
+            cmd->sense_buffer[2] |= 0x40;   /* EOM: end-of-medium */
+            return SAM_STAT_CHECK_CONDITION;
+        } else
             vtl_set_sense(&drv->sense, MEDIUM_ERROR, 0x03, 0);
         vtl_build_sense_buffer(cmd, &drv->sense);
         return SAM_STAT_CHECK_CONDITION;
