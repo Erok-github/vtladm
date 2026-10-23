@@ -436,6 +436,13 @@ int vtl_tape_read(struct vtl_drive *drive, u8 *buffer, u32 len, u32 *actual);
  * SCSI layer can answer with an SSC FILEMARK sense instead of BLANK
  * CHECK (EOD). */
 #define VTL_READ_STOP_FILEMARK 1
+/* vtl_tape_read() positive return: the request was smaller than the
+ * record (*actual holds the full record size, nothing transferred, the
+ * record consumed).  Lets the SCSI layer answer with an SSC ILI sense
+ * carrying a NEGATIVE information field instead of silently truncating
+ * the record and shifting the whole stream (field issue P0-1,
+ * 2026-10-23). */
+#define VTL_READ_RECORD_TOO_LONG 2
 int vtl_tape_write(struct vtl_drive *drive, const u8 *buffer, u32 len, u32 *actual);
 int vtl_tape_space(struct vtl_drive *drive, int code, int count);
 int vtl_tape_write_filemarks(struct vtl_drive *drive, int count);

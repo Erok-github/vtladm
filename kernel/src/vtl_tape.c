@@ -1020,6 +1020,31 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
 
         {
             u32 rd = min(rec_sz, len);
+
+            /* P0-1 (2026-10-23): request smaller than the record.
+             * A real drive transfers NOTHING and reports ILI with a
+             * NEGATIVE information field (request - record length);
+             * st maps that to -ENOMEM (variable-block branch,
+             * st-v66.c:1986-1998). The old code served the record
+             * PREFIX, silently skipped the tail and reported a full
+             * read, so every subsequent byte shifted -- dd bs=256k
+             * iflag=fullblock over ~12k variable-size records
+             * corrupted the stream deterministically from the first
+             * record larger than dd's partial-block remainder.
+             * Consume the record so a retry continues after it. */
+            if (rec_sz > len) {
+                tape->position = rpos + (loff_t)rec_sz;
+                drv->rec_read_idx++;
+                drv->at_bot = false;
+                drv->at_end = (tape->position >= tape->meta.used);
+                *actual = rec_sz;   /* full record size for the ILI frame */
+                tape->meta.accessed = ktime_get_real_seconds();
+                mutex_unlock(&tape->lock);
+                mutex_unlock(&drv->lock);
+                kref_put(&tape->ref, vtl_tape_release);
+                return VTL_READ_RECORD_TOO_LONG;
+            }
+
             ret = kernel_read(tape->file, buffer, rd, &rpos);
             if (ret < 0) { mutex_unlock(&tape->lock); mutex_unlock(&drv->lock); kref_put(&tape->ref, vtl_tape_release); return -EIO; }
             if (rd < rec_sz)
@@ -1060,6 +1085,20 @@ int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
              * no decompression needed. Preserves exact SCSI block size. */
             if (algo == 0 && comp_sz == uncomp_sz) {
                 u32 rd = min(comp_sz, len);
+
+                /* Same P0-1 rule as the VLBK path: never silently
+                 * truncate a record to the request length. */
+                if (comp_sz > len) {
+                    tape->position = hdr_pos + (loff_t)comp_sz;
+                    drv->at_bot = false;
+                    drv->at_end = (tape->position >= tape->meta.used);
+                    *actual = comp_sz;
+                    tape->meta.accessed = ktime_get_real_seconds();
+                    mutex_unlock(&tape->lock);
+                    mutex_unlock(&drv->lock);
+                    kref_put(&tape->ref, vtl_tape_release);
+                    return VTL_READ_RECORD_TOO_LONG;
+                }
 
                 /* Skip past header to data (hdr_pos already points past header) */
                 pos = hdr_pos;

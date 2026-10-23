@@ -1098,6 +1098,30 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         return SAM_STAT_CHECK_CONDITION;
     }
 
+    if (ret == VTL_READ_RECORD_TOO_LONG) {
+        /* P0-1: request smaller than the record. Real-drive semantics
+         * (SSC): CHECK CONDITION, NO SENSE + ILI, VALID information
+         * field = request length - record length (negative two's
+         * complement), zero bytes transferred. st's variable-block ILI
+         * branch turns the negative remainder into -ENOMEM
+         * (st-v66.c:1986-1998) — a loud, correctable error, replacing
+         * the old silent truncation that shifted the whole stream.
+         * (*actual carries the full record size.) */
+        u32 req_len = blocks * block_len;
+        s32 diff = (s32)req_len - (s32)actual;
+
+        vtl_set_sense(&drv->sense, 0, 0x00, 0x00);
+        vtl_build_sense_buffer(cmd, &drv->sense);
+        cmd->sense_buffer[0] |= 0x80;   /* VALID: info field present */
+        cmd->sense_buffer[2] |= 0x20;   /* ILI */
+        cmd->sense_buffer[3] = ((u32)diff >> 24) & 0xff;
+        cmd->sense_buffer[4] = ((u32)diff >> 16) & 0xff;
+        cmd->sense_buffer[5] = ((u32)diff >> 8) & 0xff;
+        cmd->sense_buffer[6] = (u32)diff & 0xff;
+        vtl_xfer_buf_free(buffer);
+        return SAM_STAT_CHECK_CONDITION;
+    }
+
     /* A zero-length result is either a filemark or end-of-data. */
     if (actual == 0) {
         if (ret == VTL_READ_STOP_FILEMARK) {
