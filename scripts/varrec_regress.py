@@ -15,7 +15,7 @@ Phases:
                regressed -> exit 1.
 
 Usage: varrec_regress.py [write|verify-exact|verify-fullblock]
-       (run `mt -f /dev/st0 rewind` is handled internally via mt(1))
+       (write rewinds + erases first; the verify phases rewind via mt(1))
 """
 import hashlib
 import os
@@ -48,7 +48,19 @@ def rewind():
     subprocess.run(["mt", "-f", "/dev/st0", "rewind"], check=True)
 
 
+def erase():
+    subprocess.run(["mt", "-f", "/dev/st0", "erase"], check=True)
+
+
 def cmd_write():
+    # nst0 is a NO-REWIND device: a bare open() leaves the position wherever
+    # the previous session stopped and the records would land mid-tape,
+    # after older experiment data.  Field incident 2026-10-23: verify-exact
+    # then read stale cat|dd 64K fragments from BOT and mis-reported
+    # "first bad record 0 got=65536" against a brand-new write.  Start from
+    # a clean, positioned medium.
+    rewind()
+    erase()
     sz = sizes()
     with open("/dev/nst0", "wb", buffering=0) as f:
         for i, n in enumerate(sz):
