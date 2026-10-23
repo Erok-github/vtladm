@@ -18,3 +18,10 @@ Thumbs.db
 
 # External files
 *.rpm
+
+# Field test scripts — local only, never commit
+scripts/burst_verify.py
+scripts/burst_writer.py
+scripts/varrec_regress.py
+scripts/vtl-full-stability-test.sh
+scripts/vtl_realdata_test.sh
