@@ -5,8 +5,14 @@
 Phases:
   write        seed-42 variable-size records (16K..112K in 4K steps)
                to /dev/nst0, deterministic per-record content
+               (rewinds + erases first — nst0 is a no-rewind device)
   verify-exact replay the same size sequence with request == record
                (must hash-match; proves the write path + cursor)
+  verify-stream  boundary-agnostic full-stream read: rewind, drain the
+               whole tape with fixed-size reads, sha256 the assembly and
+               compare against the expected byte stream.  Catches
+               stream-level corruption (dropped/duplicated/shifted
+               records) regardless of record boundaries.
   verify-fullblock  assemble 256K blocks via read(remaining), dd
                iflag=fullblock style (request shrinks below record
                sizes). Real-tape semantics: the first record larger
@@ -14,7 +20,7 @@ Phases:
                A silently wrong stream means the P0-1 truncation
                regressed -> exit 1.
 
-Usage: varrec_regress.py [write|verify-exact|verify-fullblock]
+Usage: varrec_regress.py [write|verify-exact|verify-stream|verify-fullblock]
        (write rewinds + erases first; the verify phases rewind via mt(1))
 """
 import hashlib
@@ -87,6 +93,46 @@ def cmd_verify_exact():
     return 1 if bad else 0
 
 
+def cmd_verify_stream():
+    """Drain the whole tape with fixed-size reads and hash the assembly.
+
+    Every on-tape record (<= CHUNK_MAX = 112K) fits inside one READ_BUF
+    request, so each read returns exactly one record (short read = one
+    record; full read = one record) and no ILI is ever raised.  The
+    assembled byte stream must equal the concatenation of the written
+    payloads — this catches dropped, duplicated or shifted records that
+    a per-record boundary check might mask.
+    """
+    READ_BUF = 1024 * 1024
+    rewind()
+    src = hashlib.sha256()
+    for i, n in enumerate(sizes()):
+        src.update(payload(i, n))
+    fd = os.open("/dev/st0", os.O_RDONLY)
+    got = hashlib.sha256()
+    total = 0
+    try:
+        while True:
+            b = os.read(fd, READ_BUF)
+            if not b:
+                break
+            got.update(b)
+            total += len(b)
+    except OSError as e:
+        print(f"R1_STREAM FAIL: read error errno={e.errno} at {total}")
+        return 1
+    finally:
+        os.close(fd)
+    if total != TOTAL:
+        print(f"R1_STREAM FAIL: length {total} != expected {TOTAL}")
+        return 1
+    if got.digest() != src.digest():
+        print("R1_STREAM FAIL: stream hash mismatch (corrupted/shifted data)")
+        return 1
+    print(f"R1_STREAM OK ({total} bytes, sha256 matched)")
+    return 0
+
+
 def cmd_verify_fullblock():
     rewind()
     src = hashlib.sha256()
@@ -134,6 +180,8 @@ if __name__ == "__main__":
         sys.exit(0)
     if cmd == "verify-exact":
         sys.exit(cmd_verify_exact())
+    if cmd == "verify-stream":
+        sys.exit(cmd_verify_stream())
     if cmd == "verify-fullblock":
         sys.exit(cmd_verify_fullblock())
     print(__doc__)
