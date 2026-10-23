@@ -186,6 +186,14 @@ struct vtl_changer; /* forward ref for element-address helpers below */
 extern int vtl_pvoltag_format;
 
 struct vtl_sense_data {
+    /* Serializes "latch key/asc/ascq, then frame into cmd->sense_buffer".
+     * The staging area is shared per LUN and commands on the same LUN can
+     * run concurrently (second st open, sg_raw racing a session, multipath);
+     * without this lock one command could overwrite the staging between
+     * another command's set and build, so the other command would report
+     * the WRONG error code.  Never memset() this struct wholesale — the
+     * mutex must survive; clear the fields under the lock instead. */
+    struct mutex lock;
     u8 key;
     u8 asc;
     u8 ascq;
@@ -477,7 +485,12 @@ int vtl_changer_collect_inventory(struct vtl_changer *ch, int *num_drives,
 				  int *count, int *truncated, int elements[],
 				  char names[][64], int max_items);
 
-void vtl_set_sense(struct vtl_sense_data *sense, u8 key, u8 asc, u8 ascq);
+/* Atomic "latch + frame" for a failing command (takes sense->lock
+ * internally).  Use this for every CHECK CONDITION instead of a bare
+ * vtl_set_sense()+vtl_build_sense_buffer() pair. */
+void vtl_fail_cmd(struct scsi_cmnd *cmd, struct vtl_sense_data *sense,
+                  u8 key, u8 asc, u8 ascq);
+/* Frame the latched sense for this command (takes sense->lock). */
 void vtl_build_sense_buffer(struct scsi_cmnd *cmd, struct vtl_sense_data *sense);
 
 int vtl_sysfs_init(void);

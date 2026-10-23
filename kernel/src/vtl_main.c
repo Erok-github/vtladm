@@ -1007,6 +1007,7 @@ static struct vtl_changer *vtl_changer_alloc(int id, int num_drives, int num_slo
         ch->num_slots = VTL_MAX_SLOTS;
     ch->num_mailslots = VTL_MAX_MAILSLOTS;
     mutex_init(&ch->lock);
+    mutex_init(&ch->sense.lock);
 
     for (i = 0; i < VTL_MAX_DRIVES; i++) {
         struct vtl_drive *drv = &ch->drives[i];
@@ -1018,6 +1019,7 @@ static struct vtl_changer *vtl_changer_alloc(int id, int num_drives, int num_slo
         drv->density = VTL_DEFAULT_DENSITY;
         drv->at_bot = true;
         mutex_init(&drv->lock);
+        mutex_init(&drv->sense.lock);
     }
 
     for (i = 0; i < ch->num_slots; i++) {

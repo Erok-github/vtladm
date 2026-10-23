@@ -108,14 +108,17 @@ static void vtl_xfer_buf_free(void *p)
         kfree(p);
 }
 
-void vtl_set_sense(struct vtl_sense_data *sense, u8 key, u8 asc, u8 ascq)
+/* Raw staging write — caller must hold sense->lock. */
+static void vtl_sense_set_locked(struct vtl_sense_data *sense, u8 key, u8 asc, u8 ascq)
 {
     sense->key = key;
     sense->asc = asc;
     sense->ascq = ascq;
 }
 
-void vtl_build_sense_buffer(struct scsi_cmnd *cmd, struct vtl_sense_data *sense)
+/* Raw framing into the per-command sense buffer — caller must hold
+ * sense->lock (the staging fields are being read). */
+static void vtl_sense_build_locked(struct scsi_cmnd *cmd, struct vtl_sense_data *sense)
 {
     u8 *sb = cmd->sense_buffer;
 
@@ -125,6 +128,33 @@ void vtl_build_sense_buffer(struct scsi_cmnd *cmd, struct vtl_sense_data *sense)
     sb[7] = 10;
     sb[12] = sense->asc;
     sb[13] = sense->ascq;
+}
+
+/* Atomic "latch error + frame it" for a failing command.
+ *
+ * drv->sense / ch->sense are shared per-LUN staging, and commands on the
+ * same LUN can execute concurrently (two opens of the st device, sg_raw
+ * racing an active session, multipath).  A bare set+build pair has a
+ * race window between the two calls in which another command on the
+ * same LUN overwrites the staging — this command would then report the
+ * OTHER command's key/asc/ascq.  vtl_fail_cmd() holds the staging lock
+ * across both steps, so every CHECK CONDITION frames its own error.
+ * Extra sense-byte pokes (ILI/EOM/VALID/info field) go to the private
+ * cmd->sense_buffer afterwards and need no lock. */
+void vtl_fail_cmd(struct scsi_cmnd *cmd, struct vtl_sense_data *sense,
+                  u8 key, u8 asc, u8 ascq)
+{
+    mutex_lock(&sense->lock);
+    vtl_sense_set_locked(sense, key, asc, ascq);
+    vtl_sense_build_locked(cmd, sense);
+    mutex_unlock(&sense->lock);
+}
+
+void vtl_build_sense_buffer(struct scsi_cmnd *cmd, struct vtl_sense_data *sense)
+{
+    mutex_lock(&sense->lock);
+    vtl_sense_build_locked(cmd, sense);
+    mutex_unlock(&sense->lock);
 }
 
 #ifndef ABORTED_COMMAND
@@ -177,8 +207,7 @@ static int vtl_scsi_copy_to_sg(struct scsi_cmnd *cmd, void *buf, unsigned int le
 
     copied = scsi_sg_copy_from_buffer(cmd, buf, (int)len);
     if (unlikely(copied < 0)) {
-        vtl_set_sense(sense, ABORTED_COMMAND, 0x00, 0x00);
-        vtl_build_sense_buffer(cmd, sense);
+        vtl_fail_cmd(cmd, sense, ABORTED_COMMAND, 0x00, 0x00);
         return -EIO;
     }
     if (unlikely((unsigned int)copied < len))
@@ -197,13 +226,11 @@ static int vtl_scsi_copy_from_sg(struct scsi_cmnd *cmd, void *buf, unsigned int 
 
     copied = scsi_sg_copy_to_buffer(cmd, buf, (int)len);
     if (unlikely(copied < 0)) {
-        vtl_set_sense(sense, ABORTED_COMMAND, 0x00, 0x00);
-        vtl_build_sense_buffer(cmd, sense);
+        vtl_fail_cmd(cmd, sense, ABORTED_COMMAND, 0x00, 0x00);
         return -EIO;
     }
     if (unlikely((unsigned int)copied < len)) {
-        vtl_set_sense(sense, ABORTED_COMMAND, 0x00, 0x00);
-        vtl_build_sense_buffer(cmd, sense);
+        vtl_fail_cmd(cmd, sense, ABORTED_COMMAND, 0x00, 0x00);
         return -EIO;
     }
     return 0;
@@ -211,22 +238,19 @@ static int vtl_scsi_copy_from_sg(struct scsi_cmnd *cmd, void *buf, unsigned int 
 
 static void vtl_scsi_staging_oom(struct scsi_cmnd *cmd, struct vtl_sense_data *sense)
 {
-    vtl_set_sense(sense, HARDWARE_ERROR, 0x00, 0x00);
-    vtl_build_sense_buffer(cmd, sense);
+    vtl_fail_cmd(cmd, sense, HARDWARE_ERROR, 0x00, 0x00);
 }
 
 static int vtl_cmd_illegal(struct scsi_cmnd *cmd, struct vtl_sense_data *sense)
 {
-    vtl_set_sense(sense, ILLEGAL_REQUEST, 0x20, 0);
-    vtl_build_sense_buffer(cmd, sense);
+    vtl_fail_cmd(cmd, sense, ILLEGAL_REQUEST, 0x20, 0);
     return SAM_STAT_CHECK_CONDITION;
 }
 
 /* ILLEGAL REQUEST / ASC 0x25 ASCQ 0x00 — logical unit not supported */
 static int vtl_cmd_lun_not_supported(struct scsi_cmnd *cmd, struct vtl_changer *ch)
 {
-    vtl_set_sense(&ch->sense, ILLEGAL_REQUEST, 0x25, 0);
-    vtl_build_sense_buffer(cmd, &ch->sense);
+    vtl_fail_cmd(cmd, &ch->sense, ILLEGAL_REQUEST, 0x25, 0);
     return SAM_STAT_CHECK_CONDITION;
 }
 
@@ -439,13 +463,18 @@ static int vtl_handle_request_sense(struct scsi_cmnd *cmd, struct vtl_host *vhos
 	}
 
 	src = vtl_sense_ptr(cmd, vhost);
-	vtl_build_sense_buffer(cmd, src);
+	/* Frame the latched sense and clear it atomically: a concurrent
+	 * failing command blocks on sense->lock until we are done, so its
+	 * freshly latched error survives the clear.  (Never memset() the
+	 * struct — that would zero the mutex.) */
+	mutex_lock(&src->lock);
+	vtl_sense_build_locked(cmd, src);
 	len = min_t(int, cdb[4], 252);
 	len = min_t(int, len, 96);
 	memcpy(buffer, cmd->sense_buffer, len);
-
 	/* Clear persistent sense after reporting (SPC-5 section 5.9) */
-	memset(src, 0, sizeof(*src));
+	src->key = src->asc = src->ascq = 0;
+	mutex_unlock(&src->lock);
 
 	if (vtl_scsi_copy_to_sg(cmd, buffer, (unsigned int)len, vtl_sense_ptr(cmd, vhost))) {
 		vtl_xfer_buf_free(buffer);
@@ -866,8 +895,7 @@ static int vtl_handle_mode_select(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         return SAM_STAT_GOOD;
 
     if (plen == 0) {
-        vtl_set_sense(&drv->sense, ILLEGAL_REQUEST, 0x1a, 0);
-        vtl_build_sense_buffer(cmd, &drv->sense);
+        vtl_fail_cmd(cmd, &drv->sense, ILLEGAL_REQUEST, 0x1a, 0);
         return SAM_STAT_CHECK_CONDITION;
     }
 
@@ -1041,25 +1069,21 @@ static int vtl_rw_prepare_xfer(struct scsi_cmnd *cmd, u32 *blocks, u32 *block_le
     u64 bytes;
 
     if (*blocks == 0 || *block_len == 0) {
-        vtl_set_sense(sense, ILLEGAL_REQUEST, 0x24, 0);
-        vtl_build_sense_buffer(cmd, sense);
+        vtl_fail_cmd(cmd, sense, ILLEGAL_REQUEST, 0x24, 0);
         return -EINVAL;
     }
     if (*block_len > VTL_MAX_BLOCK_SIZE) {
-        vtl_set_sense(sense, ILLEGAL_REQUEST, 0x24, 0);
-        vtl_build_sense_buffer(cmd, sense);
+        vtl_fail_cmd(cmd, sense, ILLEGAL_REQUEST, 0x24, 0);
         return -EINVAL;
     }
 
     bytes = (u64)(*blocks) * (u64)(*block_len);
     if (bytes > (u64)VTL_SCSI_RW_CAP_BYTES) {
-        vtl_set_sense(sense, ILLEGAL_REQUEST, 0x24, 0);
-        vtl_build_sense_buffer(cmd, sense);
+        vtl_fail_cmd(cmd, sense, ILLEGAL_REQUEST, 0x24, 0);
         return -EINVAL;
     }
     if (bytes > 0xffffffffULL) {
-        vtl_set_sense(sense, ILLEGAL_REQUEST, 0x24, 0);
-        vtl_build_sense_buffer(cmd, sense);
+        vtl_fail_cmd(cmd, sense, ILLEGAL_REQUEST, 0x24, 0);
         return -EINVAL;
     }
 
@@ -1087,13 +1111,11 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
     ret = vtl_tape_read(drv, buffer, blocks * block_len, &actual);
     if (ret < 0) {
         if (ret == -ENODEV) {
-            vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
-            vtl_build_sense_buffer(cmd, &drv->sense);
+            vtl_fail_cmd(cmd, &drv->sense, NOT_READY, 0x3a, 0x00);
             vtl_xfer_buf_free(buffer);
             return SAM_STAT_CHECK_CONDITION;
         }
-        vtl_set_sense(&drv->sense, MEDIUM_ERROR, 0x11, 0);
-        vtl_build_sense_buffer(cmd, &drv->sense);
+        vtl_fail_cmd(cmd, &drv->sense, MEDIUM_ERROR, 0x11, 0);
         vtl_xfer_buf_free(buffer);
         return SAM_STAT_CHECK_CONDITION;
     }
@@ -1110,8 +1132,7 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         u32 req_len = blocks * block_len;
         s32 diff = (s32)req_len - (s32)actual;
 
-        vtl_set_sense(&drv->sense, 0, 0x00, 0x00);
-        vtl_build_sense_buffer(cmd, &drv->sense);
+        vtl_fail_cmd(cmd, &drv->sense, 0, 0x00, 0x00);
         cmd->sense_buffer[0] |= 0x80;   /* VALID: info field present */
         cmd->sense_buffer[2] |= 0x20;   /* ILI */
         cmd->sense_buffer[3] = ((u32)diff >> 24) & 0xff;
@@ -1129,8 +1150,7 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
              * FILEMARK sense (NO SENSE 0/0 with the filemark bit set),
              * not BLANK CHECK, so st advances its file counter and
              * mt/weof-based tooling sees the mark. */
-            vtl_set_sense(&drv->sense, 0, 0x00, 0x00);
-            vtl_build_sense_buffer(cmd, &drv->sense);
+            vtl_fail_cmd(cmd, &drv->sense, 0, 0x00, 0x00);
             cmd->sense_buffer[2] |= VTL_SENSE_FILEMARK;
             vtl_xfer_buf_free(buffer);
             return SAM_STAT_CHECK_CONDITION;
@@ -1147,8 +1167,7 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
          * Older comment claiming 4.19/6.6 st both accept NO SENSE 0/0/05
          * was wrong on both versions (tested on openEuler 6.6: tar got
          * "Cannot read: Input/output error" for every EOD hit). */
-        vtl_set_sense(&drv->sense, BLANK_CHECK, 0x00, 0x05);
-        vtl_build_sense_buffer(cmd, &drv->sense);
+        vtl_fail_cmd(cmd, &drv->sense, BLANK_CHECK, 0x00, 0x05);
         {
             u32 resid = blocks * block_len; /* 0 bytes transferred */
             cmd->sense_buffer[0] |= 0x80;   /* VALID: info field meaningful */
@@ -1185,8 +1204,7 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         scsi_set_resid(cmd, diff);
 
         if ((cmd->cmnd[1] & 0x01) == 0) {   /* READ(6) fixed bit: variable mode */
-            vtl_set_sense(&drv->sense, 0, 0x00, 0x00);
-            vtl_build_sense_buffer(cmd, &drv->sense);
+            vtl_fail_cmd(cmd, &drv->sense, 0, 0x00, 0x00);
             cmd->sense_buffer[0] |= 0x80;      /* VALID: info field present */
             cmd->sense_buffer[2] |= 0x20;      /* ILI */
             cmd->sense_buffer[3] = (diff >> 24) & 0xff;
@@ -1234,12 +1252,11 @@ static int vtl_handle_write(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
 
     if (ret < 0) {
         if (ret == -ENODEV) {
-            vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
-            vtl_build_sense_buffer(cmd, &drv->sense);
+            vtl_fail_cmd(cmd, &drv->sense, NOT_READY, 0x3a, 0x00);
             return SAM_STAT_CHECK_CONDITION;
         }
         if (ret == -EROFS)
-            vtl_set_sense(&drv->sense, DATA_PROTECT, 0x27, 0);
+            vtl_fail_cmd(cmd, &drv->sense, DATA_PROTECT, 0x27, 0);
         else if (ret == -ENOSPC) {
             /* EOM at end of writable medium. st only converts a write
              * error into -ENOSPC when the sense key is NO_SENSE (or
@@ -1253,13 +1270,11 @@ static int vtl_handle_write(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
              * ASC 0x00/0x02 (End-of-partition/medium detected) + EOM
              * is the early-warning frame real LTO drives use, and the
              * only frame st turns into ENOSPC. */
-            vtl_set_sense(&drv->sense, 0, 0x00, 0x02);
-            vtl_build_sense_buffer(cmd, &drv->sense);
+            vtl_fail_cmd(cmd, &drv->sense, 0, 0x00, 0x02);
             cmd->sense_buffer[2] |= 0x40;   /* EOM: end-of-medium */
             return SAM_STAT_CHECK_CONDITION;
         } else
-            vtl_set_sense(&drv->sense, MEDIUM_ERROR, 0x03, 0);
-        vtl_build_sense_buffer(cmd, &drv->sense);
+            vtl_fail_cmd(cmd, &drv->sense, MEDIUM_ERROR, 0x03, 0);
         return SAM_STAT_CHECK_CONDITION;
     }
 
@@ -1286,8 +1301,7 @@ static int vtl_handle_locate(struct scsi_cmnd *cmd, struct vtl_drive *drv)
     tape = drv->loaded_tape;
     if (!tape) {
         mutex_unlock(&drv->lock);
-        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
-        vtl_build_sense_buffer(cmd, &drv->sense);
+        vtl_fail_cmd(cmd, &drv->sense, NOT_READY, 0x3a, 0x00);
         return SAM_STAT_CHECK_CONDITION;
     }
     mutex_lock(&tape->lock);
@@ -1306,8 +1320,7 @@ static int vtl_handle_locate(struct scsi_cmnd *cmd, struct vtl_drive *drv)
 
     if (bt) {
         if (target > tape->num_filemarks) {
-            vtl_set_sense(&drv->sense, 0, 0x64, 0x00);
-            vtl_build_sense_buffer(cmd, &drv->sense);
+            vtl_fail_cmd(cmd, &drv->sense, 0, 0x64, 0x00);
             ret = SAM_STAT_CHECK_CONDITION;
             goto done;
         }
@@ -1315,8 +1328,7 @@ static int vtl_handle_locate(struct scsi_cmnd *cmd, struct vtl_drive *drv)
             tape->filemark_offsets[target - 1];
     } else {
         if (target > tape->meta.used) {
-            vtl_set_sense(&drv->sense, 0, 0x64, 0x00);
-            vtl_build_sense_buffer(cmd, &drv->sense);
+            vtl_fail_cmd(cmd, &drv->sense, 0, 0x64, 0x00);
             ret = SAM_STAT_CHECK_CONDITION;
             goto done;
         }
@@ -1342,18 +1354,15 @@ static int vtl_handle_space(struct scsi_cmnd *cmd, struct vtl_drive *drv)
 
     ret = vtl_tape_space(drv, code, count);
     if (ret == -ENODEV) {
-        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
-        vtl_build_sense_buffer(cmd, &drv->sense);
+        vtl_fail_cmd(cmd, &drv->sense, NOT_READY, 0x3a, 0x00);
         return SAM_STAT_CHECK_CONDITION;
     }
     if (ret == -ENODATA) {
-        vtl_set_sense(&drv->sense, 0, 0x64, 0x00);
-        vtl_build_sense_buffer(cmd, &drv->sense);
+        vtl_fail_cmd(cmd, &drv->sense, 0, 0x64, 0x00);
         return SAM_STAT_CHECK_CONDITION;
     }
     if (ret < 0) {
-        vtl_set_sense(&drv->sense, ILLEGAL_REQUEST, 0x24, 0);
-        vtl_build_sense_buffer(cmd, &drv->sense);
+        vtl_fail_cmd(cmd, &drv->sense, ILLEGAL_REQUEST, 0x24, 0);
         return SAM_STAT_CHECK_CONDITION;
     }
     return SAM_STAT_GOOD;
@@ -1378,14 +1387,12 @@ static int vtl_handle_erase(struct scsi_cmnd *cmd, struct vtl_drive *drv)
     tape = drv->loaded_tape;
     if (!tape) {
         mutex_unlock(&drv->lock);
-        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0);
-        vtl_build_sense_buffer(cmd, &drv->sense);
+        vtl_fail_cmd(cmd, &drv->sense, NOT_READY, 0x3a, 0);
         return SAM_STAT_CHECK_CONDITION;
     }
     if (tape->write_protected) {
         mutex_unlock(&drv->lock);
-        vtl_set_sense(&drv->sense, DATA_PROTECT, 0x27, 0);
-        vtl_build_sense_buffer(cmd, &drv->sense);
+        vtl_fail_cmd(cmd, &drv->sense, DATA_PROTECT, 0x27, 0);
         return SAM_STAT_CHECK_CONDITION;
     }
 
@@ -1446,8 +1453,7 @@ static int vtl_handle_read_capacity_10(struct scsi_cmnd *cmd, struct vtl_drive *
     tape = drv->loaded_tape;
     if (!tape) {
         mutex_unlock(&drv->lock);
-        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
-        vtl_build_sense_buffer(cmd, &drv->sense);
+        vtl_fail_cmd(cmd, &drv->sense, NOT_READY, 0x3a, 0x00);
         return SAM_STAT_CHECK_CONDITION;
     }
     capacity = tape->meta.capacity;
@@ -1492,8 +1498,7 @@ static int vtl_handle_read_capacity_16(struct scsi_cmnd *cmd, struct vtl_drive *
     tape = drv->loaded_tape;
     if (!tape) {
         mutex_unlock(&drv->lock);
-        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0x00);
-        vtl_build_sense_buffer(cmd, &drv->sense);
+        vtl_fail_cmd(cmd, &drv->sense, NOT_READY, 0x3a, 0x00);
         return SAM_STAT_CHECK_CONDITION;
     }
     capacity = tape->meta.capacity;
@@ -1534,10 +1539,9 @@ static int vtl_handle_write_filemarks(struct scsi_cmnd *cmd, struct vtl_drive *d
         if (ret == -ENODEV)
             return SAM_STAT_GOOD;
         if (ret == -EROFS)
-            vtl_set_sense(&drv->sense, DATA_PROTECT, 0x27, 0);
+            vtl_fail_cmd(cmd, &drv->sense, DATA_PROTECT, 0x27, 0);
         else
-            vtl_set_sense(&drv->sense, MEDIUM_ERROR, 0x03, 0);
-        vtl_build_sense_buffer(cmd, &drv->sense);
+            vtl_fail_cmd(cmd, &drv->sense, MEDIUM_ERROR, 0x03, 0);
         return SAM_STAT_CHECK_CONDITION;
     }
     return SAM_STAT_GOOD;
@@ -1561,8 +1565,7 @@ static int vtl_handle_synchronize_cache(struct scsi_cmnd *cmd, struct vtl_drive 
     tape = drv->loaded_tape;
     if (!tape) {
         mutex_unlock(&drv->lock);
-        vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0);
-        vtl_build_sense_buffer(cmd, &drv->sense);
+        vtl_fail_cmd(cmd, &drv->sense, NOT_READY, 0x3a, 0);
         return SAM_STAT_CHECK_CONDITION;
     }
     kref_get(&tape->ref);
@@ -1581,8 +1584,7 @@ static int vtl_handle_synchronize_cache(struct scsi_cmnd *cmd, struct vtl_drive 
     vtl_tape_put(tape);
 
     if (ret < 0) {
-        vtl_set_sense(&drv->sense, MEDIUM_ERROR, 0x03, 0);
-        vtl_build_sense_buffer(cmd, &drv->sense);
+        vtl_fail_cmd(cmd, &drv->sense, MEDIUM_ERROR, 0x03, 0);
         return SAM_STAT_CHECK_CONDITION;
     }
     return SAM_STAT_GOOD;
@@ -1672,8 +1674,7 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         int si = src - 1;
         if (si >= 0 && si < ch->num_slots &&
             (!ch->slots[si].occupied || !ch->slots[si].tape)) {
-            vtl_set_sense(&ch->sense, NOT_READY, 0x3b, 0x0d);
-            vtl_build_sense_buffer(cmd, &ch->sense);
+            vtl_fail_cmd(cmd, &ch->sense, NOT_READY, 0x3b, 0x0d);
             return SAM_STAT_CHECK_CONDITION;
         }
     }
@@ -1681,8 +1682,7 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         int di = src - vtl_elem_drive_base(ch);
         if (di >= 0 && di < ch->num_drives &&
             !ch->drives[di].loaded_tape) {
-            vtl_set_sense(&ch->sense, NOT_READY, 0x3b, 0x0d);
-            vtl_build_sense_buffer(cmd, &ch->sense);
+            vtl_fail_cmd(cmd, &ch->sense, NOT_READY, 0x3b, 0x0d);
             return SAM_STAT_CHECK_CONDITION;
         }
     }
@@ -1690,8 +1690,7 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
         int mi = src - vtl_elem_ie_base(ch);
         if (mi >= 0 && mi < ch->num_mailslots &&
             !ch->mailslots[mi].occupied) {
-            vtl_set_sense(&ch->sense, NOT_READY, 0x3b, 0x0d);
-            vtl_build_sense_buffer(cmd, &ch->sense);
+            vtl_fail_cmd(cmd, &ch->sense, NOT_READY, 0x3b, 0x0d);
             return SAM_STAT_CHECK_CONDITION;
         }
     }
@@ -1707,14 +1706,13 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
          *   other (e.g. tape image open I/O error)       -> 04/00
          */
         if (ret == -ENODEV)
-            vtl_set_sense(&ch->sense, NOT_READY, 0x3b, 0x0d);
+            vtl_fail_cmd(cmd, &ch->sense, NOT_READY, 0x3b, 0x0d);
         else if (ret == -EBUSY)
-            vtl_set_sense(&ch->sense, NOT_READY, 0x3b, 0x0e);
+            vtl_fail_cmd(cmd, &ch->sense, NOT_READY, 0x3b, 0x0e);
         else if (ret == -EINVAL)
-            vtl_set_sense(&ch->sense, ILLEGAL_REQUEST, 0x21, 0x01);
+            vtl_fail_cmd(cmd, &ch->sense, ILLEGAL_REQUEST, 0x21, 0x01);
         else
-            vtl_set_sense(&ch->sense, HARDWARE_ERROR, 0x04, 0x00);
-        vtl_build_sense_buffer(cmd, &ch->sense);
+            vtl_fail_cmd(cmd, &ch->sense, HARDWARE_ERROR, 0x04, 0x00);
         return SAM_STAT_CHECK_CONDITION;
     }
 
@@ -1857,8 +1855,7 @@ static int vtl_handle_read_element_status(struct scsi_cmnd *cmd, struct vtl_host
         ch, buffer, work_len, voltag, voltag_std, cdb[1] & 0x0f,
         start_elem, num_elems);
     if (ret < 0) {
-        vtl_set_sense(&ch->sense, HARDWARE_ERROR, 0x00, 0x00);
-        vtl_build_sense_buffer(cmd, &ch->sense);
+        vtl_fail_cmd(cmd, &ch->sense, HARDWARE_ERROR, 0x00, 0x00);
         vtl_xfer_buf_free(buffer);
         return SAM_STAT_CHECK_CONDITION;
     }
@@ -1872,14 +1869,12 @@ static int vtl_handle_read_element_status(struct scsi_cmnd *cmd, struct vtl_host
 
         copied = scsi_sg_copy_from_buffer(cmd, buffer, ret);
         if (unlikely(copied < 0)) {
-            vtl_set_sense(&ch->sense, ABORTED_COMMAND, 0x00, 0x00);
-            vtl_build_sense_buffer(cmd, &ch->sense);
+            vtl_fail_cmd(cmd, &ch->sense, ABORTED_COMMAND, 0x00, 0x00);
             vtl_xfer_buf_free(buffer);
             return SAM_STAT_CHECK_CONDITION;
         }
         if (unlikely((unsigned int)copied < (unsigned int)ret)) {
-            vtl_set_sense(&ch->sense, ABORTED_COMMAND, 0x00, 0x00);
-            vtl_build_sense_buffer(cmd, &ch->sense);
+            vtl_fail_cmd(cmd, &ch->sense, ABORTED_COMMAND, 0x00, 0x00);
             vtl_xfer_buf_free(buffer);
             return SAM_STAT_CHECK_CONDITION;
         }
@@ -2020,8 +2015,7 @@ static int vtl_handle_log_sense(struct scsi_cmnd *cmd, struct vtl_drive *drv)
         if (!drv->loaded_tape) {
             mutex_unlock(&drv->lock);
             vtl_xfer_buf_free(buf);
-            vtl_set_sense(&drv->sense, NOT_READY, 0x3a, 0);
-            vtl_build_sense_buffer(cmd, &drv->sense);
+            vtl_fail_cmd(cmd, &drv->sense, NOT_READY, 0x3a, 0);
             return SAM_STAT_CHECK_CONDITION;
         }
         mutex_lock(&drv->loaded_tape->lock);
@@ -2458,8 +2452,7 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
         struct vtl_drive *drv = &vhost->changer->drives[lun - 1];
         if (drv->ua_pending && cdb[0] != INQUIRY && cdb[0] != REQUEST_SENSE) {
             drv->ua_pending = false;
-            vtl_set_sense(&drv->sense, UNIT_ATTENTION, drv->ua_asc, drv->ua_ascq);
-            vtl_build_sense_buffer(cmd, &drv->sense);
+            vtl_fail_cmd(cmd, &drv->sense, UNIT_ATTENTION, drv->ua_asc, drv->ua_ascq);
             /* cmd->result must be set explicitly: completing with a stale
              * (zero) result would make the initiator see GOOD and silently
              * drop the media-change Unit Attention. */
