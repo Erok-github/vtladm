@@ -726,7 +726,11 @@ static int vtl_mode_page_01(u8 *buf)
 static int vtl_mode_page_0f(u8 *buf, bool compression_enabled, u8 algorithm)
 {
     buf[0] = 0x0f; buf[1] = 0x0e;  /* Data Compression, 14 bytes */
-    buf[2] = (compression_enabled ? 0x02 : 0x00) | 0x01; /* DCE=1 if on, DCC=1 (capable) */
+    /* Byte 2 per SSC: bit7=DCE (enable), bit6=DCC (capable).  st checks
+     * DCC before allowing compression changes and would return EIO
+     * "Compression not supported" if it is 0.  (Legacy code had DCE/DCC
+     * at bits 1/0 — no initiator reads them there.) */
+    buf[2] = (compression_enabled ? 0x80 : 0x00) | 0x40;
     buf[4] = algorithm; /* Data Compression Protocol: 1=zlib, 2=lzo */
     return 16;
 }
@@ -969,8 +973,8 @@ mode_pages:
                 break;
 
             if (pg_code == 0x0f && pg_len >= 1) {
-                /* Data Compression page: byte 2 bit 1 = DCE */
-                bool new_dce = (pbuf[parsed + 2] & 0x02) != 0;
+                /* Data Compression page: byte 2 bit 7 = DCE (SSC) */
+                bool new_dce = (pbuf[parsed + 2] & 0x80) != 0;
                 pr_info("VTL: MODE SELECT page 0x0F DCE=%d drive %d\n",
                     new_dce, drv->id);
                 mutex_lock(&drv->lock);
