@@ -513,12 +513,16 @@ int vtl_changer_load_slot_to_drive(struct vtl_changer *ch, int slot, int drive,
         if (ret) {
             return ret;
         }
-        ret = vtl_changer_move_medium(ch, slot,
+        /* slot is a 0-based index; move_medium() takes 1-based element
+         * addresses. Passing the raw index stranded slot-0 loads with
+         * -EINVAL and loaded slot k from slot k-1. */
+        ret = vtl_changer_move_medium(ch, slot + 1,
                           vtl_elem_drive_base(ch) + drive);
         return ret;
     }
 
-    return vtl_changer_move_medium(ch, slot, vtl_elem_drive_base(ch) + drive);
+    return vtl_changer_move_medium(ch, slot + 1,
+				       vtl_elem_drive_base(ch) + drive);
 }
 
 int vtl_changer_unload_drive_to_slot(struct vtl_changer *ch, int drive, int slot)
@@ -528,7 +532,10 @@ int vtl_changer_unload_drive_to_slot(struct vtl_changer *ch, int drive, int slot
     if (slot < 0 || slot >= ch->num_slots)
         return -EINVAL;
 
-    return vtl_changer_move_medium(ch, vtl_elem_drive_base(ch) + drive, slot);
+    /* Same 0-based index -> 1-based element address conversion as
+     * vtl_changer_load_slot_to_drive(). */
+    return vtl_changer_move_medium(ch, vtl_elem_drive_base(ch) + drive,
+				   slot + 1);
 }
 
 void vtl_changer_clear_media(struct vtl_changer *ch)
@@ -1687,7 +1694,10 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
     mutex_lock(&ch->lock);
 
     if (vtl_elem_is_storage(ch, src)) {
-        int si_src = src - 1;
+        /* vtl_elem_to_slot (not src-1): element 0 is the documented alias
+         * for element 1, and callers like the state-restore staging path
+         * may legitimately pass it. */
+        int si_src = vtl_elem_to_slot(ch, src);
         struct vtl_slot *src_slot;
 
         if (si_src < 0 || si_src >= ch->num_slots) {
@@ -1795,7 +1805,8 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
      * element reference was dropped; out: releases it. */
 
     if (vtl_elem_is_storage(ch, dst)) {
-        int si_dst = dst - 1;
+        /* vtl_elem_to_slot (not dst-1): element 0 aliases element 1. */
+        int si_dst = vtl_elem_to_slot(ch, dst);
         struct vtl_slot *dst_slot;
 
         if (si_dst < 0 || si_dst >= ch->num_slots) {
@@ -1929,7 +1940,7 @@ int vtl_changer_move_medium(struct vtl_changer *ch, int src, int dst)
 
 rollback:
     if (vtl_elem_is_storage(ch, src)) {
-        int si_rb = src - 1;
+        int si_rb = vtl_elem_to_slot(ch, src);
         if (si_rb >= 0 && si_rb < ch->num_slots) {
         ch->slots[si_rb].tape = t;
         kref_get(&t->ref);
@@ -1980,7 +1991,7 @@ int vtl_changer_remove_medium(struct vtl_changer *ch, int elem)
     mutex_lock(&ch->lock);
 
     if (vtl_elem_is_storage(ch, elem)) {
-        int si_rm = elem - 1;
+        int si_rm = vtl_elem_to_slot(ch, elem);
         struct vtl_slot *s;
 
         if (si_rm < 0 || si_rm >= ch->num_slots) {

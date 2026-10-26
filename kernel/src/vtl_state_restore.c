@@ -102,7 +102,13 @@ static int apply_one_state_line(struct vtl_changer *ch, char *line)
 				empty_slot, name, ret);
 			break;
 		}
-		ret = vtl_changer_move_medium(ch, empty_slot, vtl_elem_drive_base(ch) + addr);
+		/* move_medium() takes SMC-3 ELEMENT ADDRESSES (storage is
+		 * 1-based); empty_slot is a 0-based slot index. Passing it
+		 * raw made slot 0 hit the elem-0 alias with si_src = -1
+		 * (-EINVAL, tape stranded in the staging slot) and made
+		 * slot k>0 extract slot k-1 (wrong medium). */
+		ret = vtl_changer_move_medium(ch, empty_slot + 1,
+					      vtl_elem_drive_base(ch) + addr);
 		if (ret < 0) {
 			pr_warn("VTL: state restore: move to drive %d '%s': %d (tape left in slot %d)\n",
 				addr, name, ret, empty_slot);
@@ -122,7 +128,9 @@ static int apply_one_state_line(struct vtl_changer *ch, char *line)
 				empty_slot, name, ret);
 			break;
 		}
-		ret = vtl_changer_move_medium(ch, empty_slot, vtl_elem_ie_base(ch) + addr);
+		/* Same 1-based element-address conversion as the 'D' case. */
+		ret = vtl_changer_move_medium(ch, empty_slot + 1,
+					      vtl_elem_ie_base(ch) + addr);
 		if (ret < 0) {
 			pr_warn("VTL: state restore: move to mailslot %d '%s': %d (tape left in slot %d)\n",
 				addr, name, ret, empty_slot);

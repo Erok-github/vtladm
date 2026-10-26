@@ -370,11 +370,15 @@ static inline int vtl_elem_is_ie(const struct vtl_changer *ch, int addr)
     return addr >= base && addr < end;
 }
 
-/* 0-based slot index from storage element address (1-based). */
+/* 0-based slot index from a storage element address. Element address 0 is
+ * the documented alias for element 1 (see vtl_elem_is_storage — some backup
+ * software uses 0-based type-relative addressing), so it maps to slot 0.
+ * Returning addr-1 verbatim would turn that alias into -1 and make every
+ * caller reject a legitimate "first slot" reference with -EINVAL. */
 static inline int vtl_elem_to_slot(const struct vtl_changer *ch, int addr)
 {
     (void)ch;
-    return addr - 1;
+    return addr <= 0 ? 0 : addr - 1;
 }
 
 struct vtl_host {

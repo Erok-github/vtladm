@@ -1711,7 +1711,7 @@ static int vtl_handle_move_medium(struct scsi_cmnd *cmd, struct vtl_host *vhost)
      * 3A/00 and cited a "Kylin st offline cascade"; that diagnosis was
      * wrong — st never sees changer sense — and has been dropped.) */
     if (vtl_elem_is_storage(ch, src)) {
-        int si = src - 1;
+        int si = vtl_elem_to_slot(ch, src);
         if (si >= 0 && si < ch->num_slots &&
             (!ch->slots[si].occupied || !ch->slots[si].tape)) {
             vtl_fail_cmd(cmd, &ch->sense, NOT_READY, 0x3b, 0x0d);
