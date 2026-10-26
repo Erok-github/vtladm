@@ -161,7 +161,13 @@ static void vtl_restore_one_changer_state(struct vtl_changer *ch, int instance)
 
 	filp = filp_open(path, O_RDONLY, 0);
 	if (IS_ERR(filp)) {
-		if (PTR_ERR(filp) != -ENOENT)
+		if (PTR_ERR(filp) == -ENOENT)
+			/* Used to be silent — that hid the 2026-10-26 incident
+			 * where the state file went missing between reboots and
+			 * the changer came up empty with zero explanation. */
+			pr_info("VTL: state restore: no state file '%s' — changer starts empty\n",
+				path);
+		else
 			pr_warn("VTL: state restore: open '%s' failed: %ld\n", path, PTR_ERR(filp));
 		return;
 	}
@@ -201,9 +207,18 @@ static void vtl_restore_one_changer_state(struct vtl_changer *ch, int instance)
 
 	kvfree(buf);
 
-	if (count > 0)
+	if (count > 0) {
 		pr_info("VTL: state restore: instance %d — %d tape(s) loaded from %s\n",
 			instance, count, path);
+	} else {
+		/* A state file that parses to zero entries almost always means
+		 * "userspace wrote a header-only file from a not-yet-ready DB"
+		 * (or the file was clobbered) — the changer silently comes up
+		 * empty. Make that visible; a genuinely empty changer is the
+		 * rare case and the message is harmless at boot. */
+		pr_warn("VTL: state restore: '%s' parsed but 0 tape(s) restored — changer starts empty\n",
+			path);
+	}
 }
 
 /*
