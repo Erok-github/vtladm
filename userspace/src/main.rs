@@ -5196,7 +5196,11 @@ fn eject_tape(slot: i32) -> Result<i32, VtlError> {
             Ok(k) => {
                 let dst =
                     robot_sync::db_mailslot_to_element(mailslot, k.num_slots, k.num_drives);
-                if let Err(e) = robot_sync::kernel_move_medium(&conn, library_id, slot, dst) {
+                // `slot` is a 0-based DB slot_id; kernel MOVE MEDIUM takes
+                // 1-based element addresses (slot 0 = element 1).
+                if let Err(e) =
+                    robot_sync::kernel_move_medium(&conn, library_id, slot + 1, dst)
+                {
                     if robot_sync::is_kernel_busy(&e) {
                         // N4: R2 busy gate — deferred, not failed.
                         println!(

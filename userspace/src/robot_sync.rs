@@ -457,7 +457,10 @@ pub(crate) fn db_inventory(
                 name
             )));
         }
-        out.insert(name, MediumLocation::DataSlot(slot));
+        // MediumLocation::DataSlot carries the KERNEL element convention
+        // (1-based; see from_element) so DB and kernel inventories compare
+        // equal in find_drifts. DB slots.slot_id is 0-based.
+        out.insert(name, MediumLocation::DataSlot(slot + 1));
     }
     let mut dstmt = conn.prepare(
         "SELECT t.name, d.drive_id FROM drives d
@@ -954,9 +957,14 @@ fn write_changer_state_for_library(
     let mut entries: Vec<(String, char, i32)> = Vec::new();
     for (name, loc) in &db {
         let (tc, addr) = match loc {
-            MediumLocation::DataSlot(s) => ('S', *s),
+            // State-file S addrs use 0-based slot indexes (kernel restore
+            // contract); DataSlot here is the 1-based kernel element.
+            MediumLocation::DataSlot(s) => ('S', *s - 1),
             MediumLocation::Drive(d) => ('D', *d),
-            MediumLocation::MailSlot(m) => ('I', *m),
+            // MailSlot(m) carries the DB slot_id (100+i); the state file's
+            // I addr is the 0-based mailslot index (kernel restore adds
+            // ie_base itself — a raw 100+i would send it far out of range).
+            MediumLocation::MailSlot(m) => ('I', *m - MAILSLOT_OFFSET),
         };
         entries.push((name.clone(), tc, addr));
     }
