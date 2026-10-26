@@ -265,6 +265,11 @@ struct vtl_drive {
     u8   ua_asc;
     u8   ua_ascq;
 
+    /* N1 diagnostics: consecutive failing tape commands (reset on any
+     * success) so a retry storm can be classified from the ratelimited
+     * queuecommand log alone. */
+    u32  fail_streak;
+
     /* mhVTL-style record buffer: each SCSI WRITE becomes a record,
      * packed into 64KB blocks for efficient disk I/O. */
     u8  *rec_buf;       /* 64KB record accumulator */
@@ -451,6 +456,7 @@ int vtl_tape_read(struct vtl_drive *drive, u8 *buffer, u32 len, u32 *actual);
  * the record and shifting the whole stream (field issue P0-1,
  * 2026-10-23). */
 #define VTL_READ_RECORD_TOO_LONG 2
+int vtl_tape_read_probe(struct vtl_drive *drive);
 int vtl_tape_write(struct vtl_drive *drive, const u8 *buffer, u32 len, u32 *actual);
 int vtl_tape_space(struct vtl_drive *drive, int code, int count);
 int vtl_tape_write_filemarks(struct vtl_drive *drive, int count);

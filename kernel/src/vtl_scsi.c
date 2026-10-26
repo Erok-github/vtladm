@@ -1106,6 +1106,42 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
     if (vtl_rw_prepare_xfer(cmd, &blocks, &block_len, &drv->sense) < 0)
         return SAM_STAT_CHECK_CONDITION;
 
+    /* N1 (2026-10-26): answer TERMINAL reads (filemark / end-of-data) from
+     * drive state alone — no staging-buffer alloc, no backing-file I/O.
+     * A retrying initiator at EOD would otherwise alloc+free a multi-MB
+     * buffer per command in a tight loop (observed ~1k failing READ6/s
+     * hammering vmalloc and blocking under locks in IRQ-off dispatch
+     * context — the host wedged hard).  The probe mirrors vtl_tape_read's
+     * early exits exactly, including flag consumption. */
+    {
+        int probe = vtl_tape_read_probe(drv);
+
+        if (probe < 0) {
+            vtl_fail_cmd(cmd, &drv->sense, NOT_READY, 0x3a, 0x00);
+            return SAM_STAT_CHECK_CONDITION;
+        }
+        if (probe == 1) {
+            /* Filemark — same frame as the VTL_READ_STOP_FILEMARK branch
+             * below (kept as the fallback for races). */
+            vtl_fail_cmd(cmd, &drv->sense, 0, 0x00, 0x00);
+            cmd->sense_buffer[2] |= VTL_SENSE_FILEMARK;
+            return SAM_STAT_CHECK_CONDITION;
+        }
+        if (probe == 2) {
+            /* End of data — same frame as the zero-length branch below. */
+            u32 resid = blocks * block_len; /* 0 bytes transferred */
+
+            vtl_fail_cmd(cmd, &drv->sense, BLANK_CHECK, 0x00, 0x05);
+            cmd->sense_buffer[0] |= 0x80;   /* VALID: info field meaningful */
+            cmd->sense_buffer[2] |= 0x40;   /* EOM: end-of-medium condition */
+            cmd->sense_buffer[3] = (resid >> 24) & 0xff;
+            cmd->sense_buffer[4] = (resid >> 16) & 0xff;
+            cmd->sense_buffer[5] = (resid >> 8) & 0xff;
+            cmd->sense_buffer[6] = resid & 0xff;
+            return SAM_STAT_CHECK_CONDITION;
+        }
+    }
+
     buffer = vtl_xfer_buf_alloc(blocks * block_len);
     if (!buffer) {
         vtl_scsi_staging_oom(cmd, &drv->sense);
@@ -1932,10 +1968,21 @@ static int vtl_log_write_param(u8 *buf, u16 param_code, u8 param_len)
     return 4 + param_len;
 }
 
+/* Same, with an 8-byte big-endian binary value (log parameters that carry
+ * counters/capacities, e.g. the Tape Capacity page 0x31). */
+static int vtl_log_write_param_u64(u8 *buf, u16 param_code, u64 val)
+{
+    int n = vtl_log_write_param(buf, param_code, 8);
+
+    vtl_put_be64(val, buf + 4);
+    return n;
+}
+
 /*
  * SSC-compliant LOG SENSE for tape drives.
  * Pages: 0x00 (supported), 0x02 (write errors), 0x03 (read errors),
- * 0x06 (non-medium), 0x0C (sequential access), 0x2E (tape alert).
+ * 0x06 (non-medium), 0x0C (sequential access), 0x2E (tape alert),
+ * 0x31 (tape capacity), 0x11 (custom volume usage).
  * Unknown pages return an empty page header (parameter length=0) instead
  * of ILLEGAL REQUEST so initiators see a clean "no data" response.
  */
@@ -1966,11 +2013,12 @@ static int vtl_handle_log_sense(struct scsi_cmnd *cmd, struct vtl_drive *drv)
 
     switch (page) {
     case 0x00:
-        /* Supported pages: 0x00, 0x02, 0x03, 0x06, 0x0C, 0x2E */
-        off = vtl_log_write_page_hdr(buf, 0x00, 7);
+        /* Supported pages: 0x00, 0x02, 0x03, 0x06, 0x0C, 0x2E, 0x31 */
+        off = vtl_log_write_page_hdr(buf, 0x00, 8);
         buf[off++] = 0x00; buf[off++] = 0x02; buf[off++] = 0x03;
         buf[off++] = 0x06; buf[off++] = 0x0c; buf[off++] = 0x2e;
         buf[off++] = 0x11;  /* custom volume-usage page */
+        buf[off++] = 0x31;  /* tape capacity */
         break;
 
     case 0x02:
@@ -2031,6 +2079,36 @@ static int vtl_handle_log_sense(struct scsi_cmnd *cmd, struct vtl_drive *drv)
         vtl_put_be64(log_bytes_read, &buf[off]);
         vtl_put_be64(log_bytes_written, &buf[off + 8]);
         off += 16;
+        break;
+
+    case 0x31:
+        /* N2: Tape Capacity log page (SSC-3).  Parameter 0x0000 = remaining
+         * capacity, 0x0001 = maximum capacity, 8-byte binary values in
+         * KiB.  Backup software (e.g. TapeCapacityReader) probes this page
+         * as the first capacity source; without it they fall back to
+         * slower/less reliable sources. */
+        mutex_lock(&drv->lock);
+        if (!drv->loaded_tape) {
+            mutex_unlock(&drv->lock);
+            vtl_xfer_buf_free(buf);
+            vtl_fail_cmd(cmd, &drv->sense, NOT_READY, 0x3a, 0);
+            return SAM_STAT_CHECK_CONDITION;
+        }
+        {
+            struct vtl_tape *tp = drv->loaded_tape;
+            u64 remaining, maximum;
+
+            mutex_lock(&tp->lock);
+            maximum = tp->meta.capacity / 1024;
+            remaining = (tp->meta.capacity > tp->meta.used)
+                        ? (tp->meta.capacity - tp->meta.used) / 1024 : 0;
+            mutex_unlock(&tp->lock);
+            mutex_unlock(&drv->lock);
+
+            off = vtl_log_write_page_hdr(buf, 0x31, 2 * (4 + 8));
+            off += vtl_log_write_param_u64(buf + off, 0x0000, remaining);
+            off += vtl_log_write_param_u64(buf + off, 0x0001, maximum);
+        }
         break;
 
     default:
@@ -2485,14 +2563,35 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
     if (lun == 0) {
         result = vtl_changer_scsi(cmd, vhost, cdb);
     } else {
+        struct vtl_drive *drv = &ch->drives[lun - 1];
+
         result = vtl_tape_scsi(cmd, vhost, lun - 1, cdb);
-        if (result != SAM_STAT_GOOD) {
+        if (result == SAM_STAT_GOOD) {
+            drv->fail_streak = 0;
+        } else {
+            unsigned long long pos = ~0ULL;
+
             /* S1: an error storm (e.g. an initiator polling a faulted
              * condition) would pr_info on every command and jitter the
              * data path — ratelimit, don't remove (this log was the key
-             * diagnostic in the 2026-10-21 incident). */
-            pr_info_ratelimited("VTL: tape LUN%u op=0x%02x result=0x%x\n",
-                lun, cdb[0], result);
+             * diagnostic in the 2026-10-21 incident).
+             * N1: include the framed sense and the media position so a
+             * retry storm can be classified from the log alone (EOD vs
+             * filemark vs ILI vs genuine I/O error), plus the consecutive
+             * failure streak to show it is a loop, not a one-off. */
+            drv->fail_streak++;
+            mutex_lock(&drv->lock);
+            if (drv->loaded_tape) {
+                mutex_lock(&drv->loaded_tape->lock);
+                pos = (unsigned long long)drv->loaded_tape->position;
+                mutex_unlock(&drv->loaded_tape->lock);
+            }
+            mutex_unlock(&drv->lock);
+            pr_info_ratelimited("VTL: tape LUN%u op=0x%02x result=0x%x sense=%02x/%02x/%02x pos=%llu streak=%u\n",
+                lun, cdb[0], result,
+                cmd->sense_buffer[2] & 0x0f,
+                cmd->sense_buffer[12], cmd->sense_buffer[13],
+                pos, drv->fail_streak);
         }
     }
 out:

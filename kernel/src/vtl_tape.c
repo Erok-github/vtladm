@@ -935,6 +935,51 @@ int vtl_tape_unload(struct vtl_drive *drv)
     return 0;
 }
 
+/*
+ * N1 (2026-10-26): cheap state probe so the SCSI layer can answer TERMINAL
+ * reads (filemark / end-of-data) without allocating the (potentially
+ * multi-MB) staging buffer or touching the backing file.  During a retry
+ * storm at EOD (initiator re-issuing READ6 in a tight loop, observed at
+ * ~1k commands/s) the old path allocated+freed the full request buffer on
+ * every failing command, and the remaining file I/O ran under tape->lock
+ * while queuecommand executes in IRQ-off dispatch context — the
+ * combination wedged the host.
+ *
+ * Mirrors the early exits of vtl_tape_read() exactly (including consuming
+ * the at_filemark flag and setting at_end), so behaviour is unchanged.
+ *
+ * Returns:
+ *    0        data may follow (caller must run the real vtl_tape_read)
+ *    1        filemark pending (flag consumed, like VTL_READ_STOP_FILEMARK)
+ *    2        end-of-data (drv->at_end set, like the pos >= used exit)
+ *   -ENODEV   no tape loaded
+ */
+int vtl_tape_read_probe(struct vtl_drive *drv)
+{
+    struct vtl_tape *tape;
+    int r = 0;
+
+    mutex_lock(&drv->lock);
+    tape = drv->loaded_tape;
+    if (!tape || !tape->file) {
+        r = -ENODEV;
+        goto out;
+    }
+    if (drv->at_filemark) {
+        drv->at_filemark = false;
+        r = 1;
+        goto out;
+    }
+    if (tape->position >= tape->meta.used) {
+        drv->at_end = true;
+        r = 2;
+        goto out;
+    }
+out:
+    mutex_unlock(&drv->lock);
+    return r;
+}
+
 int vtl_tape_read(struct vtl_drive *drv, u8 *buffer, u32 len, u32 *actual)
 {
     struct vtl_tape *tape;
