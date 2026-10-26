@@ -349,15 +349,23 @@ if [ -f "$_iscsi" ]; then
   install -m 0755 "$_iscsi" "$PREFIX/bin/vtladm-iscsi"
 fi
 
-# Vue3 web UI dist (static SPA files)
+# Vue3 web UI dist (static SPA files).
+# dist/ is committed to the repo as a prebuilt snapshot so hosts without
+# Node >= 18 get the same UI out of the box; rebuild after changing sources
+# (cd userspace/web && npm install && npm run build) and commit the result.
 _WEB_DIST_SRC="$ROOT/userspace/web/dist"
 if [ -f "$_WEB_DIST_SRC/index.html" ]; then
+  # Staleness guard: committed dist older than its sources is a drift risk.
+  if find "$ROOT/userspace/web/src" "$ROOT/userspace/web/index.html" \
+          -type f -newer "$_WEB_DIST_SRC/index.html" 2>/dev/null | grep -q .; then
+    echo "WARN: userspace/web/dist is older than its sources — rebuild (cd userspace/web && npm run build) and commit, or the installed UI will lag the source" >&2
+  fi
   mkdir -p "$PREFIX/lib/vtladm/web"
   rm -rf "$PREFIX/lib/vtladm/web/"*
   cp -r "$_WEB_DIST_SRC/"* "$PREFIX/lib/vtladm/web/"
   echo "installed Vue3 web UI to $PREFIX/lib/vtladm/web/"
 else
-  echo "NOTE: Vue3 web UI not built — will use legacy HTML pages (run: cd userspace/web && npm run build)"
+  echo "NOTE: Vue3 web UI dist missing — will use legacy HTML pages (run: cd userspace/web && npm install && npm run build)"
 fi
 
 # packaging helpers (strip CRLF at install time — these must be runnable
