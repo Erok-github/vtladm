@@ -21,8 +21,6 @@ pub const MAILSLOT_OFFSET: i32 = 100;
 /// Kernel SCSI element address for tape drives (legacy; now computed dynamically from num_slots).
 #[allow(dead_code)]
 pub const VTL_ELEM_DRIVE_BASE: i32 = 1000;
-/// Kernel SCSI element address for import/export (IE) slots.
-pub const VTL_ELEM_IE_BASE: i32 = 2000;
 
 #[repr(C)]
 struct VtlLoadReq {
@@ -195,9 +193,13 @@ fn copy_barcode_field(dst: &mut [u8; 16], barcode: Option<&str>) -> io::Result<(
     Ok(())
 }
 
-/// Map DB mailslot `slot_id` (e.g. 100 = mail0) to kernel element address 2000+i.
-pub fn db_mailslot_to_element(db_slot_id: i32) -> i32 {
-    VTL_ELEM_IE_BASE + (db_slot_id - MAILSLOT_OFFSET)
+/// Map DB mailslot `slot_id` (e.g. 100 = mail0) to a kernel SCSI element address.
+/// The kernel uses contiguous SMC-3 addressing, so the IE base is
+/// `num_slots + num_drives + 1` — NOT a fixed constant. (The previous fixed
+/// 2000-base mapping predates the contiguous layout and made every
+/// mailslot-targeted MOVE/ELEM_REMOVE fail with kernel -EINVAL.)
+pub fn db_mailslot_to_element(db_slot_id: i32, num_slots: i32, num_drives: i32) -> i32 {
+    (num_slots + num_drives + 1) + (db_slot_id - MAILSLOT_OFFSET)
 }
 
 /// Align kernel `tape_dir` module parameter with `vtl.conf` (best-effort; needs root).
@@ -556,7 +558,13 @@ pub(crate) fn kernel_elem_remove(
 /// the sync loop — the tape stays in the (legitimately busy) drive and the
 /// next 5-minute round retries once the drive goes idle.  Log and skip
 /// instead of surfacing a hard failure.
-fn evacuate_element(conn: &Connection, library_id: i64, element: i32) -> io::Result<()> {
+fn evacuate_element(
+    conn: &Connection,
+    library_id: i64,
+    element: i32,
+    num_slots: i32,
+    num_drives: i32,
+) -> io::Result<()> {
     match kernel_elem_remove(conn, library_id, element) {
         Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::ENODEV) => Ok(()),
@@ -574,7 +582,12 @@ fn evacuate_element(conn: &Connection, library_id: i64, element: i32) -> io::Res
             if e.raw_os_error() == Some(libc::ENOTTY) || e.raw_os_error() == Some(libc::EINVAL) =>
         {
             if let Some(mail) = first_empty_mailslot(conn, library_id) {
-                kernel_move_medium(conn, library_id, element, db_mailslot_to_element(mail))
+                kernel_move_medium(
+                    conn,
+                    library_id,
+                    element,
+                    db_mailslot_to_element(mail, num_slots, num_drives),
+                )
             } else {
                 Err(e)
             }
@@ -592,7 +605,8 @@ pub(crate) fn evacuate_tape_from_changer(
     let kernel = kernel_inventory_snapshot(conn, library_id)?;
     if let Some(loc) = kernel.locations.get(tape_name) {
         let elem = loc.to_element(kernel.num_slots, kernel.num_drives);
-        evacuate_element(conn, library_id, elem).map_err(VtlError::IoError)?;
+        evacuate_element(conn, library_id, elem, kernel.num_slots, kernel.num_drives)
+            .map_err(VtlError::IoError)?;
     }
     Ok(())
 }
@@ -1043,7 +1057,9 @@ mod tests {
 
     #[test]
     fn mailslot_element_map() {
-        assert_eq!(super::db_mailslot_to_element(100), 2000);
-        assert_eq!(super::db_mailslot_to_element(103), 2003);
+        // Kernel IE base = num_slots + num_drives + 1 (contiguous SMC-3).
+        // e.g. 9 slots + 2 drives: mail0 → 12, mail3 → 15.
+        assert_eq!(super::db_mailslot_to_element(100, 9, 2), 12);
+        assert_eq!(super::db_mailslot_to_element(103, 9, 2), 15);
     }
 }

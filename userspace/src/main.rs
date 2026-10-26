@@ -5188,19 +5188,35 @@ fn eject_tape(slot: i32) -> Result<i32, VtlError> {
     )?;
 
     if robot_sync::robot_ioctl_enabled() {
-        let dst = robot_sync::db_mailslot_to_element(mailslot);
-        if let Err(e) = robot_sync::kernel_move_medium(&conn, library_id, slot, dst) {
-            if robot_sync::is_kernel_busy(&e) {
-                // N4: R2 busy gate — deferred, not failed.
+        // The kernel IE element base is geometry-dependent
+        // (num_slots + num_drives + 1); the old fixed 2000-base mapping
+        // predates the contiguous SCSI layout and is rejected by the
+        // kernel with -EINVAL. Take geometry from the kernel snapshot.
+        match robot_sync::kernel_inventory_snapshot(&conn, library_id) {
+            Ok(k) => {
+                let dst =
+                    robot_sync::db_mailslot_to_element(mailslot, k.num_slots, k.num_drives);
+                if let Err(e) = robot_sync::kernel_move_medium(&conn, library_id, slot, dst) {
+                    if robot_sync::is_kernel_busy(&e) {
+                        // N4: R2 busy gate — deferred, not failed.
+                        println!(
+                            "note: changer has recent drive I/O — eject recorded in database and will be applied by the next robot sync round"
+                        );
+                        log_message(&format!(
+                            "kernel eject deferred by busy gate (slot {}): {}",
+                            slot, e
+                        ));
+                    } else {
+                        robot_sync::warn_kernel_sync_failed("eject", &e);
+                    }
+                }
+            }
+            Err(e) => {
                 println!(
-                    "note: changer has recent drive I/O — eject recorded in database and will be applied by the next robot sync round"
+                    "Warning: database updated but kernel eject deferred: kernel inventory snapshot failed ({})",
+                    e
                 );
-                log_message(&format!(
-                    "kernel eject deferred by busy gate (slot {}): {}",
-                    slot, e
-                ));
-            } else {
-                robot_sync::warn_kernel_sync_failed("eject", &e);
+                log_message(&format!("kernel eject deferred: inventory snapshot failed: {}", e));
             }
         }
     }
