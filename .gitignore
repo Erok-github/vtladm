@@ -16,6 +16,10 @@
 .DS_Store
 Thumbs.db
 
+# Python caches from local test scripts
+__pycache__/
+*.pyc
+
 # External files
 *.rpm
 

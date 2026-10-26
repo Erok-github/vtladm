@@ -360,9 +360,11 @@ else
   echo "NOTE: Vue3 web UI not built — will use legacy HTML pages (run: cd userspace/web && npm run build)"
 fi
 
-# packaging helpers
+# packaging helpers (strip CRLF at install time — these must be runnable
+# shebang scripts; a stray \r breaks both shell and systemd ExecStart)
 for _f in vtl-kernelctl vtladm-web-serve vtl-link-kernel-tapes; do
   install -m 0755 "$ROOT/packaging/sbin/$_f" "$PREFIX/sbin/$_f"
+  sed -i "s/\r$//" "$PREFIX/sbin/$_f" 2>/dev/null || true
 done
 if [ -f "$ROOT/uninstall.sh" ]; then
   install -m 0755 "$ROOT/uninstall.sh" "$PREFIX/sbin/vtl-uninstall"
