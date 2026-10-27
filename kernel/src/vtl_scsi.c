@@ -2112,14 +2112,15 @@ static int vtl_handle_log_sense(struct scsi_cmnd *cmd, struct vtl_drive *drv)
         break;
 
     case 0x31:
-        /* N2: Tape Capacity log page (SSC-3 / IBM LTO GA32-0928).  Parameter
-         * 0x0000 = main partition remaining capacity, 0x0001 = main partition
-         * maximum capacity, 4-byte binary values in MiB — same layout as real
-         * LTO drives and mhvtl's TapeCapacity_pg.  Backup software (e.g.
-         * TapeCapacityReader) probes this page as the first capacity source
-         * and parses sg_logs' decoded field names; without the exact layout
-         * (binary FORMAT + MiB + 4-byte params) the fields are absent from
-         * sg_logs output and they fall back to slower sources. */
+        /* N2: Tape Capacity log page (SSC-3 / IBM LTO GA32-0928).
+         * Parameter codes 0x0001 (remaining) / 0x0003 (maximum), 4-byte
+         * binary values in MiB — the exact code assignments sg3_utils'
+         * show_tape_capacity_page() decodes and real LTO drives emit.
+         * Backup software (e.g. TapeCapacityReader) probes this page as
+         * the first capacity source and parses sg_logs' decoded field
+         * names; without the exact layout (binary FORMAT + MiB + correct
+         * parameter codes) the fields are absent from sg_logs output and
+         * they fall back to slower sources. */
         mutex_lock(&drv->lock);
         if (!drv->loaded_tape) {
             mutex_unlock(&drv->lock);
@@ -2138,9 +2139,18 @@ static int vtl_handle_log_sense(struct scsi_cmnd *cmd, struct vtl_drive *drv)
             mutex_unlock(&tp->lock);
             mutex_unlock(&drv->lock);
 
+            /* Parameter codes per IBM GA32-0928-07 Table (tape capacity
+             * page) and sg3_utils sg_logs_vendor.c show_tape_capacity_page:
+             *   0x0001 = Main partition remaining capacity
+             *   0x0003 = Main partition maximum capacity
+             * (0x0002/0x0004 are the alternate-partition pair; 0x0000 is
+             * not assigned — an earlier revision sent 0x0000/0x0001,
+             * which sg_logs reported as "unknown parameter code" and
+             * "remaining capacity" respectively, i.e. the maximum was
+             * mislabelled as remaining.) */
             off = vtl_log_write_page_hdr(buf, 0x31, 2 * (4 + 4));
-            off += vtl_log_write_param_u32(buf + off, 0x0000, remaining);
-            off += vtl_log_write_param_u32(buf + off, 0x0001, maximum);
+            off += vtl_log_write_param_u32(buf + off, 0x0001, remaining);
+            off += vtl_log_write_param_u32(buf + off, 0x0003, maximum);
         }
         break;
 
