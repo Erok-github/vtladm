@@ -1962,19 +1962,24 @@ static int vtl_log_write_param(u8 *buf, u16 param_code, u8 param_len)
     /* Parameter code (big-endian) */
     buf[0] = (param_code >> 8) & 0xff;
     buf[1] = param_code & 0xff;
-    /* DU=0, TSD=0, ETC=0, TMC=0, LP=0, LBIN=1 */
-    buf[2] = 0x02;
+    /* Byte 2: DU=0, DS=0, TSD=0, ETC=0, TMC=0, FORMAT=00b (binary).
+     * FORMAT=00b is what SPC-4 7.3 defines for binary counters/capacities
+     * and what sg_logs decodes into named numeric fields (e.g. the Tape
+     * Capacity page); any other FORMAT makes sg_logs fall back to ASCII
+     * interpretation and the capacity fields disappear from its output. */
+    buf[2] = 0x00;
     buf[3] = param_len;
     return 4 + param_len;
 }
 
-/* Same, with an 8-byte big-endian binary value (log parameters that carry
- * counters/capacities, e.g. the Tape Capacity page 0x31). */
-static int vtl_log_write_param_u64(u8 *buf, u16 param_code, u64 val)
+/* Same, with a 4-byte big-endian binary value (SSC log parameters such as
+ * the Tape Capacity page 0x31 report 4-byte values in MiB, per IBM LTO
+ * SCSI Reference GA32-0928 and mhvtl's TapeCapacity_pg). */
+static int vtl_log_write_param_u32(u8 *buf, u16 param_code, u32 val)
 {
-    int n = vtl_log_write_param(buf, param_code, 8);
+    int n = vtl_log_write_param(buf, param_code, 4);
 
-    vtl_put_be64(val, buf + 4);
+    vtl_put_be32(val, buf + 4);
     return n;
 }
 
@@ -2082,11 +2087,14 @@ static int vtl_handle_log_sense(struct scsi_cmnd *cmd, struct vtl_drive *drv)
         break;
 
     case 0x31:
-        /* N2: Tape Capacity log page (SSC-3).  Parameter 0x0000 = remaining
-         * capacity, 0x0001 = maximum capacity, 8-byte binary values in
-         * KiB.  Backup software (e.g. TapeCapacityReader) probes this page
-         * as the first capacity source; without it they fall back to
-         * slower/less reliable sources. */
+        /* N2: Tape Capacity log page (SSC-3 / IBM LTO GA32-0928).  Parameter
+         * 0x0000 = main partition remaining capacity, 0x0001 = main partition
+         * maximum capacity, 4-byte binary values in MiB — same layout as real
+         * LTO drives and mhvtl's TapeCapacity_pg.  Backup software (e.g.
+         * TapeCapacityReader) probes this page as the first capacity source
+         * and parses sg_logs' decoded field names; without the exact layout
+         * (binary FORMAT + MiB + 4-byte params) the fields are absent from
+         * sg_logs output and they fall back to slower sources. */
         mutex_lock(&drv->lock);
         if (!drv->loaded_tape) {
             mutex_unlock(&drv->lock);
@@ -2096,18 +2104,18 @@ static int vtl_handle_log_sense(struct scsi_cmnd *cmd, struct vtl_drive *drv)
         }
         {
             struct vtl_tape *tp = drv->loaded_tape;
-            u64 remaining, maximum;
+            u32 remaining, maximum;
 
             mutex_lock(&tp->lock);
-            maximum = tp->meta.capacity / 1024;
+            maximum = (u32)(tp->meta.capacity >> 20);
             remaining = (tp->meta.capacity > tp->meta.used)
-                        ? (tp->meta.capacity - tp->meta.used) / 1024 : 0;
+                        ? (u32)((tp->meta.capacity - tp->meta.used) >> 20) : 0;
             mutex_unlock(&tp->lock);
             mutex_unlock(&drv->lock);
 
-            off = vtl_log_write_page_hdr(buf, 0x31, 2 * (4 + 8));
-            off += vtl_log_write_param_u64(buf + off, 0x0000, remaining);
-            off += vtl_log_write_param_u64(buf + off, 0x0001, maximum);
+            off = vtl_log_write_page_hdr(buf, 0x31, 2 * (4 + 4));
+            off += vtl_log_write_param_u32(buf + off, 0x0000, remaining);
+            off += vtl_log_write_param_u32(buf + off, 0x0001, maximum);
         }
         break;
 
