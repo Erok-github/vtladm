@@ -1998,7 +1998,6 @@ static int vtl_handle_log_sense(struct scsi_cmnd *cmd, struct vtl_drive *drv)
     unsigned int alloc = vtl_log_sense_alloc_len(cmd);
     u8 *buf;
     u16 out_len;
-    unsigned int z;
     u64 log_bytes_read = 0;
     u64 log_bytes_written = 0;
     int off;
@@ -2006,14 +2005,22 @@ static int vtl_handle_log_sense(struct scsi_cmnd *cmd, struct vtl_drive *drv)
     if (alloc == 0)
         return SAM_STAT_GOOD;
 
-    z = min_t(unsigned int, alloc, 512U);
-    buf = vtl_xfer_buf_alloc(z);
+    /* The staging buffer must hold a full worst-case page (0x0C = 100
+     * bytes) regardless of the initiator's allocation length.  Sizing it
+     * from alloc let a small CDB allocation length (as low as 4 bytes →
+     * kmalloc-8 slot) underlie the fixed-size page writers below and
+     * overflow the kmalloc redzone — this is the "kmalloc-8 Right Redzone
+     * overwritten" caught by slub_debug=FZPU during archive/restore.
+     * SPC-4 7.3: when the allocation length is shorter than the page, the
+     * device server truncates the transfer to the allocation length, so
+     * the copy-out clamps to min(out_len, alloc). */
+    buf = vtl_xfer_buf_alloc(512U);
     if (!buf) {
         vtl_scsi_staging_oom(cmd, &drv->sense);
         return SAM_STAT_CHECK_CONDITION;
     }
 
-    memset(buf, 0, z);
+    memset(buf, 0, 512U);
     off = 0;
 
     switch (page) {
@@ -2126,7 +2133,7 @@ static int vtl_handle_log_sense(struct scsi_cmnd *cmd, struct vtl_drive *drv)
     }
 
     out_len = (u16)off;
-    if (vtl_scsi_copy_to_sg(cmd, buf, min_t(unsigned int, out_len, z), &drv->sense)) {
+    if (vtl_scsi_copy_to_sg(cmd, buf, min_t(unsigned int, out_len, alloc), &drv->sense)) {
         vtl_xfer_buf_free(buf);
         return SAM_STAT_CHECK_CONDITION;
     }
