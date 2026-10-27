@@ -1168,7 +1168,15 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
          * branch turns the negative remainder into -ENOMEM
          * (st-v66.c:1986-1998) — a loud, correctable error, replacing
          * the old silent truncation that shifted the whole stream.
-         * (*actual carries the full record size.) */
+         * (*actual carries the full record size.)
+         * SILI is deliberately NOT honoured here: mhvtl/IBM return GOOD
+         * with data truncated to the request length when SILI=1 and the
+         * mode BLOCK LENGTH is zero, but our read path never copies an
+         * oversized record into the staging buffer (P0-1: no silent
+         * truncation), so nothing can be returned — the loud ILI frame
+         * is the only safe answer.  The frame itself (0/00/00 + ILI) is
+         * the ASC-mandated incorrect-length indication (SSC-3; IBM
+         * GA32-0928-07 Table 17; mhvtl mk_sense_short_block()). */
         u32 req_len = blocks * block_len;
         s32 diff = (s32)req_len - (s32)actual;
 
@@ -1244,15 +1252,25 @@ static int vtl_handle_read(struct scsi_cmnd *cmd, struct vtl_drive *drv, u8 op)
         scsi_set_resid(cmd, diff);
 
         if ((cmd->cmnd[1] & 0x01) == 0) {   /* READ(6) fixed bit: variable mode */
-            vtl_fail_cmd(cmd, &drv->sense, 0, 0x00, 0x00);
-            cmd->sense_buffer[0] |= 0x80;      /* VALID: info field present */
-            cmd->sense_buffer[2] |= 0x20;      /* ILI */
-            cmd->sense_buffer[3] = (diff >> 24) & 0xff;
-            cmd->sense_buffer[4] = (diff >> 16) & 0xff;
-            cmd->sense_buffer[5] = (diff >> 8) & 0xff;
-            cmd->sense_buffer[6] = diff & 0xff;
-            vtl_xfer_buf_free(buffer);
-            return SAM_STAT_CHECK_CONDITION;
+            /* SILI (READ(6) CDB byte 1 bit 1): SSC-3 + IBM GA32-0928-07
+             * Table 17 — with SILI=1 a variable-mode underlength read
+             * returns GOOD (resid carries the shortfall), only SILI=0
+             * reports the ILI frame.  Same rule as mhvtl readBlock().
+             * SILI exists only in READ(6); for READ(10/12/16) byte 1 bit 1
+             * is FIXED and never reaches this branch, so op == READ_6 is
+             * an exact gate.  Linux st sends SILI=0, so st users are
+             * unchanged; only raw sg_raw/SILI=1 initiators see GOOD. */
+            if (op != READ_6 || !(cmd->cmnd[1] & 0x02)) {
+                vtl_fail_cmd(cmd, &drv->sense, 0, 0x00, 0x00);
+                cmd->sense_buffer[0] |= 0x80;      /* VALID: info field present */
+                cmd->sense_buffer[2] |= 0x20;      /* ILI */
+                cmd->sense_buffer[3] = (diff >> 24) & 0xff;
+                cmd->sense_buffer[4] = (diff >> 16) & 0xff;
+                cmd->sense_buffer[5] = (diff >> 8) & 0xff;
+                cmd->sense_buffer[6] = diff & 0xff;
+                vtl_xfer_buf_free(buffer);
+                return SAM_STAT_CHECK_CONDITION;
+            }
         }
         vtl_xfer_buf_free(buffer);
         return SAM_STAT_GOOD;
