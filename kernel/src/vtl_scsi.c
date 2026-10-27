@@ -2586,7 +2586,12 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
              * N1: include the framed sense and the media position so a
              * retry storm can be classified from the log alone (EOD vs
              * filemark vs ILI vs genuine I/O error), plus the consecutive
-             * failure streak to show it is a loop, not a one-off. */
+             * failure streak to show it is a loop, not a one-off.
+             * The %02x triple only prints sense key/ASC/ASCQ, so a bare
+             * 00/00/00 is ambiguous between a filemark frame and an ILI
+             * oversized-record frame (the informative FILEMARK/EOM/ILI
+             * flag bits live in byte 2 and were masked off) — print them
+             * explicitly. */
             drv->fail_streak++;
             mutex_lock(&drv->lock);
             if (drv->loaded_tape) {
@@ -2595,10 +2600,14 @@ int vtl_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
                 mutex_unlock(&drv->loaded_tape->lock);
             }
             mutex_unlock(&drv->lock);
-            pr_info_ratelimited("VTL: tape LUN%u op=0x%02x result=0x%x sense=%02x/%02x/%02x pos=%llu streak=%u\n",
+            pr_info_ratelimited("VTL: tape LUN%u op=0x%02x result=0x%x sense=%02x/%02x/%02x%s%s%s%s pos=%llu streak=%u\n",
                 lun, cdb[0], result,
                 cmd->sense_buffer[2] & 0x0f,
                 cmd->sense_buffer[12], cmd->sense_buffer[13],
+                cmd->sense_buffer[2] & 0x80 ? " FILEMARK" : "",
+                cmd->sense_buffer[2] & 0x40 ? " EOM" : "",
+                cmd->sense_buffer[2] & 0x20 ? " ILI" : "",
+                cmd->sense_buffer[0] & 0x80 ? " VALID-INFO" : "",
                 pos, drv->fail_streak);
         }
     }
