@@ -1559,7 +1559,18 @@ int vtl_tape_space(struct vtl_drive *drv, int code, int count)
     case 1: {
         /* Forward over filemarks: skip past the N-th filemark after current pos.
          * SCSI SSC standard: after SPACE, the logical position is AFTER the
-         * filemark, not on it — next read returns data, not filemark-hit. */
+         * filemark, not on it — next read returns data, not filemark-hit.
+         *
+         * mhVTL-aligned leniency (2026-10-27): when fewer than count
+         * filemarks remain before end-of-data, clamp to EOD and report
+         * SUCCESS.  SSC-strict drives answer CHECK CONDITION (NO SENSE
+         * 0/0/5 + EOM) here, and st turns any SPACE error into an mt
+         * ioctl failure — but backup suites built against mhVTL (e.g.
+         * tape_tool's archive flow, "mt fsf 1" at session start on a
+         * blank or filemark-less tape) treat that failure as fatal.
+         * st's eof bookkeeping (ST_FM set on MTFSF success, ST_EOM_OK
+         * via the EOM flag on error paths) does not depend on the
+         * strict frame. */
         u32 i;
         int found = 0;
 
@@ -1571,15 +1582,15 @@ int vtl_tape_space(struct vtl_drive *drv, int code, int count)
                 }
             }
         }
-        if (found < count) {
+        if (found < count)
             tape->position = tape->meta.used;
-            ret = -ENODATA;
-        }
         drv->at_filemark = false;
         break;
     }
     case 2: {
-        /* Backward over filemarks: move before the N-th filemark before current pos */
+        /* Backward over filemarks: move before the N-th filemark before current pos.
+         * Same mhVTL-aligned leniency as case 1: running out of filemarks
+         * clamps to BOT and reports SUCCESS instead of CHECK CONDITION. */
         int remaining = (count < 0) ? -count : count;
         int matched = 0;
 
@@ -1594,11 +1605,9 @@ int vtl_tape_space(struct vtl_drive *drv, int code, int count)
                 }
                 idx--;
             }
-            if (matched < remaining) {
-                tape->position = 0;
-                ret = -ENODATA;
-            }
         }
+        if (matched < remaining)
+            tape->position = 0;
         drv->at_filemark = false;
         break;
     }
