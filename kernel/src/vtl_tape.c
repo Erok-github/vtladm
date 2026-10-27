@@ -1259,28 +1259,15 @@ int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape,
         return 0;
 
     saved_used = drv->rec_buf_used;
-    pos = drv->rec_block_start;
-    data_start = pos + VTL_REC_HEADER_SIZE;
+    data_start = drv->rec_block_start + VTL_REC_HEADER_SIZE;
 
-    vtl_put_be32(VTL_REC_BLOCK_MAGIC, hdr);
-    vtl_put_be16(drv->rec_count, hdr + 4);
-    hdr[6] = 0; hdr[7] = 0;
-
-    ret = kernel_write(tape->file, hdr, VTL_REC_HEADER_SIZE, &pos);
-    if (ret != VTL_REC_HEADER_SIZE) {
-        /* position/meta.used are not advanced, so a retained buffer is
-         * safely retried at the same offset (overwriting the partial
-         * header); a dropped buffer leaves nothing stale behind. */
-        if (!retain) {
-            drv->rec_buf_used = 0;
-            drv->rec_count = 0;
-        }
-        /* N3: preserve the errno like the data-area path (W1) — a full
-         * backing fs must surface as -ENOSPC -> EOM early-warning sense,
-         * not be folded into -EIO -> MEDIUM_ERROR. */
-        return ret < 0 ? ret : -ENOSPC;
-    }
-
+    /* Hardening: data area FIRST, block header LAST.  The header is what
+     * publishes the block to readers (VLBK magic + record count); landing
+     * it only after the data means a crash or I/O error can never leave a
+     * header on disk that claims records whose bytes never arrived (the
+     * old header-first order could, when the data-area write failed after
+     * the header had already landed).  A data area without a valid header
+     * reads as end-of-data — the correct pre-commit state. */
     pos = data_start;
     ret = kernel_write(tape->file, drv->rec_buf, saved_used, &pos);
     if (ret < 0) {
@@ -1298,8 +1285,8 @@ int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape,
 
     complete = saved_used;
     if (ret != (ssize_t)saved_used) {
-        /* Short write: find the last record that fully made it to the
-         * medium and rewrite the block header with the true count, so
+        /* Short write: count only the records that fully made it to the
+         * medium; the header written below carries that true count, so
          * records for which the initiator already saw GOOD are not
          * silently discarded. */
         u32 lim = (u32)ret;
@@ -1314,14 +1301,46 @@ int vtl_rec_flush(struct vtl_drive *drv, struct vtl_tape *tape,
             nfull++;
         }
 
-        pos = drv->rec_block_start;
-        vtl_put_be16((u16)nfull, hdr + 4);
-        ret = kernel_write(tape->file, hdr, VTL_REC_HEADER_SIZE, &pos);
-        if (ret != VTL_REC_HEADER_SIZE)
-            pr_warn("VTL: rec block header fixup failed (%zd) on %s\n",
-                ret, tape->name);
-
         complete = off;
+    }
+
+    /* Publish the block (single header write, always with the true
+     * record count). */
+    if (complete == 0) {
+        /* Not a single record made it: publish nothing (a zero-count
+         * VLBK header would confuse the reader's block walk).  A retained
+         * buffer is retried at the same block start — rewriting the data
+         * area is idempotent; the stray prefix bytes are beyond
+         * meta.used and unreachable either way. */
+        if (!retain) {
+            drv->rec_buf_used = 0;
+            drv->rec_count = 0;
+        }
+        if (vtl_tape_sync_data(tape, true) < 0)
+            pr_warn("VTL: failed to sync %s\n", tape->name);
+        return -ENOSPC;
+    }
+
+    vtl_put_be32(VTL_REC_BLOCK_MAGIC, hdr);
+    vtl_put_be16((u16)(complete == saved_used ? drv->rec_count : nfull),
+             hdr + 4);
+    hdr[6] = 0; hdr[7] = 0;
+
+    pos = drv->rec_block_start;
+    ret = kernel_write(tape->file, hdr, VTL_REC_HEADER_SIZE, &pos);
+    if (ret != VTL_REC_HEADER_SIZE) {
+        /* The data bytes may be on disk but the block has no valid
+         * header, so readers stop at the previous boundary; a retained
+         * buffer is safely retried at the same offsets (the data rewrite
+         * is idempotent).  position/meta.used are not advanced either. */
+        if (!retain) {
+            drv->rec_buf_used = 0;
+            drv->rec_count = 0;
+        }
+        /* N3: preserve the errno like the data-area path (W1) — a full
+         * backing fs must surface as -ENOSPC -> EOM early-warning sense,
+         * not be folded into -EIO -> MEDIUM_ERROR. */
+        return ret < 0 ? ret : -ENOSPC;
     }
 
     tape->position = data_start + (loff_t)complete;
@@ -1435,18 +1454,25 @@ int vtl_tape_write(struct vtl_drive *drv, const u8 *buffer, u32 len, u32 *actual
         shdr[6] = 0; shdr[7] = 0;
         vtl_put_be32(to_write, shdr + 8);
 
-        ret = kernel_write(tape->file, shdr, sizeof(shdr), &pos);
-        if (ret == (ssize_t)sizeof(shdr))
-            ret = kernel_write(tape->file, buffer, to_write, &pos);
+        /* Same data-before-header hardening as vtl_rec_flush: the record
+         * payload lands first, the VLBK header (which publishes the block
+         * to readers) is written last, so an interrupted write cannot
+         * leave a header claiming a record whose bytes never arrived. */
+        pos = tape->position + sizeof(shdr);
+        ret = kernel_write(tape->file, buffer, to_write, &pos);
+        if (ret == (ssize_t)to_write) {
+            pos = tape->position;
+            ret = kernel_write(tape->file, shdr, sizeof(shdr), &pos);
+        }
         if (ret < 0) {
             /* W1: keep kernel_write's errno (e.g. -ENOSPC) for the
              * EOM early-warning mapping in vtl_handle_write. */
-        } else if (ret != (ssize_t)to_write) {
+        } else if (ret != (ssize_t)sizeof(shdr)) {
             ret = -ENOSPC;
         } else {
-            tape->position = pos;
-            if (pos > tape->meta.used) {
-                tape->meta.used = pos;
+            tape->position += sizeof(shdr) + (loff_t)to_write;
+            if (tape->position > tape->meta.used) {
+                tape->meta.used = tape->position;
                 /* Sidecar goes out with the next throttled/forced
                  * data fsync (vtl_tape_sync_data), never ahead of it. */
                 tape->meta_used_dirty = true;
